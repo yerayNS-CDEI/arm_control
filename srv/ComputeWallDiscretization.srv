@@ -1,5 +1,16 @@
-geometry_msgs/Pose[] wall_points
+# Request
+geometry_msgs/Point start_point
+geometry_msgs/Point end_point
+float32 robot_amplitude_range
+float32 robot_height_range
+float32 sensors_amplitude_range
+float32 sensors_height_range
+float32 resolution
+int32 target_i
+int32 target_j
+
 ---
+# Response
 geometry_msgs/Pose[] wall_panels_centers
 geometry_msgs/Pose[] wall_panels_vertices
 geometry_msgs/Pose[] panel_cells_centers

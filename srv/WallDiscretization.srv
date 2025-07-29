@@ -1,0 +1,7 @@
+geometry_msgs/Pose[] wall_points
+---
+geometry_msgs/Pose[] wall_panels_centers
+geometry_msgs/Pose[] wall_panels_vertices
+geometry_msgs/Pose[] panel_cells_centers
+geometry_msgs/Pose[] panel_cells_vertices
+bool success
