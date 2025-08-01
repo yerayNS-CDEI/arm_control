@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
 from robotic_arm_planner_interfaces.srv import ComputeBasePlacement
 from geometry_msgs.msg import Pose
-
+from ament_index_python.packages import get_package_share_directory
 
 class BasePlacementNode(Node):
     def __init__(self):
@@ -26,7 +26,7 @@ class BasePlacementNode(Node):
         self.area_size = self.get_parameter('area_size').value
         self.cart_min = self.get_parameter('cart_min').value
 
-        self.base_path = os.path.join(os.path.expanduser('~'), 'ws_reachability', 'rm4d', 'experiment_scripts')
+        self.base_path = os.path.join(get_package_share_directory('robotic_arm_planner'), 'resource')
 
         self.get_logger().info("Base placement node ready.")
 
@@ -171,6 +171,7 @@ class BasePlacementNode(Node):
         min_idx = np.min(all_voxels, axis=0)
         max_idx = np.max(all_voxels, axis=0)
         self.get_logger().info(f"[DEBUG] DB index range: X:{min_idx[0]}-{max_idx[0]}, Y:{min_idx[1]}-{max_idx[1]}, Z:{min_idx[2]}-{max_idx[2]}")
+        input("The reachability database has been loaded. Press Enter to load the orientations database.")
         with open(orientations_path, 'rb') as f:
             orientations = pickle.load(f)
             self.get_logger().info('[INFO] Orientations loaded.')

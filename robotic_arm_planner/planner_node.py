@@ -6,7 +6,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from std_msgs.msg import Float64MultiArray
-
+from ament_index_python.packages import get_package_share_directory
 import numpy as np
 
 # Import your planning functions
@@ -23,15 +23,9 @@ class PlannerNode(Node):
         self.filename = "reachability_map_27_fused"
         fn_npy = f"{self.filename}.npy"
         self.grid_size = int(self.filename.split('_')[2])
-        base_home = os.path.expanduser('~')
-        self.reachability_map_fn = os.path.join(
-            base_home,
-            'ws_Robotic_Arm',
-            'src',
-            'robotic_arm_planner',
-            'resource',
-            fn_npy
-        )
+        self.base_path = os.path.join(get_package_share_directory('robotic_arm_planner'), 'resource')
+        self.reachability_map_fn=os.path.join(self.base_path, fn_npy)
+
         self.get_logger().info(f"Loading reachability map from: {self.reachability_map_fn}")
         self.reachability_map = np.load(self.reachability_map_fn, allow_pickle=True).item()
         self.radius = 1.35  # For UR10e (hardcoded!!)
