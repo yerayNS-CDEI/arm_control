@@ -8,6 +8,7 @@ find_package(geometry_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/ComputeBasePlacement.srv"
   "srv/ComputeWallDiscretization.srv"
+  "srv/OptimalBase.srv"
   DEPENDENCIES geometry_msgs
 )
 
