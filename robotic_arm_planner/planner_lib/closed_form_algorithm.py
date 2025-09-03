@@ -186,7 +186,7 @@ def closed_form_algorithm(goal_matrix, q_current, type):
             return q_unwrapped
 
         # print('All solutions: ',sol)
-        valid_rows = ~np.isnan(sol).any(axis=1)  # Fila válida si no hay ningún nan
+        valid_rows = ~np.isnan(sol).any(axis=1)  # Valid row if there is no nan value
         if np.any(valid_rows):
             diffs = np.array([
                 np.sqrt(np.sum(weights * np.abs(np.arctan2(np.sin(q_current - sol[i]), np.cos(q_current - sol[i])))))
@@ -201,7 +201,7 @@ def closed_form_algorithm(goal_matrix, q_current, type):
             return best_sol
         else:
             print('No feasible solution found!')
-            return np.full(6, np.nan)  # No soluciones válidas encontradas
+            return np.full(6, np.nan)  # Not valid solutions found
 
     #####################################
     ### Closed form Algorithm 2 (FSM) ###

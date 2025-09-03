@@ -48,11 +48,11 @@ class PlannerNode(Node):
         self.z_vals = np.linspace(z_min, z_max, len(self.z_levels))  # assumes uniform spacing
 
         # Create subscriber and publishers
-        self.create_subscription(Pose, '/goal_pose', self.goal_callback, 10)
-        self.create_subscription(JointState, "/joint_states", self.joint_state_callback, 10)
-        self.create_subscription(Bool, "/execution_status", self.execution_status_callback, 10)
-        self.create_subscription(Pose, "/end_effector_pose", self.end_effector_pose_callback, 10)
-        self.trajectory_pub = self.create_publisher(JointTrajectory, '/planned_trajectory', 10)
+        self.create_subscription(Pose, 'goal_pose', self.goal_callback, 10)
+        self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
+        self.create_subscription(Bool, "execution_status", self.execution_status_callback, 10)
+        self.create_subscription(Pose, "end_effector_pose", self.end_effector_pose_callback, 10)
+        self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
 
         self.get_logger().info("Planner node initialized and waiting for goal poses...")
 
@@ -135,24 +135,37 @@ class PlannerNode(Node):
             (Y >= y0 - half) & (Y <= y0 + half) &
             (Z >= z0 - half) & (Z <= z0 + half)
         )
-        occupancy_grid[cube_mask] = 1
+        # occupancy_grid[cube_mask] = 1
 
         # Define sphere parameters
-        sphere_center = [(-0.3, 0.0, 0.4), (0.3, 0.5, 0.4)]
-        sphere_radius = [0.3, 0.3]
+        # sphere_center = [(-0.3, 0.0, 0.4), (0.3, 0.5, 0.4)]
+        # sphere_radius = [0.3, 0.3]
+        sphere_center = [(0.0, 0.0, 0.0), (0.0, 0.0, 0.15), (0.0, 0.0, 0.3), (0.0, 0.0, 0.45), (0.0, 0.0, 0.60), (0.0, 0.0, 0.75), (0.0, 0.0, 0.90)]
+        sphere_radius = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
 
         # Create mask for sphere
         for i in range(len(sphere_radius)):
             dist_squared = (X - sphere_center[i][0])**2 + (Y - sphere_center[i][1])**2 + (Z - sphere_center[i][2])**2
             sphere_mask = dist_squared <= sphere_radius[i]**2
-            occupancy_grid[sphere_mask] = 1
+            # occupancy_grid[sphere_mask] = 1
+
+        # Define cilinder parameters
+        cyl_center_xy = (0.0, 0.0)   # (xc, yc)
+        cyl_radius    = 0.3
+        z_min, z_max  = 0.0, 1.3
+
+        # Create mask for cilinder
+        cyl_mask = (
+            ((X - cyl_center_xy[0])**2 + (Y - cyl_center_xy[1])**2) <= cyl_radius**2
+        ) & (Z >= z_min) & (Z <= z_max)
+        occupancy_grid[cyl_mask] = 1
 
         # Define the dilation distance (in meters)
-        dilation_distance = 0.4  # Enlarge obstacles by 0.X meters in all directions
+        dilation_distance = 0.001  # Enlarge obstacles by 0.X meters in all directions
 
         # Apply dilation
         occupancy_grid_dilated = dilate_obstacles(occupancy_grid, dilation_distance, self.x_vals)
-        occupancy_grid_dilated = np.zeros(self.grid_shape, dtype=np.uint8)      # Eliminating all obstacles for now
+        # occupancy_grid_dilated = np.zeros(self.grid_shape, dtype=np.uint8)      # Eliminating all obstacles for now
 
         path = find_path(occupancy_grid_dilated, start_idx, goal_idx)
         self.get_logger().info(f"Found path with length {len(path)}")
@@ -197,7 +210,7 @@ class PlannerNode(Node):
             T = create_pose_matrix(path_world[i], interp_rot_matrices[i])
             q_new = closed_form_algorithm(T, q_current, type=0)
             if np.any(np.isnan(q_new)):
-                self.get_logger().error(f"Invalid IK at step {i}: pose = {T[:3, 3]}. Path wolrd = {path_world[i]}")
+                self.get_logger().error(f"Invalid IK at step {i}: pose = {T[:3, 3]}. Path world = {path_world[i]}")
                 self.emergency_stop = True 
             all_joint_values.append(q_new)
             all_joint_values_print.append(q_new)
