@@ -152,7 +152,7 @@ class WallDiscretizer(Node):
                         response.panel_cells_vertices.append(to_pose(v))
 
             response.success = True
-            self.get_logger().info(f"Wall of size {wall_length:.2f} × {wall_height:.2f} m divided into {len(wall_centers[0])} cols and {len(wall_centers)} rows")
+            self.get_logger().info(f"Wall of size {wall_length:.2f} x {wall_height:.2f} m divided into {len(wall_centers[0])} cols and {len(wall_centers)} rows")
             self.get_logger().info(f"Panel ({request.target_i},{request.target_j}) divided into {len(sensor_centers[0])} cols and {len(sensor_centers)} rows")
 
             return response

@@ -6,6 +6,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from std_msgs.msg import Float64MultiArray
+from visualization_msgs.msg import Marker
 from ament_index_python.packages import get_package_share_directory
 import numpy as np
 
@@ -53,6 +54,7 @@ class PlannerNode(Node):
         self.create_subscription(Bool, "execution_status", self.execution_status_callback, 10)
         self.create_subscription(Pose, "end_effector_pose", self.end_effector_pose_callback, 10)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
+        self.marker_pub = self.create_publisher(Marker, 'obstacle_markers', 10)
 
         self.get_logger().info("Planner node initialized and waiting for goal poses...")
 
@@ -159,6 +161,9 @@ class PlannerNode(Node):
             ((X - cyl_center_xy[0])**2 + (Y - cyl_center_xy[1])**2) <= cyl_radius**2
         ) & (Z >= z_min) & (Z <= z_max)
         occupancy_grid[cyl_mask] = 1
+        
+        # Publish cylinder marker for visualization
+        self.publish_cylinder_marker(cyl_center_xy, cyl_radius, z_min, z_max)
 
         # Define the dilation distance (in meters)
         dilation_distance = 0.001  # Enlarge obstacles by 0.X meters in all directions
@@ -262,6 +267,41 @@ class PlannerNode(Node):
 
         self.trajectory_pub.publish(traj_msg)
         self.get_logger().info("Published planned trajectory.")
+    
+    def publish_cylinder_marker(self, center_xy, radius, z_min, z_max):
+        """Publish a cylinder marker for RViz visualization."""
+        marker = Marker()
+        marker.header.frame_id = "base_link"  # Change to your robot's base frame if different
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "obstacles"
+        marker.id = 0
+        marker.type = Marker.CYLINDER
+        marker.action = Marker.ADD
+        
+        # Position: center of cylinder
+        marker.pose.position.x = center_xy[0]
+        marker.pose.position.y = center_xy[1]
+        marker.pose.position.z = (z_min + z_max) / 2.0
+        marker.pose.orientation.x = 0.0
+        marker.pose.orientation.y = 0.0
+        marker.pose.orientation.z = 0.0
+        marker.pose.orientation.w = 1.0
+        
+        # Scale: diameter and height
+        marker.scale.x = radius * 2.0  # diameter in x
+        marker.scale.y = radius * 2.0  # diameter in y
+        marker.scale.z = z_max - z_min  # height
+        
+        # Color: semi-transparent red
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker.color.a = 0.5  # semi-transparent
+        
+        marker.lifetime.sec = 0  # 0 means it persists until deleted
+        
+        self.marker_pub.publish(marker)
+        self.get_logger().info(f"Published cylinder marker at ({center_xy[0]}, {center_xy[1]}) with radius {radius} and height {z_max - z_min}")
 
 def create_pose_matrix(position, rotation_matrix):
     """Helper to create 4x4 transformation matrix from position and rotation matrix."""
