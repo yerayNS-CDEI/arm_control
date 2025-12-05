@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
-
 import os
+import sys
 import rclpy
 from rclpy.node import Node
 import numpy as np
@@ -9,13 +8,13 @@ import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
 from robotic_arm_planner_interfaces.srv import ComputeBasePlacement
 from geometry_msgs.msg import Pose
-
+from ament_index_python.packages import get_package_share_directory
 
 class BasePlacementNode(Node):
     def __init__(self):
         super().__init__('base_placement_node')
 
-        # Parámetros (si es necesario hacerlos configurables)
+        # Define parameters (in case they need to be modified)
         self.declare_parameter('cart_step', 0.05)
         self.declare_parameter('n_orientations', 20)
         self.declare_parameter('area_size', 1.6 * 2)
@@ -27,14 +26,22 @@ class BasePlacementNode(Node):
         self.area_size = self.get_parameter('area_size').value
         self.cart_min = self.get_parameter('cart_min').value
 
-        self.base_path = os.path.join(os.path.expanduser('~'), 'ws_reachability', 'rm4d', 'experiment_scripts')
+        self.base_path = os.path.join(get_package_share_directory('robotic_arm_planner'), 'resource')
 
-        # Cargar base de datos
+        self.get_logger().info("Base placement node ready.")
+
+        inp = input("Be advised that the following process loads two databases into the computer's memory."
+                    "This process can be resource consuming and crash the computer. Do you want to proceed? [y/n]").strip()
+        if inp != 'y':
+            self.get_logger().info("Aborting process. Node will not start.")
+            rclpy.shutdown()
+            sys.exit(0)
+
+        # Load database
         self.db, self.orientations = self.load_database(
             db_path=os.path.join(self.base_path, f"voxels_data_{self.get_parameter('cart_step').value}_step_{self.get_parameter('n_orientations').value}_orientations.pkl"),
-            orientations_path=os.path.join(self.base_path, "orientations.pkl")
+            orientations_path=os.path.join(self.base_path, f"orientations_{self.get_parameter('n_orientations').value}.pkl")
         )
-
         # self.get_logger().info(f"Some db keys: {list(self.db.keys())[:5]}")
         # self.get_logger().info(f"Example db content: {self.db[list(self.db.keys())[0]]}")
 
@@ -42,7 +49,7 @@ class BasePlacementNode(Node):
         self.srv = self.create_service(ComputeBasePlacement, 'compute_base_placement', self.computeBasePlacementCallback)
         self.get_logger().info("Service 'compute_base_placement' ready.")
         
-        # # Objetivos de ejemplo (esto puede recibir entradas de otros nodos)
+        # # Example objectives (this node can receive inputs from other nodes)
         # self.example_targets = [
         #     (np.array([1.7, 1.6, 0.8]), R.from_euler('xyz', [0, 90, 0], degrees=True).as_matrix()),
         #     (np.array([1.7, 2.0, 0.8]), R.from_euler('xyz', [0, 90, 0], degrees=True).as_matrix()),
@@ -78,7 +85,7 @@ class BasePlacementNode(Node):
                 self.get_logger().error(response.message)
                 return response
 
-            # Convertir poses ROS2 a formato interno (pos, rot matrix)
+            # Convert ROS2 poses to appropriate format (pos, rot matrix)
             example_targets = []
             for pose in request.targets:
                 pos = np.array([pose.position.x, pose.position.y, pose.position.z])
@@ -86,15 +93,15 @@ class BasePlacementNode(Node):
                 rot = R.from_quat(quat).as_matrix()
                 example_targets.append((pos, rot))
 
-            # Crear grid global
+            # Generating global grid
             x_vals, y_vals, _, _ = self.define_global_grid(example_targets, cart_step=self.cart_step, global_size=self.global_size)
 
-            # Crear máscara de obstáculos
+            # Creating obstacles (NEEDS TO be parameterized)
             occupancy_map = np.ones((len(y_vals), len(x_vals)), dtype=np.uint8)
             occupancy_map = self.add_obstacle_by_coords(occupancy_map, x_vals, y_vals, x_min=0.5, y_min=0.5, x_max=1.5, y_max=3.0)
             occupancy_map = self.add_obstacle_by_coords(occupancy_map, x_vals, y_vals, x_min=1.5, y_min=1.5, x_max=2.0, y_max=2.0)
 
-            # Evaluar posiciones de base sobre el grid
+            # Evaluating base positions on grid
             union_map, intersection_map = self.evaluate_base_positions_on_grid(
                 example_targets, self.db, self.orientations,
                 x_vals, y_vals,
@@ -104,16 +111,16 @@ class BasePlacementNode(Node):
                 occupancy_map=occupancy_map
             )
 
-            # # Visualizar resultados
+            # Plotting results
             self.plot_score_map(union_map, x_vals, y_vals, title='Mapa de unión con obstáculos', ee_targets=example_targets, occupancy_map=occupancy_map)
 
-            # Obtener mejores bases por score
+            ## Obtaining best bases by score
             # top_union, max_score_union = self.get_top_bases(intersection_map, x_vals, y_vals, top_n=2)
-            # self.get_logger().info(f"\nMejores bases encontradas (score máximo = {int(max_score_union)}):")
+            # self.get_logger().info(f"\n Best found bases (max score = {int(max_score_union)}):")
             # for i, (x, y) in enumerate(top_union[:2]):
             #     self.get_logger().info(f"B{i+1} → x: {x:.3f} m, y: {y:.3f} m")
 
-            # Base óptima por centrado y distancia
+            # Optimal base by centering and distance
             optimal_base, optimal_score = self.select_optimal_base(intersection_map, x_vals, y_vals,
                                                                 example_targets,
                                                                 min_distance=0.5,
@@ -124,21 +131,15 @@ class BasePlacementNode(Node):
                 response.message = "[ERROR] No valid base position found."
                 self.get_logger().error(response.message)
                 return response
-            
-            # if optimal_base:
-            #     self.get_logger().info(f"\nBase óptima seleccionada:")
-            #     self.get_logger().info(f"→ x: {optimal_base[0]:.3f} m, y: {optimal_base[1]:.3f} m")
-            # else:
-            #     self.get_logger().info("[ERROR] No se encontró ninguna base que cumpla el umbral mínimo de distancia.")
 
-            # Visualizar base óptima
+            # Visualizing optimal base
             self.plot_score_map(intersection_map, x_vals, y_vals,
                         title='Mapa de intersección con obstaculos y con base óptima personalizada',
                         ee_targets=example_targets,
                         top_bases=[optimal_base] if optimal_base else None,
                         occupancy_map=occupancy_map)
     
-            # Convertir resultado a geometry_msgs/Pose
+            # Converting result to geometry_msgs/Pose
             pose = Pose()
             pose.position.x = float(optimal_base[0])  # Asignar las coordenadas de la base
             pose.position.y = float(optimal_base[1])
@@ -149,9 +150,8 @@ class BasePlacementNode(Node):
             response.success = True
             response.message = (
                 f"Computed optimal base with min distance and centering rules. "
-                f"Best base calculated: (x: {pose.position.x:.2f}, y: {pose.position.y:.2f})"
+                f"Best base calculated: (x: {pose.position.x:.2f} m, y: {pose.position.y:.2f} m)"
             )
-
             self.get_logger().info(response.message)
 
         except Exception as e:
@@ -161,7 +161,7 @@ class BasePlacementNode(Node):
 
         return response
 
-    ## Funciones auxiliares
+    ## Auxiliar functions
 
     def load_database(self, db_path, orientations_path):
         with open(db_path, 'rb') as f:
@@ -171,6 +171,7 @@ class BasePlacementNode(Node):
         min_idx = np.min(all_voxels, axis=0)
         max_idx = np.max(all_voxels, axis=0)
         self.get_logger().info(f"[DEBUG] DB index range: X:{min_idx[0]}-{max_idx[0]}, Y:{min_idx[1]}-{max_idx[1]}, Z:{min_idx[2]}-{max_idx[2]}")
+        input("The reachability database has been loaded. Press Enter to load the orientations database.")
         with open(orientations_path, 'rb') as f:
             orientations = pickle.load(f)
             self.get_logger().info('[INFO] Orientations loaded.')
@@ -250,9 +251,9 @@ class BasePlacementNode(Node):
         intersection_map = np.where(intersection_votes == len(ee_targets), union_map, 0)
 
         if np.max(union_map) == 0:
-            print("[ERROR] El mapa de unión está vacío. Verifica el umbral de orientación o la base de datos.")
+            print("[ERROR] Union map is empty. Verify threshold of orientation or the databse.")
         if np.max(intersection_map) == 0:
-            print("[ERROR] El mapa de intersección está vacío. Verifica el umbral de orientación o la base de datos.")
+            print("[ERROR] Intersection map is empty. Verify threshold of orientation or the databse.")
         return union_map, intersection_map
     
     def get_top_bases(self, score_map, x_vals, y_vals, top_n=5):
@@ -339,7 +340,7 @@ def main(args=None):
 
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         node.get_logger().info("Shutting down node due to keyboard interrupt (Ctrl+C)")
         node.cleanup()
     finally:

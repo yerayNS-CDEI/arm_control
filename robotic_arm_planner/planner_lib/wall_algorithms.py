@@ -63,7 +63,7 @@ def divide_plane(base_point, dir_ampl, dir_height,
     print(f"[DEBUG] h_valid = {h_valid}")
 
     if h_valid.size == 0:
-        raise ValueError("No hay divisiones horizontales válidas.")
+        raise ValueError("No horizontal valid divisions.")
     best_step_h = np.max(h_valid)
     n_cols = round(total_length / best_step_h)
 
@@ -75,7 +75,7 @@ def divide_plane(base_point, dir_ampl, dir_height,
     print(f"[DEBUG] v_valid = {v_valid}")
 
     if v_valid.size == 0:
-        raise ValueError("No hay divisiones verticales válidas.")
+        raise ValueError("No vertical valid divisions.")
     best_step_v = np.max(v_valid)
     n_rows = round(total_height / best_step_v)
 
@@ -123,7 +123,7 @@ unit_xy = dir_xy / wall_length
 dir_vector = np.array([*unit_xy, 0])
 wall_height = abs(point2[2] - point1[2])
 height_vector = np.array([0, 0, 1])
-print(f"Muro con altura de {wall_height:.2f}m y longitud de {wall_length:.2f} m")
+print(f"Wall with height {wall_height:.2f} m and longitude {wall_length:.2f} m.")
 
 # División del muro en paneles
 wall_cells, wall_centers, n_rows, n_cols, step_h, step_v, _, _ = divide_plane(
@@ -132,12 +132,12 @@ wall_cells, wall_centers, n_rows, n_cols, step_h, step_v, _, _ = divide_plane(
     robot_amplitude_range, robot_height_range,
     h_resolution, v_resolution, dec_round)
 
-print(f"Muro dividido en {n_cols} columnas de {step_h:.2f} m y {n_rows} filas de {step_v:.2f} m")
+print(f"Wall divided into {n_cols} columns of {step_h:.2f} m and {n_rows} rows of {step_v:.2f} m.")
 
 # Visualización del muro
 fig = plt.figure()
 ax = fig.add_subplot(111, projection='3d')
-ax.set_title('División del muro en paneles')
+ax.set_title('Wall divided into panels')
 ax.set_xlabel('X')
 ax.set_ylabel('Y')
 ax.set_zlabel('Z')
@@ -172,12 +172,12 @@ sensor_cells, sensor_centers, n_v, n_h, step_h, step_v, _, _ = divide_plane(
     sensors_amplitude_range, sensors_height_range,
     h_resolution, v_resolution, dec_round)
 
-print(f"Panel ({target_i+1},{target_j+1}) dividido en {n_h} columnas de {step_h:.2f} m y {n_v} filas de {step_v:.2f} m")
+print(f"Panel ({target_i+1},{target_j+1}) divided into {n_h} columns of {step_h:.2f} m and {n_v} rows of {step_v:.2f} m.")
 
 # Visualización de celdas sensoras
 fig2 = plt.figure()
 ax2 = fig2.add_subplot(111, projection='3d')
-ax2.set_title(f'Subdivisión del panel ({target_i+1},{target_j+1})')
+ax2.set_title(f'Panel subdivision ({target_i+1},{target_j+1})')
 ax2.set_xlabel('X')
 ax2.set_ylabel('Y')
 ax2.set_zlabel('Z')
@@ -191,7 +191,7 @@ for i in range(n_v):
 
         verts = np.asarray(s)
         if verts.shape != (4, 3):
-            print(f"[Advertencia] Celda con forma inesperada: {verts.shape}")
+            print(f"[WARN] Cell with wrong shape: {verts.shape}")
             continue
 
         poly = Poly3DCollection([verts], facecolors='cyan', alpha=0.5, edgecolors='b')

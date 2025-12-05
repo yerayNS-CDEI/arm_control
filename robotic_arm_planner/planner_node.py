@@ -1,24 +1,19 @@
-#!/usr/bin/env python3
-
 import rclpy
 from rclpy.node import Node
-import time
 import os
-
 from geometry_msgs.msg import Pose
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-# from std_msgs.msg import Float64MultiArray
-
+from std_msgs.msg import Float64MultiArray
+from visualization_msgs.msg import Marker
+from ament_index_python.packages import get_package_share_directory
 import numpy as np
 
 # Import your planning functions
 from robotic_arm_planner.planner_lib.closed_form_algorithm import closed_form_algorithm
-# from robotic_arm_planner.planner_lib.path_planning import world_to_grid, grid_to_world
 from robotic_arm_planner.planner_lib.Astar3D import find_path, world_to_grid, grid_to_world, dilate_obstacles
 from scipy.spatial.transform import Rotation as R, Slerp
-from scipy.ndimage import binary_dilation
 
 class PlannerNode(Node):
     def __init__(self):
@@ -29,15 +24,9 @@ class PlannerNode(Node):
         self.filename = "reachability_map_27_fused"
         fn_npy = f"{self.filename}.npy"
         self.grid_size = int(self.filename.split('_')[2])
-        base_home = os.path.expanduser('~')
-        self.reachability_map_fn = os.path.join(
-            base_home,
-            'ws_Robotic_Arm',
-            'src',
-            'robotic_arm_planner',
-            'resource',
-            fn_npy
-        )
+        self.base_path = os.path.join(get_package_share_directory('robotic_arm_planner'), 'resource')
+        self.reachability_map_fn=os.path.join(self.base_path, fn_npy)
+
         self.get_logger().info(f"Loading reachability map from: {self.reachability_map_fn}")
         self.reachability_map = np.load(self.reachability_map_fn, allow_pickle=True).item()
         self.radius = 1.35  # For UR10e (hardcoded!!)
@@ -60,13 +49,12 @@ class PlannerNode(Node):
         self.z_vals = np.linspace(z_min, z_max, len(self.z_levels))  # assumes uniform spacing
 
         # Create subscriber and publishers
-        self.create_subscription(Pose, '/goal_pose', self.goal_callback, 10)
-        self.create_subscription(JointState, "/joint_states", self.joint_state_callback, 10)
-        self.create_subscription(Bool, "/execution_status", self.execution_status_callback, 10)  # Nueva suscripción
-        self.create_subscription(Pose, "/end_effector_pose", self.end_effector_pose_callback, 10)
-        # self.joint_pub = self.create_publisher(JointState, '/planned_joint_states', 10)
-        self.trajectory_pub = self.create_publisher(JointTrajectory, '/planned_trajectory', 10)
-        # self.joint_values = self.create_publisher(Float64MultiArray, '/joint_values_topic', 10)
+        self.create_subscription(Pose, 'goal_pose', self.goal_callback, 10)
+        self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
+        self.create_subscription(Bool, "execution_status", self.execution_status_callback, 10)
+        self.create_subscription(Pose, "end_effector_pose", self.end_effector_pose_callback, 10)
+        self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
+        self.marker_pub = self.create_publisher(Marker, 'obstacle_markers', 10)
 
         self.get_logger().info("Planner node initialized and waiting for goal poses...")
 
@@ -77,7 +65,6 @@ class PlannerNode(Node):
         self.end_effector_pose = msg
 
     def execution_status_callback(self, msg: Bool):
-        """Callback que recibe el estado de ejecución"""
         self.execution_complete = msg.data
         if self.execution_complete:
             self.get_logger().info("Goal execution complete. Ready for new goal.")
@@ -99,7 +86,7 @@ class PlannerNode(Node):
     def plan_and_send_trajectory(self, msg: Pose):
         if self.emergency_stop:
             self.get_logger().warn("Emergency stop is active, aborting trajectory planning.")
-            return  # Abortamos la planificación si está en estado de emergencia
+            return  # Aborting if emergency state is active
 
         if self.current_joint_state is None:
             self.get_logger().error("No current joint state received yet. Cannot calculate trajectory.")
@@ -109,7 +96,6 @@ class PlannerNode(Node):
         goal_pos = [msg.position.x, msg.position.y, msg.position.z]
         goal_orn = [msg.orientation.x,msg.orientation.y,msg.orientation.z,msg.orientation.w]
         goal_orientation = R.from_quat(goal_orn)
-        # goal_orientation = R.from_euler('xyz', [0, -90, 0], degrees=True)
         self.get_logger().info(f"Received goal position: {goal_pos}")
         self.get_logger().info(f"Received goal orientation: {goal_orn}")
 
@@ -120,7 +106,7 @@ class PlannerNode(Node):
         #     self.i += 1
         # else:
         
-        # Obtenemos la posición actual del robot desde JointState
+        # Obtainin gcurrent robot pose from JointState
         start_pos = [self.end_effector_pose.position.x, self.end_effector_pose.position.y, self.end_effector_pose.position.z]
         start_orn = [self.end_effector_pose.orientation.x, self.end_effector_pose.orientation.y, self.end_effector_pose.orientation.z, self.end_effector_pose.orientation.w]
         start_orientation = R.from_quat(start_orn)
@@ -151,24 +137,40 @@ class PlannerNode(Node):
             (Y >= y0 - half) & (Y <= y0 + half) &
             (Z >= z0 - half) & (Z <= z0 + half)
         )
-        occupancy_grid[cube_mask] = 1
+        # occupancy_grid[cube_mask] = 1
 
         # Define sphere parameters
-        sphere_center = [(-0.3, 0.0, 0.4), (0.3, 0.5, 0.4)]
-        sphere_radius = [0.3, 0.3]
+        # sphere_center = [(-0.3, 0.0, 0.4), (0.3, 0.5, 0.4)]
+        # sphere_radius = [0.3, 0.3]
+        sphere_center = [(0.0, 0.0, 0.0), (0.0, 0.0, 0.15), (0.0, 0.0, 0.3), (0.0, 0.0, 0.45), (0.0, 0.0, 0.60), (0.0, 0.0, 0.75), (0.0, 0.0, 0.90)]
+        sphere_radius = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
 
         # Create mask for sphere
         for i in range(len(sphere_radius)):
             dist_squared = (X - sphere_center[i][0])**2 + (Y - sphere_center[i][1])**2 + (Z - sphere_center[i][2])**2
             sphere_mask = dist_squared <= sphere_radius[i]**2
-            occupancy_grid[sphere_mask] = 1
+            # occupancy_grid[sphere_mask] = 1
 
-        # Define the dilation distance (in meters, for example)
-        dilation_distance = 0.4  # Enlarge obstacles by 0.1 meters in all directions
+        # Define cilinder parameters
+        cyl_center_xy = (0.0, 0.0)   # (xc, yc)
+        cyl_radius    = 0.3
+        z_min, z_max  = 0.0, 1.3
+
+        # Create mask for cilinder
+        cyl_mask = (
+            ((X - cyl_center_xy[0])**2 + (Y - cyl_center_xy[1])**2) <= cyl_radius**2
+        ) & (Z >= z_min) & (Z <= z_max)
+        occupancy_grid[cyl_mask] = 1
+        
+        # Publish cylinder marker for visualization
+        self.publish_cylinder_marker(cyl_center_xy, cyl_radius, z_min, z_max)
+
+        # Define the dilation distance (in meters)
+        dilation_distance = 0.001  # Enlarge obstacles by 0.X meters in all directions
 
         # Apply dilation
         occupancy_grid_dilated = dilate_obstacles(occupancy_grid, dilation_distance, self.x_vals)
-        occupancy_grid_dilated = np.zeros(self.grid_shape, dtype=np.uint8)      # Eliminating all obstacles for now
+        # occupancy_grid_dilated = np.zeros(self.grid_shape, dtype=np.uint8)      # Eliminating all obstacles for now
 
         path = find_path(occupancy_grid_dilated, start_idx, goal_idx)
         self.get_logger().info(f"Found path with length {len(path)}")
@@ -205,21 +207,6 @@ class PlannerNode(Node):
         home_position = np.array([self.current_joint_state.position])
         all_joint_values = []
         all_joint_values_print = []
-        # q_current = closed_form_algorithm(create_pose_matrix(path_world[0], interp_rot_matrices[0]), home_position, type=0)
-        
-        # q_current = np.array([self.current_joint_state.position[-1], self.current_joint_state.position[0], self.current_joint_state.position[1], self.current_joint_state.position[2], self.current_joint_state.position[3], self.current_joint_state.position[4]])
-        # self.get_logger().error(f"Current joint state = {self.current_joint_state.position}")
-        # all_joint_values.append(q_current)
-
-        # for i in range(1, len(path_world)):
-        #     T = create_pose_matrix(path_world[i], interp_rot_matrices[i])
-        #     q_new = closed_form_algorithm(T, q_current, type=0)
-        #     all_joint_values.append(q_new)
-        #     q_current = q_new
-        #     if np.any(np.isnan(q_new)):
-        #         self.get_logger().error(f"Invalid IK at step {i}: pose = {T[:3, 3]}. Path wolrd = {path_world[i]}")
-        #         self.emergency_stop = True 
-
         q_current = np.array([self.current_joint_state.position[-1], self.current_joint_state.position[0], self.current_joint_state.position[1], self.current_joint_state.position[2], self.current_joint_state.position[3], self.current_joint_state.position[4]])
         self.get_logger().error(f"Current joint state = {self.current_joint_state.position}")
         all_joint_values_print.append(q_current)
@@ -228,7 +215,7 @@ class PlannerNode(Node):
             T = create_pose_matrix(path_world[i], interp_rot_matrices[i])
             q_new = closed_form_algorithm(T, q_current, type=0)
             if np.any(np.isnan(q_new)):
-                self.get_logger().error(f"Invalid IK at step {i}: pose = {T[:3, 3]}. Path wolrd = {path_world[i]}")
+                self.get_logger().error(f"Invalid IK at step {i}: pose = {T[:3, 3]}. Path world = {path_world[i]}")
                 self.emergency_stop = True 
             all_joint_values.append(q_new)
             all_joint_values_print.append(q_new)
@@ -240,7 +227,7 @@ class PlannerNode(Node):
         # joints_msg.data = flat_values
         # self.joint_values.publish(joints_msg)
 
-        # Publish joint values step-by-step (POSIBLE ELIMINACION DE CODIGO PARA COMPACTACION)
+        # Publish joint values step-by-step
         for i, q in enumerate(all_joint_values_print):
             # msg = JointState()
             # msg.name = [f'joint_{j+1}' for j in range(len(q))]
@@ -253,7 +240,7 @@ class PlannerNode(Node):
         # Publish success
         self.get_logger().info("Joint planning published.")
                 
-        if self.emergency_stop:  # Verifica si se ha activado la parada de emergencia
+        if self.emergency_stop:  # Verifies if emergency stop is active
             self.get_logger().warn("Emergency stop is active. Halting trajectory.")
             return
         
@@ -268,13 +255,7 @@ class PlannerNode(Node):
             'wrist_3_joint'
         ]
 
-        # if self.current_joint_state is not None:
-        #     first_point = JointTrajectoryPoint()
-        #     first_point.positions = list(self.current_joint_state.position)
-        #     first_point.time_from_start = rclpy.duration.Duration(seconds=0.1).to_msg()
-        #     traj_msg.points.append(first_point)
-
-        time_from_start = 1.0  # el primer punto ya es 0.1, así que empieza desde 1.0
+        time_from_start = 1.0
 
         for q in all_joint_values:
             point = JointTrajectoryPoint()
@@ -286,6 +267,41 @@ class PlannerNode(Node):
 
         self.trajectory_pub.publish(traj_msg)
         self.get_logger().info("Published planned trajectory.")
+    
+    def publish_cylinder_marker(self, center_xy, radius, z_min, z_max):
+        """Publish a cylinder marker for RViz visualization."""
+        marker = Marker()
+        marker.header.frame_id = "base_link"  # Change to your robot's base frame if different
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "obstacles"
+        marker.id = 0
+        marker.type = Marker.CYLINDER
+        marker.action = Marker.ADD
+        
+        # Position: center of cylinder
+        marker.pose.position.x = center_xy[0]
+        marker.pose.position.y = center_xy[1]
+        marker.pose.position.z = (z_min + z_max) / 2.0
+        marker.pose.orientation.x = 0.0
+        marker.pose.orientation.y = 0.0
+        marker.pose.orientation.z = 0.0
+        marker.pose.orientation.w = 1.0
+        
+        # Scale: diameter and height
+        marker.scale.x = radius * 2.0  # diameter in x
+        marker.scale.y = radius * 2.0  # diameter in y
+        marker.scale.z = z_max - z_min  # height
+        
+        # Color: semi-transparent red
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker.color.a = 0.5  # semi-transparent
+        
+        marker.lifetime.sec = 0  # 0 means it persists until deleted
+        
+        self.marker_pub.publish(marker)
+        self.get_logger().info(f"Published cylinder marker at ({center_xy[0]}, {center_xy[1]}) with radius {radius} and height {z_max - z_min}")
 
 def create_pose_matrix(position, rotation_matrix):
     """Helper to create 4x4 transformation matrix from position and rotation matrix."""
@@ -306,188 +322,4 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# #!/usr/bin/env python3
-
-# import rclpy
-# from rclpy.node import Node
-# from control_msgs.action import FollowJointTrajectory
-# from rclpy.action import ActionServer
-# from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-# from sensor_msgs.msg import JointState
-# from std_msgs.msg import Bool
-# from geometry_msgs.msg import Pose
-# from scipy.spatial.transform import Rotation as R
-# import numpy as np
-# import time
-
-# # Importar las funciones de planificación y cinemática
-# from robotic_arm_planner.planner_lib.Astar3D import find_path, world_to_grid, grid_to_world, dilate_obstacles
-# from robotic_arm_planner.planner_lib.closed_form_algorithm import closed_form_algorithm
-
-# class PlannerNode(Node):
-#     def __init__(self):
-#         super().__init__('planner_node')
-
-#         # Crear el Action Server
-#         self._action_server = ActionServer(
-#             self,
-#             FollowJointTrajectory,
-#             'follow_joint_trajectory',
-#             self.execute_trajectory
-#         )
-
-#         # Inicializar la ejecución
-#         self.execution_complete = False
-#         self.goal_queue = []
-#         self.current_joint_state = None
-#         self.emergency_stop = False
-
-#         # Suscribirse a los temas de la meta (goal) en formato Pose
-#         self.create_subscription(Pose, "/goal_pose", self.goal_callback, 10)
-
-#         # Publicar la trayectoria y las posiciones de las juntas
-#         self.joint_pub = self.create_publisher(JointState, '/planned_joint_states', 10)
-#         self.trajectory_pub = self.create_publisher(JointTrajectory, '/planned_trajectory', 10)
-
-#         self.get_logger().info("Planner node initialized and waiting for goal poses...")
-
-#     def goal_callback(self, msg: Pose):
-#         """Callback para recibir goals en formato Pose"""
-#         self.get_logger().info(f"Received goal pose: {msg}")
-#         self.plan_and_send_trajectory(msg)
-
-#     def plan_and_send_trajectory(self, msg: Pose):
-#         """Recibe una goal en formato Pose y planifica la trayectoria"""
-#         if self.emergency_stop:
-#             self.get_logger().warn("Emergency stop is active, aborting trajectory planning.")
-#             return  # Abortamos la planificación si está en estado de emergencia
-
-#         # Obtener la posición y orientación del goal
-#         goal_pos = [msg.position.x, msg.position.y, msg.position.z]
-#         goal_orn = [msg.orientation.x, msg.orientation.y, msg.orientation.z, msg.orientation.w]
-#         goal_orientation = R.from_quat(goal_orn)
-
-#         # Obtener el estado actual del robot (posición y orientación)
-#         if self.current_joint_state is None:
-#             self.get_logger().error("No current joint state received yet. Cannot calculate trajectory.")
-#             return
-
-#         start_pos = list(self.current_joint_state.position)
-#         start_orn = list(self.current_joint_state.orientation)
-#         start_orientation = R.from_quat(start_orn)
-
-#         # Convertir las posiciones a índices en la grilla
-#         start_idx = world_to_grid(*start_pos, self.x_vals, self.y_vals, self.z_vals)
-#         goal_idx = world_to_grid(*goal_pos, self.x_vals, self.y_vals, self.z_vals)
-
-#         # Crear el mapa de ocupación y dilatar los obstáculos
-#         occupancy_grid = np.zeros(self.grid_shape, dtype=np.uint8)
-
-#         # Aplicar dilatación a los obstáculos
-#         occupancy_grid_dilated = dilate_obstacles(occupancy_grid, dilation_distance=0.4, x_vals=self.x_vals)
-
-#         # Planificar la ruta entre el punto de inicio y el goal
-#         path = find_path(occupancy_grid_dilated, start_idx, goal_idx)
-#         if not path:
-#             self.get_logger().warn("No path found!")
-#             return
-
-#         # Convertir la ruta a coordenadas del mundo
-#         path_world = [grid_to_world(i, j, k, self.x_vals, self.y_vals, self.z_vals) for i, j, k in path]
-
-#         # Interpolar orientaciones a lo largo de la ruta
-#         key_rots = R.from_quat([start_orientation.as_quat(), goal_orientation.as_quat()])
-#         key_times = [0, 1]
-#         slerp = Slerp(key_times, key_rots)
-#         times = np.linspace(0, 1, len(path))
-#         interp_rots = slerp(times)
-#         interp_rot_matrices = interp_rots.as_matrix()
-
-#         # Resolver la cinemática inversa para cada paso de la ruta
-#         all_joint_values = []
-#         q_current = closed_form_algorithm(create_pose_matrix(path_world[0], interp_rot_matrices[0]), home_position=[0.0, -1.2, -2.3, -1.2, 1.57, 0.0])
-#         all_joint_values.append(q_current)
-
-#         for i in range(1, len(path_world)):
-#             T = create_pose_matrix(path_world[i], interp_rot_matrices[i])
-#             q_new = closed_form_algorithm(T, q_current, type=0)
-#             all_joint_values.append(q_new)
-#             q_current = q_new
-
-#         # Publicar las posiciones de las juntas paso a paso
-#         for i, q in enumerate(all_joint_values):
-#             msg = JointState()
-#             msg.name = [f'joint_{j+1}' for j in range(len(q))]
-#             msg.position = q.tolist()
-#             msg.header.stamp = self.get_clock().now().to_msg()
-#             self.joint_pub.publish(msg)
-#             self.get_logger().info(f"Published step {i}: {np.round(q, 3)}")
-#             time.sleep(0.1)  # Simular un tiempo de ejecución (10 Hz)
-
-#         # Publicar la trayectoria calculada
-#         traj_msg = JointTrajectory()
-#         traj_msg.joint_names = ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
-#         for q in all_joint_values:
-#             point = JointTrajectoryPoint()
-#             point.positions = q.tolist()
-#             traj_msg.points.append(point)
-
-#         self.trajectory_pub.publish(traj_msg)
-#         self.get_logger().info("Trajectory execution complete.")
-
-#     def execute_trajectory(self, goal_handle):
-#         """Maneja la ejecución de la trayectoria recibida"""
-#         goal = goal_handle.request
-#         self.get_logger().info(f"Executing goal with {len(goal.trajectory.points)} points.")
-#         self.plan_and_send_trajectory(goal)
-#         goal_handle.succeed()
-
-# def create_pose_matrix(position, rotation_matrix):
-#     """Helper to create 4x4 transformation matrix from position and rotation matrix."""
-#     T = np.eye(4)
-#     T[:3, :3] = rotation_matrix
-#     T[:3, 3] = position
-#     return T
-
-# def main(args=None):
-#     rclpy.init(args=args)
-#     planner_node = PlannerNode()
-#     try:
-#         rclpy.spin(planner_node)
-#     except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
-#         print("Keyboard interrupt received. Shutting down planner node.")
-#     except Exception as e:
-#         print(f"Unhandled exception: {e}")
-
-# if __name__ == '__main__':
-#     main()
-
-
-
 

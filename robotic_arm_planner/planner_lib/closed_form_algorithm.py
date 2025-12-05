@@ -1,7 +1,9 @@
 import numpy as np
 
 def closed_form_algorithm(goal_matrix, q_current, type):
-    # # Link length UR5
+    ## Robot data: UR5
+    
+    # Link length
     # L1, L2, L3, L4 = 0.0892, 0.1359, 0.4250, 0.1197
     # L5, L6, L7, L8 = 0.3923, 0.0930, 0.0947, 0.0823
     
@@ -21,7 +23,9 @@ def closed_form_algorithm(goal_matrix, q_current, type):
     # va5 = 0
     # va6 = 0
 
-    # # Link length UR10e
+    ## Robot data: UR10
+
+    # Link length
     # L1, L2, L3, L4 = 
     # L5, L6, L7, L8 = 
 
@@ -47,9 +51,9 @@ def closed_form_algorithm(goal_matrix, q_current, type):
     r21, r22, r23 = goal_matrix[1, 0], goal_matrix[1, 1], goal_matrix[1, 2]
     r31, r32, r33 = goal_matrix[2, 0], goal_matrix[2, 1], goal_matrix[2, 2]
 
-    ############################################
-    # Closed form Algorithm 1 (All solutions)
-    ############################################
+    ###############################################
+    ### Closed form Algorithm 1 (All solutions) ###
+    ###############################################
 
     if type == 0:
         sol = np.full((8, 6), np.nan)   # rows: number of solutions, cols: joint values
@@ -182,7 +186,7 @@ def closed_form_algorithm(goal_matrix, q_current, type):
             return q_unwrapped
 
         # print('All solutions: ',sol)
-        valid_rows = ~np.isnan(sol).any(axis=1)  # Fila válida si no hay ningún nan
+        valid_rows = ~np.isnan(sol).any(axis=1)  # Valid row if there is no nan value
         if np.any(valid_rows):
             diffs = np.array([
                 np.sqrt(np.sum(weights * np.abs(np.arctan2(np.sin(q_current - sol[i]), np.cos(q_current - sol[i])))))
@@ -193,15 +197,15 @@ def closed_form_algorithm(goal_matrix, q_current, type):
             best_sol = sol[idx]
             best_sol = unwrap_angles(best_sol, q_current)
             best_sol = np.array([normalize_angle_2pi(angle) for angle in best_sol])
-
+            # print('Best solution: ',best_sol)
             return best_sol
         else:
             print('No feasible solution found!')
-            return np.full(6, np.nan)  # No soluciones válidas encontradas
+            return np.full(6, np.nan)  # Not valid solutions found
 
-    ############################################
-    # Closed form Algorithm 2 (FSM)
-    ############################################
+    #####################################
+    ### Closed form Algorithm 2 (FSM) ###
+    #####################################
 
     elif type == 1:
         # FSM States

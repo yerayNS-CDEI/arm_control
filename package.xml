@@ -4,7 +4,7 @@
   <name>robotic_arm_planner</name>
   <version>0.0.0</version>
   <description>TODO: Package description</description>
-  <maintainer email="yeray.navarro@estudiantat.upc.edu">ynavarro@cdei.upc.edu</maintainer>
+  <maintainer email="yeray.navarro@upc.edu">yeray</maintainer>
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>

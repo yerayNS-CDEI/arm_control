@@ -223,6 +223,10 @@ def visualize_path(grid: np.ndarray, path: List[Tuple[int, int, int]]):
 
     return fig, ax, path
 
+###################
+### Use Example ###
+###################
+
 # # Create a sample grid
 # grid = np.zeros((20, 20, 20))  # 20x20 grid, all free space initially
 # # Add some obstacles
@@ -234,9 +238,7 @@ def visualize_path(grid: np.ndarray, path: List[Tuple[int, int, int]]):
 # goal_pos = (18, 18, 8)
 # # Find the path
 # path = find_path(grid, start_pos, goal_pos)
-
 # print(path[:])
-
 
 # if path:
 #     print(f"Path found with {len(path)} steps!")
