@@ -8,7 +8,7 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     # --- Package and child launch paths ---
-    ur_pkg = FindPackageShare('ur_arm_control')
+    ur_pkg = FindPackageShare('arm_control')
     ur_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_control.launch.py'])
     publisher_launch = PathJoinSubstitution([ur_pkg, 'launch', 'test_scaled_joint_trajectory_planned.launch.py'])
 

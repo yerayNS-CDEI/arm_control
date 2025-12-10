@@ -28,35 +28,12 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES geometry_msgs std_msgs
 )
 
-# Install launch files
-install(DIRECTORY
-  launch
-  DESTINATION share/${PROJECT_NAME}
-)
-
-# Install config files
-install(DIRECTORY
-  config
-  DESTINATION share/${PROJECT_NAME}
-)
-
-# Install URDF files
-install(DIRECTORY
-  urdf
-  DESTINATION share/${PROJECT_NAME}
-)
-
-# Install RViz files
-install(DIRECTORY
-  rviz
-  DESTINATION share/${PROJECT_NAME}
-)
-
-# Install resource files
-install(DIRECTORY
-  resource
-  DESTINATION share/${PROJECT_NAME}
-)
+# Install Python modules and scripts via setup.py
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+install(CODE "execute_process(
+  COMMAND ${Python3_EXECUTABLE} setup.py install --prefix=${CMAKE_INSTALL_PREFIX} --install-scripts=${CMAKE_INSTALL_PREFIX}/lib/${PROJECT_NAME}
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)")
 
 # Install test files
 if(BUILD_TESTING)

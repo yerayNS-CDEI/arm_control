@@ -1,0 +1,22 @@
+[console_scripts]
+base_placement_node = arm_control.planner.base_placement_node:main
+end_effector_pose_node = arm_control.control.end_effector_pose_node:main
+example_move = arm_control.control.example_move:main
+hyperspectral_node = arm_control.sensors.hyperspectral_node:main
+lenz_client = arm_control.sensors.lenz_client:main
+planner_node = arm_control.planner.planner_node:main
+publisher_joint_trajectory_controller = arm_control.control.publisher_joint_trajectory_controller:main
+publisher_joint_trajectory_planned = arm_control.control.publisher_joint_trajectory_planned:main
+publisher_joint_trajectory_planned_topic = arm_control.control.publisher_joint_trajectory_planned_topic:main
+remote_DASHBOARD = arm_control.control.remote_DASHBOARD:main
+remote_SCRIPT = arm_control.control.remote_SCRIPT:main
+send_and_monitor_trajectory = arm_control.control.send_and_monitor_trajectory:main
+sensors_distance = arm_control.control.sensors_distance:main
+sensors_distance_orientation = arm_control.control.sensors_distance_orientation:main
+sensors_distance_orientation_sim = arm_control.control.sensors_distance_orientation_sim:main
+sensors_orientation = arm_control.control.sensors_orientation:main
+test_hyperspectral_client = arm_control.sensors.test_hyperspectral_client:main
+vis_nir_example = arm_control.sensors.vis_nir_example:main
+visualize_wall_discretization_client = arm_control.planner.visualize_wall_discretization_client:main
+wall_discretization_node = arm_control.planner.wall_discretization_node:main
+
