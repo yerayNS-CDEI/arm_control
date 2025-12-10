@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from robotic_arm_planner_interfaces.srv import ComputeWallDiscretization
+from arm_control.srv import ComputeWallDiscretization
 from geometry_msgs.msg import Pose
 
 import numpy as np

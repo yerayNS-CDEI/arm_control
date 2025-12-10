@@ -11,8 +11,8 @@ from ament_index_python.packages import get_package_share_directory
 import numpy as np
 
 # Import your planning functions
-from robotic_arm_planner.planner_lib.closed_form_algorithm import closed_form_algorithm
-from robotic_arm_planner.planner_lib.Astar3D import find_path, world_to_grid, grid_to_world, dilate_obstacles
+from arm_control.planner.planner_lib.closed_form_algorithm import closed_form_algorithm
+from arm_control.planner.planner_lib.Astar3D import find_path, world_to_grid, grid_to_world, dilate_obstacles
 from scipy.spatial.transform import Rotation as R, Slerp
 
 class PlannerNode(Node):

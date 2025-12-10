@@ -7,7 +7,7 @@ from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from scipy.spatial.transform import Rotation as R
-from robotic_arm_planner.planner_lib.closed_form_algorithm import closed_form_algorithm
+from arm_control.planner.planner_lib.closed_form_algorithm import closed_form_algorithm
 
 class SensorsOrientation(Node):
 

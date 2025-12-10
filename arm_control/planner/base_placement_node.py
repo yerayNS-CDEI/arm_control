@@ -6,7 +6,7 @@ import numpy as np
 import pickle
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
-from robotic_arm_planner_interfaces.srv import ComputeBasePlacement
+from arm_control.srv import ComputeBasePlacement
 from geometry_msgs.msg import Pose
 from ament_index_python.packages import get_package_share_directory
 
@@ -57,7 +57,7 @@ class BasePlacementNode(Node):
         #     (np.array([1.7, 2.0, 0.3]), R.from_euler('xyz', [0, 90, 0], degrees=True).as_matrix())
         # ]
 
-        # ros2 service call /compute_base_placement robotic_arm_planner_interfaces/srv/ComputeBasePlacement "targets:
+        # ros2 service call /compute_base_placement arm_control/srv/ComputeBasePlacement "targets:
         # - position: {x: 1.7, y: 1.6, z: 0.8}
         # orientation: {x: 0.0, y: 0.7071, z: 0.0, w: 0.7071}
         # - position: {x: 1.7, y: 2.0, z: 0.8}
