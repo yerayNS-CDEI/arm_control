@@ -1,0 +1,39 @@
+# Request
+# Poses EE como lista plana [x,y,z,roll,pitch,yaw, ...] (grados en RPY)
+float64[] poses_ee_xyzrpy
+
+# Obstáculos rectangulares (lista plana multiplo de 4):
+# [x_min, x_max, y_min, y_max,  x_min, x_max, y_min, y_max, ...]
+float64[] obstacle_rects
+
+# Obstáculos circulares (lista plana multiplo de 3):
+# [x_c, y_c, r,  x_c, y_c, r, ...]
+float64[] obstacle_circles
+
+# Parámetros de cálculo
+float64 min_dist         # distancia mínima a la pose más cercana (m)
+int32   round_decimals   # redondeo de la grid
+float64 grid_res         # resolución de la grid [m]
+float64[] x_limits       # [xmin, xmax]
+float64[] y_limits       # [ymin, ymax]
+
+# Opcionales de ejecución (no afectan al resultado matemático)
+bool enable_simulator
+bool enable_robot_viz
+
+---
+# Response
+bool    success
+string  message
+
+# Base seleccionada
+float64 base_x
+float64 base_y
+
+# Info útil
+float64 centroid_x
+float64 centroid_y
+float64 max_grid_value
+
+# Candidatos devueltos (lista plana [x1,y1,x2,y2,...], truncada p.ej. a 20)
+float64[] candidates_xy

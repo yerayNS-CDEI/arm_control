@@ -1,0 +1,5 @@
+geometry_msgs/Pose[] targets
+---
+geometry_msgs/Pose best_base
+bool success
+string message
