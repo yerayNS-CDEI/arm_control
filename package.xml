@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>arm_control</name>
+  <version>1.0.0</version>
+  <description>Unified package combining ur_arm_control, robotic_arm_planner, robotic_arm_planner_interfaces, and oliwall_sensors</description>
+  <maintainer email="yeray.navarro@upc.edu">Yeray Navarro</maintainer>
+  <license>MIT</license>
+
+  <!-- Build tool dependencies -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+
+  <!-- Interface generation dependencies -->
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <!-- ROS2 core dependencies -->
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  
+  <!-- Control dependencies -->
+  <depend>control_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>action_msgs</depend>
+  <depend>builtin_interfaces</depend>
+  <depend>rcl_interfaces</depend>
+  
+  <!-- TF2 dependencies -->
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  
+  <!-- Robot description dependencies -->
+  <depend>urdf</depend>
+  <depend>urdf_parser_py</depend>
+  <depend>ur_description</depend>
+  <depend>gazebo_ros</depend>
+  <depend>joint_state_publisher_gui</depend>
+  
+  <!-- External Python dependencies -->
+  <depend>numpy</depend>
+  <depend>example_interfaces</depend>
+
+  <!-- Test dependencies -->
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
