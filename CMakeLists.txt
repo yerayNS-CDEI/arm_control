@@ -17,7 +17,6 @@ find_package(rcl_interfaces REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(urdf REQUIRED)
-find_package(urdf_parser_py REQUIRED)
 
 # Generate service interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -28,9 +27,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/HyperspectralConfig.srv"
   DEPENDENCIES geometry_msgs std_msgs
 )
-
-# Install Python package
-ament_python_install_package(${PROJECT_NAME})
 
 # Install launch files
 install(DIRECTORY
