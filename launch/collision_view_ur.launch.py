@@ -133,7 +133,7 @@ def generate_launch_description():
     }
 
     rviz_config_file = PathJoinSubstitution(
-        [FindPackageShare("ur_arm_control"), "rviz", "view_collision_robot.rviz"]
+        [FindPackageShare("arm_control"), "rviz", "view_collision_robot.rviz"]
     )
 
     joint_state_publisher_node = Node(

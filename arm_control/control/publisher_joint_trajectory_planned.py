@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 ########################################################
 
 #### Node using an action client to send goals

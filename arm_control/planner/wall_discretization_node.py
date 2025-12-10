@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 #
 # Node to generate a service for the discretization of the walls to scan.
 # It receives 2 points of opposite vertices of the wall (bottom left corner and top right corner)

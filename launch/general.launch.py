@@ -82,7 +82,7 @@ def generate_launch_description():
         ),
 
         Node(
-            package="robotic_arm_planner",
+            package="arm_control",
             executable="planner_node",
             name="robotic_arm_planner_node",
             output="screen",
@@ -90,7 +90,7 @@ def generate_launch_description():
         ),
 
         Node(
-            package="ur_arm_control",
+            package="arm_control",
             executable="end_effector_pose_node",
             name="end_effector_pose_node",
             output="screen",

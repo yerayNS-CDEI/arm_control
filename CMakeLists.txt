@@ -28,12 +28,66 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES geometry_msgs std_msgs
 )
 
-# Install Python modules and scripts via setup.py
+# Find Python and set install directory
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
-install(CODE "execute_process(
-  COMMAND ${Python3_EXECUTABLE} setup.py install --prefix=${CMAKE_INSTALL_PREFIX} --install-scripts=${CMAKE_INSTALL_PREFIX}/lib/${PROJECT_NAME}
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)")
+execute_process(
+  COMMAND ${Python3_EXECUTABLE} -c "import sys; print(f'lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages')"
+  OUTPUT_VARIABLE PYTHON_INSTALL_DIR
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+# Install Python modules
+install(DIRECTORY arm_control/
+  DESTINATION ${PYTHON_INSTALL_DIR}/arm_control
+  FILES_MATCHING PATTERN "*.py"
+)
+
+# Install Python scripts (without .py extension)
+install(PROGRAMS arm_control/control/end_effector_pose_node.py DESTINATION lib/${PROJECT_NAME} RENAME end_effector_pose_node)
+install(PROGRAMS arm_control/control/example_move.py DESTINATION lib/${PROJECT_NAME} RENAME example_move)
+install(PROGRAMS arm_control/control/publisher_joint_trajectory_controller.py DESTINATION lib/${PROJECT_NAME} RENAME publisher_joint_trajectory_controller)
+install(PROGRAMS arm_control/control/publisher_joint_trajectory_planned.py DESTINATION lib/${PROJECT_NAME} RENAME publisher_joint_trajectory_planned)
+install(PROGRAMS arm_control/control/publisher_joint_trajectory_planned_topic.py DESTINATION lib/${PROJECT_NAME} RENAME publisher_joint_trajectory_planned_topic)
+install(PROGRAMS arm_control/control/remote_DASHBOARD.py DESTINATION lib/${PROJECT_NAME} RENAME remote_DASHBOARD)
+install(PROGRAMS arm_control/control/remote_SCRIPT.py DESTINATION lib/${PROJECT_NAME} RENAME remote_SCRIPT)
+install(PROGRAMS arm_control/control/send_and_monitor_trajectory.py DESTINATION lib/${PROJECT_NAME} RENAME send_and_monitor_trajectory)
+install(PROGRAMS arm_control/control/sensors_distance.py DESTINATION lib/${PROJECT_NAME} RENAME sensors_distance)
+install(PROGRAMS arm_control/control/sensors_distance_orientation.py DESTINATION lib/${PROJECT_NAME} RENAME sensors_distance_orientation)
+install(PROGRAMS arm_control/control/sensors_distance_orientation_sim.py DESTINATION lib/${PROJECT_NAME} RENAME sensors_distance_orientation_sim)
+install(PROGRAMS arm_control/control/sensors_orientation.py DESTINATION lib/${PROJECT_NAME} RENAME sensors_orientation)
+install(PROGRAMS arm_control/planner/base_placement_node.py DESTINATION lib/${PROJECT_NAME} RENAME base_placement_node)
+install(PROGRAMS arm_control/planner/planner_node.py DESTINATION lib/${PROJECT_NAME} RENAME planner_node)
+install(PROGRAMS arm_control/planner/wall_discretization_node.py DESTINATION lib/${PROJECT_NAME} RENAME wall_discretization_node)
+install(PROGRAMS arm_control/planner/visualize_wall_discretization_client.py DESTINATION lib/${PROJECT_NAME} RENAME visualize_wall_discretization_client)
+install(PROGRAMS arm_control/sensors/hyperspectral_node.py DESTINATION lib/${PROJECT_NAME} RENAME hyperspectral_node)
+install(PROGRAMS arm_control/sensors/lenz_client.py DESTINATION lib/${PROJECT_NAME} RENAME lenz_client)
+install(PROGRAMS arm_control/sensors/test_hyperspectral_client.py DESTINATION lib/${PROJECT_NAME} RENAME test_hyperspectral_client)
+install(PROGRAMS arm_control/sensors/vis_nir_example.py DESTINATION lib/${PROJECT_NAME} RENAME vis_nir_example)
+
+# Install launch files
+install(DIRECTORY launch/
+  DESTINATION share/${PROJECT_NAME}/launch
+)
+
+# Install config files
+install(DIRECTORY config/
+  DESTINATION share/${PROJECT_NAME}/config
+)
+
+# Install URDF files
+install(DIRECTORY urdf/
+  DESTINATION share/${PROJECT_NAME}/urdf
+)
+
+# Install RViz config files
+install(DIRECTORY rviz/
+  DESTINATION share/${PROJECT_NAME}/rviz
+)
+
+# Install resource files
+install(DIRECTORY resource/
+  DESTINATION share/${PROJECT_NAME}/resource
+)
 
 # Install test files
 if(BUILD_TESTING)

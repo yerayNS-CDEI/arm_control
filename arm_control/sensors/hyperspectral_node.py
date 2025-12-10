@@ -37,7 +37,7 @@ class HyperspectralNode(Node):
         
         # Default CSV directory: package's resource folder
         try:
-            package_name = 'oliwall_sensors'
+            package_name = 'arm_control'
             package_dir = get_package_share_directory(package_name)
             default_csv_dir = os.path.join(package_dir, '..', '..', '..', '..', 'src', package_name, 'resource')
             default_csv_dir = os.path.abspath(default_csv_dir)

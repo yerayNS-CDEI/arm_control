@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import os
 import sys
 import rclpy
@@ -26,7 +28,7 @@ class BasePlacementNode(Node):
         self.area_size = self.get_parameter('area_size').value
         self.cart_min = self.get_parameter('cart_min').value
 
-        self.base_path = os.path.join(get_package_share_directory('robotic_arm_planner'), 'resource')
+        self.base_path = os.path.join(get_package_share_directory('arm_control'), 'resource')
 
         self.get_logger().info("Base placement node ready.")
 

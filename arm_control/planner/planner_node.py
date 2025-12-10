@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import rclpy
 from rclpy.node import Node
 import os
@@ -24,7 +26,7 @@ class PlannerNode(Node):
         self.filename = "reachability_map_27_fused"
         fn_npy = f"{self.filename}.npy"
         self.grid_size = int(self.filename.split('_')[2])
-        self.base_path = os.path.join(get_package_share_directory('robotic_arm_planner'), 'resource')
+        self.base_path = os.path.join(get_package_share_directory('arm_control'), 'resource')
         self.reachability_map_fn=os.path.join(self.base_path, fn_npy)
 
         self.get_logger().info(f"Loading reachability map from: {self.reachability_map_fn}")

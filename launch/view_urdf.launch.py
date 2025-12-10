@@ -6,7 +6,7 @@ import os
 
 def generate_launch_description():
     urdf_path = os.path.join(
-        get_package_share_directory('ur_arm_control'),
+        get_package_share_directory('arm_control'),
         'urdf',
         'BIM_model.urdf'
         # 'ur10e.urdf'
@@ -31,7 +31,7 @@ def generate_launch_description():
             executable='rviz2',
             name='rviz2',
             arguments=['-d', os.path.join(
-                get_package_share_directory('ur_arm_control'),
+                get_package_share_directory('arm_control'),
                 'rviz',
                 'view_urdf.rviz'
             )],

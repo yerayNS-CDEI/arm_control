@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 ########################################################
 
 #### Node using a topic publisher to send goals 

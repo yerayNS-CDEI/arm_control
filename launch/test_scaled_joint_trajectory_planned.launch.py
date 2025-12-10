@@ -7,7 +7,7 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
 
     controller_config = PathJoinSubstitution(
-        [FindPackageShare("ur_arm_control"), "config", "test_goal_planned_config.yaml"]
+        [FindPackageShare("arm_control"), "config", "test_goal_planned_config.yaml"]
     )
 
     return LaunchDescription(
@@ -19,7 +19,7 @@ def generate_launch_description():
             ),
 
             Node(
-                package="ur_arm_control",
+                package="arm_control",
                 executable="publisher_joint_trajectory_planned",
                 name="publisher_joint_trajectory_planned",
                 parameters=[
