@@ -1,0 +1,14 @@
+string command       # GDS, GDR, GRF, GSM
+float64 x_coord      # X coordinate of measurement point
+float64 y_coord      # Y coordinate of measurement point
+float64 z_coord      # Z coordinate of measurement point
+---
+bool vis_ok
+uint16[] vis_spectrum
+int32 vis_status
+
+bool nir_ok
+uint16[] nir_spectrum
+int32 nir_status
+
+string message

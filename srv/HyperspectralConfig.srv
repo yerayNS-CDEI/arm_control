@@ -1,0 +1,6 @@
+string sensor       # "VIS" o "NIR"
+string command      # MTR, MTI, THP
+int32 value         # 60000, 1, etc
+---
+bool success
+string message
