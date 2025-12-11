@@ -17,6 +17,7 @@ find_package(rcl_interfaces REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(urdf REQUIRED)
+find_package(rosidl_default_runtime REQUIRED)
 
 # Generate service interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -28,21 +29,19 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES geometry_msgs std_msgs
 )
 
-# Find Python and set install directory
+# Find Python and install Python package manually
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
-execute_process(
-  COMMAND ${Python3_EXECUTABLE} -c "import sys; print(f'lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages')"
-  OUTPUT_VARIABLE PYTHON_INSTALL_DIR
-  OUTPUT_STRIP_TRAILING_WHITESPACE
+
+# Install Python modules to local site-packages
+install(
+  DIRECTORY arm_control/
+  DESTINATION "local/lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/dist-packages/${PROJECT_NAME}"
+  FILES_MATCHING
+  PATTERN "*.py"
+  PATTERN "__pycache__" EXCLUDE
 )
 
-# Install Python modules
-install(DIRECTORY arm_control/
-  DESTINATION ${PYTHON_INSTALL_DIR}/arm_control
-  FILES_MATCHING PATTERN "*.py"
-)
-
-# Install Python scripts (without .py extension)
+# Install Python executables (rename to remove .py extension)
 install(PROGRAMS arm_control/control/end_effector_pose_node.py DESTINATION lib/${PROJECT_NAME} RENAME end_effector_pose_node)
 install(PROGRAMS arm_control/control/example_move.py DESTINATION lib/${PROJECT_NAME} RENAME example_move)
 install(PROGRAMS arm_control/control/publisher_joint_trajectory_controller.py DESTINATION lib/${PROJECT_NAME} RENAME publisher_joint_trajectory_controller)
