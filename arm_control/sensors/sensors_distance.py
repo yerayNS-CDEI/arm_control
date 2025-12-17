@@ -52,12 +52,12 @@ class SensorsOrientation(Node):
         if len(msg.data) == 6:
             ultra1, ultra2, ultra3 = msg.data[0:3]
             s1, s2, s3 = msg.data[3:6]
-            # self.dA = s2*100
-            # self.dB = s3*100
-            # self.dC = s1*100
-            self.dA = ultra1*100
+            # self.dA = s2*1000
+            # self.dB = s1*1000
+            # self.dC = s3*1000
+            self.dA = ultra2*100
             self.dB = ultra3*100
-            self.dC = ultra2*100
+            self.dC = ultra1*100
 
             self.get_logger().info(
                 f"Ultrasound: [{ultra1:.2f}, {ultra2:.2f}, {ultra3:.2f}] m | "

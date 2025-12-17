@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 ##################################################
 #### ROS2 HYPERSPECTRAL SENSOR NODE
 ##################################################
@@ -7,7 +8,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
 from navi_wall_interfaces.srv import HyperspectralCommand, HyperspectralConfig
-from .lenz_client import LenzClient
+from .sensors_lib.lenz_client import LenzClient
 import threading
 import time
 import matplotlib
