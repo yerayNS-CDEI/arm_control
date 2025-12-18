@@ -23,12 +23,14 @@ class SensorsOrientation(Node):
         # 3 sensors: A left, B right, C top 
         # Positions on the plate 
         # Define the positions of the sensors
-        # xA, yA = -15, -15 # Position of sensor A 
-        # xB, yB = 15, -15 # Position of sensor B 
-        # xC, yC = 0.0, 15 # Position of sensor C 
-        xA, yA = 15, 15 # Position of sensor A 
-        xB, yB = -15, 15 # Position of sensor B 
-        xC, yC = 0.0, -15 # Position of sensor C 
+        # ULTRA
+        xA, yA = -15, -15 # Position of sensor A 
+        xB, yB = 15, -15 # Position of sensor B 
+        xC, yC = 0.0, 15 # Position of sensor C 
+        # VL6180X ToF
+        # xA, yA = 15, 15 # Position of sensor A 
+        # xB, yB = -15, 15 # Position of sensor B 
+        # xC, yC = 0.0, -15 # Position of sensor C 
         self.pA= np.array([xA, yA, 0.0])
         self.pB= np.array([xB, yB, 0.0])
         self.pC= np.array([xC, yC, 0.0])
@@ -55,12 +57,12 @@ class SensorsOrientation(Node):
         if len(msg.data) == 6 and  all(v > 0.0 for v in msg.data) and all(v < 255.0 for v in msg.data):
             ultra1, ultra2, ultra3 = msg.data[0:3]
             s1, s2, s3 = msg.data[3:6]
-            self.dA = s1*100
-            self.dB = s2*100
-            self.dC = s3*100
-            # self.dA = ultra3*100    
-            # self.dB = ultra2*100
-            # self.dC = ultra1*100
+            # self.dA = s1*1000
+            # self.dB = s2*1000
+            # self.dC = s3*1000
+            self.dA = ultra3*100    
+            self.dB = ultra2*100
+            self.dC = ultra1*100
 
             self.get_logger().info(
                 f"Ultrasound: [{ultra1:.2f}, {ultra2:.2f}, {ultra3:.2f}] m | "
