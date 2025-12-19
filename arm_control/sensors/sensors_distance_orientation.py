@@ -18,7 +18,7 @@ class SensorsOrientation(Node):
 
         # Node Variables
         self.end_effector_pose = None
-        self.ideal_distance = 15.0  # cm
+        self.ideal_distance = 25.0  # cm
         self.toggle = 1
         # 3 sensors: A left, B right, C top 
         # Positions on the plate 
@@ -55,8 +55,8 @@ class SensorsOrientation(Node):
             # self.dA = s1*1000
             # self.dB = s2*1000
             # self.dC = s3*1000
-            self.dA = ultra3*100    
-            self.dB = ultra2*100
+            self.dA = ultra2*100    
+            self.dB = ultra3*100
             self.dC = ultra1*100
 
             self.get_logger().info(

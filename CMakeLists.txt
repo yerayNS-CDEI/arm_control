@@ -60,6 +60,7 @@ install(PROGRAMS arm_control/planner/wall_discretization_node.py DESTINATION lib
 install(PROGRAMS arm_control/planner/visualize_wall_discretization_client.py DESTINATION lib/${PROJECT_NAME} RENAME visualize_wall_discretization_client)
 install(PROGRAMS arm_control/sensors/hyperspectral_node.py DESTINATION lib/${PROJECT_NAME} RENAME hyperspectral_node)
 install(PROGRAMS arm_control/sensors/test_hyperspectral_client.py DESTINATION lib/${PROJECT_NAME} RENAME test_hyperspectral_client)
+install(PROGRAMS arm_control/sensors/sensors_orientation_arduino.py DESTINATION lib/${PROJECT_NAME} RENAME sensors_orientation_arduino)
 
 # Install launch files
 install(DIRECTORY launch/
