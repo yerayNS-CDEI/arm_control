@@ -47,6 +47,8 @@ install(PROGRAMS arm_control/control/example_move.py DESTINATION lib/${PROJECT_N
 install(PROGRAMS arm_control/control/publisher_joint_trajectory_controller.py DESTINATION lib/${PROJECT_NAME} RENAME publisher_joint_trajectory_controller)
 install(PROGRAMS arm_control/control/publisher_joint_trajectory_planned.py DESTINATION lib/${PROJECT_NAME} RENAME publisher_joint_trajectory_planned)
 install(PROGRAMS arm_control/control/publisher_joint_trajectory_planned_topic.py DESTINATION lib/${PROJECT_NAME} RENAME publisher_joint_trajectory_planned_topic)
+install(PROGRAMS arm_control/control/position_sender_node.py DESTINATION lib/${PROJECT_NAME} RENAME position_sender_node)
+install(PROGRAMS arm_control/control/exhaustive_scan_node.py DESTINATION lib/${PROJECT_NAME} RENAME exhaustive_scan_node)
 install(PROGRAMS arm_control/control/remote_DASHBOARD.py DESTINATION lib/${PROJECT_NAME} RENAME remote_DASHBOARD)
 install(PROGRAMS arm_control/control/remote_SCRIPT.py DESTINATION lib/${PROJECT_NAME} RENAME remote_SCRIPT)
 install(PROGRAMS arm_control/control/send_and_monitor_trajectory.py DESTINATION lib/${PROJECT_NAME} RENAME send_and_monitor_trajectory)
@@ -60,7 +62,6 @@ install(PROGRAMS arm_control/planner/wall_discretization_node.py DESTINATION lib
 install(PROGRAMS arm_control/planner/visualize_wall_discretization_client.py DESTINATION lib/${PROJECT_NAME} RENAME visualize_wall_discretization_client)
 install(PROGRAMS arm_control/sensors/hyperspectral_node.py DESTINATION lib/${PROJECT_NAME} RENAME hyperspectral_node)
 install(PROGRAMS arm_control/sensors/test_hyperspectral_client.py DESTINATION lib/${PROJECT_NAME} RENAME test_hyperspectral_client)
-install(PROGRAMS arm_control/sensors/sensors_orientation_arduino.py DESTINATION lib/${PROJECT_NAME} RENAME sensors_orientation_arduino)
 
 # Install launch files
 install(DIRECTORY launch/
