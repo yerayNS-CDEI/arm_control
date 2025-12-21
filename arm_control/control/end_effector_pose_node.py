@@ -19,7 +19,7 @@ class EndEffectorListener(Node):
     def timer_callback(self):
         try:
             trans: TransformStamped = self.tf_buffer.lookup_transform(
-                'base', 'tool0', rclpy.time.Time())     # tool0_controller for real robot, tool0 for simulation     # if no namespace is needed, erase "arm/" in both
+                'arm/base', 'arm/tool0', rclpy.time.Time())     # tool0_controller for real robot, tool0 for simulation     # if no namespace is needed, erase "arm/" in both
             
             pos = trans.transform.translation
             rot = trans.transform.rotation

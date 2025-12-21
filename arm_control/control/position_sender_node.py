@@ -7,6 +7,7 @@ from std_msgs.msg import Bool
 import yaml
 import os
 from ament_index_python.packages import get_package_share_directory
+from rclpy.utilities import remove_ros_args
 
 
 class PositionSenderNode(Node):
@@ -48,7 +49,7 @@ class PositionSenderNode(Node):
             },
             'front': {
                 'joints': (),
-                'pose': (-0.9, 0.199, 0.301, 0.695, -0.227, 0.135, 0.669)
+                'pose': (-0.9, 0.199, 0.301, -0.695, -0.227, 0.135, 0.669)
             }
         }
         
@@ -161,8 +162,10 @@ def main(args=None):
     
     # Get command line arguments
     import sys
-    if len(sys.argv) > 1:
-        position_name = sys.argv[1]
+    node_args = remove_ros_args(sys.argv)[1:]  # node-only args (excluding script name)
+
+    if len(node_args) > 0:
+        position_name = sys.node_args[0]
         
         if position_name == 'list':
             node.list_positions()
