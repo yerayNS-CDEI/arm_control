@@ -52,6 +52,7 @@ install(PROGRAMS arm_control/control/exhaustive_scan_node.py DESTINATION lib/${P
 install(PROGRAMS arm_control/control/remote_DASHBOARD.py DESTINATION lib/${PROJECT_NAME} RENAME remote_DASHBOARD)
 install(PROGRAMS arm_control/control/remote_SCRIPT.py DESTINATION lib/${PROJECT_NAME} RENAME remote_SCRIPT)
 install(PROGRAMS arm_control/control/send_and_monitor_trajectory.py DESTINATION lib/${PROJECT_NAME} RENAME send_and_monitor_trajectory)
+install(PROGRAMS arm_control/control/UI.py DESTINATION lib/${PROJECT_NAME} RENAME UI)
 install(PROGRAMS arm_control/sensors/sensors_distance.py DESTINATION lib/${PROJECT_NAME} RENAME sensors_distance)
 install(PROGRAMS arm_control/sensors/sensors_distance_orientation.py DESTINATION lib/${PROJECT_NAME} RENAME sensors_distance_orientation)
 install(PROGRAMS arm_control/sensors/sensors_distance_orientation_sim.py DESTINATION lib/${PROJECT_NAME} RENAME sensors_distance_orientation_sim)

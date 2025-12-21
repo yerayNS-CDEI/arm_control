@@ -13,7 +13,7 @@ class EndEffectorListener(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        self.timer = self.create_timer(0.1, self.timer_callback)  # 10 Hz
+        self.timer = self.create_timer(1.0, self.timer_callback)  # 1 Hz
         self.publisher_ = self.create_publisher(Pose, 'end_effector_pose', 10)
 
     def timer_callback(self):
