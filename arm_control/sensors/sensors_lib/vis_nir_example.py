@@ -1,10 +1,8 @@
-#!/usr/bin/env python3
-
 ##################################################
-#### VIS + NIR ACQUISITION (FINAL ROBUST)
+#### VIS + NIR ACQUISITION
 ##################################################
 
-from lenz_client import LenzClient
+from .lenz_client import LenzClient
 import threading
 import time
 import matplotlib.pyplot as plt

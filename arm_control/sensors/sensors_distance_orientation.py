@@ -18,17 +18,14 @@ class SensorsOrientation(Node):
 
         # Node Variables
         self.end_effector_pose = None
-        self.ideal_distance = 15.0  # cm
+        self.ideal_distance = 25.0  # cm
         self.toggle = 1
         # 3 sensors: A left, B right, C top 
         # Positions on the plate 
         # Define the positions of the sensors
-        # xA, yA = -15, -15 # Position of sensor A 
-        # xB, yB = 15, -15 # Position of sensor B 
-        # xC, yC = 0.0, 15 # Position of sensor C 
-        xA, yA = 15, 15 # Position of sensor A 
-        xB, yB = -15, 15 # Position of sensor B 
-        xC, yC = 0.0, -15 # Position of sensor C 
+        xA, yA = -15, -15 # Position of sensor A 
+        xB, yB = 15, -15 # Position of sensor B 
+        xC, yC = 0.0, 15 # Position of sensor C 
         self.pA= np.array([xA, yA, 0.0])
         self.pB= np.array([xB, yB, 0.0])
         self.pC= np.array([xC, yC, 0.0])
@@ -52,15 +49,15 @@ class SensorsOrientation(Node):
         self.current_joint_state = msg
 
     def listener_distance_callback(self, msg):
-        if len(msg.data) == 6 and  all(v > 0.0 for v in msg.data) and all(v < 255.0 for v in msg.data):
+        if len(msg.data) == 6:
             ultra1, ultra2, ultra3 = msg.data[0:3]
             s1, s2, s3 = msg.data[3:6]
-            self.dA = s1*100
-            self.dB = s2*100
-            self.dC = s3*100
-            # self.dA = ultra3*100    
-            # self.dB = ultra2*100
-            # self.dC = ultra1*100
+            # self.dA = s1*1000
+            # self.dB = s2*1000
+            # self.dC = s3*1000
+            self.dA = ultra2*100    
+            self.dB = ultra3*100
+            self.dC = ultra1*100
 
             self.get_logger().info(
                 f"Ultrasound: [{ultra1:.2f}, {ultra2:.2f}, {ultra3:.2f}] m | "
@@ -94,7 +91,7 @@ class SensorsOrientation(Node):
 
             # Pitch and yaw error angles 
             gamma = -np.arctan2(nw[1],nw[2])
-            beta = np.arctan2(nw[0],nw[2])
+            beta = -np.arctan2(nw[0],nw[2])
             gamma_deg = np.rad2deg(gamma)
             beta_deg = np.rad2deg(beta)
             self.get_logger().info(f"Pitch_ee: {beta_deg:.2f} degrees")
@@ -144,7 +141,7 @@ class SensorsOrientation(Node):
             # Compute corrected position
             nw_global = curr_orn_rot.apply(nw)
             self.get_logger().warn(f"Toggle Value: {self.toggle}")
-            p_new = p_current + 0*(self.toggle)*(distance - self.ideal_distance) * nw_global / 100     # in meters!!
+            p_new = p_current + (self.toggle)*(distance - self.ideal_distance) * nw_global / 100     # in meters!!
             # self.toggle *= -1
 
             # Rotation matrix and transform matrix

@@ -4,7 +4,7 @@ import heapq
 from math import sqrt
 
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
+# from mpl_toolkits.mplot3d import Axes3D  # Not needed - 3D projection auto-registers in matplotlib 3.1+
 
 from scipy.ndimage import binary_dilation
 

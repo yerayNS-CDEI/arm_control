@@ -33,10 +33,10 @@ class SensorsOrientation(Node):
         self.pB= np.array([xB, yB, 0.0])
         self.pC= np.array([xC, yC, 0.0])
 
-        self.trajectory_pub = self.create_publisher(JointTrajectory, '/arm/planned_trajectory', 10)
+        self.trajectory_pub = self.create_publisher(JointTrajectory, '/planned_trajectory', 10)
 
-        self.subscriptor_ = self.create_subscription(Pose, '/arm/end_effector_pose', self.end_effector_pose_callback, 10)
-        self.create_subscription(JointState, "/arm/joint_states", self.joint_state_callback, 10)
+        self.subscriptor_ = self.create_subscription(Pose, '/end_effector_pose', self.end_effector_pose_callback, 10)
+        self.create_subscription(JointState, "/joint_states", self.joint_state_callback, 10)
 
         self.timer = self.create_timer(1.0, self.timer_callback)
 

@@ -24,7 +24,7 @@ class PublisherJointTrajectoryActionClient(Node):
     def __init__(self):
         super().__init__("publisher_joint_trajectory_action_client")
 
-        self.declare_parameter("controller_name", "scaled_joint_trajectory_controller")
+        self.declare_parameter("controller_name", "joint_trajectory_controller")
         self.declare_parameter("joints", ["shoulder_pan_joint", "shoulder_lift_joint",
                                           "elbow_joint", "wrist_1_joint",
                                           "wrist_2_joint", "wrist_3_joint"])

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 #
 # Python code to generate the discretization of the walls to scan
 #
