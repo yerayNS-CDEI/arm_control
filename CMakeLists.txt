@@ -57,6 +57,7 @@ install(PROGRAMS arm_control/sensors/sensors_distance.py DESTINATION lib/${PROJE
 install(PROGRAMS arm_control/sensors/sensors_distance_orientation.py DESTINATION lib/${PROJECT_NAME} RENAME sensors_distance_orientation)
 install(PROGRAMS arm_control/sensors/sensors_distance_orientation_sim.py DESTINATION lib/${PROJECT_NAME} RENAME sensors_distance_orientation_sim)
 install(PROGRAMS arm_control/sensors/sensors_orientation.py DESTINATION lib/${PROJECT_NAME} RENAME sensors_orientation)
+install(PROGRAMS arm_control/sensors/sensors_orientation_arduino.py DESTINATION lib/${PROJECT_NAME} RENAME sensors_orientation_arduino)
 install(PROGRAMS arm_control/planner/base_placement_node.py DESTINATION lib/${PROJECT_NAME} RENAME base_placement_node)
 install(PROGRAMS arm_control/planner/planner_node.py DESTINATION lib/${PROJECT_NAME} RENAME planner_node)
 install(PROGRAMS arm_control/planner/wall_discretization_node.py DESTINATION lib/${PROJECT_NAME} RENAME wall_discretization_node)

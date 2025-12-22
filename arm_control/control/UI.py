@@ -72,10 +72,16 @@ class RobotControlUI(QMainWindow):
         self.btn_sensors_orientation.clicked.connect(self.toggle_sensors_orientation)
         launch_row3.addWidget(self.btn_sensors_orientation)
         
+        self.btn_sensors_orientation_arduino = QPushButton("Launch Sensors Orientation Arduino")
+        self.btn_sensors_orientation_arduino.clicked.connect(self.toggle_sensors_orientation_arduino)
+        launch_row3.addWidget(self.btn_sensors_orientation_arduino)
+        layout.addLayout(launch_row3)
+        
+        launch_row3b = QHBoxLayout()
         self.btn_rqt_controller = QPushButton("Launch RQT Joint Controller")
         self.btn_rqt_controller.clicked.connect(self.toggle_rqt_controller)
-        launch_row3.addWidget(self.btn_rqt_controller)
-        layout.addLayout(launch_row3)
+        launch_row3b.addWidget(self.btn_rqt_controller)
+        layout.addLayout(launch_row3b)
         
         launch_row4 = QHBoxLayout()
         self.btn_general_launch = QPushButton("Launch General")
@@ -281,6 +287,10 @@ class RobotControlUI(QMainWindow):
     def toggle_sensors_orientation(self):
         self._toggle_process('sensors_orientation', self.btn_sensors_orientation, 'Sensors Orientation Node',
                             'ros2', ['run', 'arm_control', 'sensors_orientation'])
+    
+    def toggle_sensors_orientation_arduino(self):
+        self._toggle_process('sensors_orientation_arduino', self.btn_sensors_orientation_arduino, 'Sensors Orientation Arduino',
+                            'ros2', ['run', 'arm_control', 'sensors_orientation_arduino'])
     
     def toggle_rqt_controller(self):
         self._toggle_process('rqt_controller', self.btn_rqt_controller, 'RQT Joint Controller',
