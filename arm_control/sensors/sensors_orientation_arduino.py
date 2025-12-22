@@ -14,7 +14,7 @@ class MultiSensorNode(Node):
     def __init__(self):
         super().__init__('multi_sensor_node')
 
-        self.serial = serial.Serial('/dev/ttyACM0', 115200, timeout=1)
+        self.serial = serial.Serial('/dev/ttyACM2', 115200, timeout=1)
 
         # Publishers
         self.pub_s4 = self.create_publisher(Range, 'vl6180/sensor1', 10)

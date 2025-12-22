@@ -41,11 +41,11 @@ class SensorsOrientation(Node):
         self.last_x_ee = None
 
         self.publisher_ = self.create_publisher(String, 'topic', 10)
-        self.trajectory_pub = self.create_publisher(JointTrajectory, '/planned_trajectory', 10)
+        self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
 
-        self.subscriptor_ = self.create_subscription(Pose, '/end_effector_pose', self.end_effector_pose_callback, 10)
-        self.create_subscription(JointState, "/joint_states", self.joint_state_callback, 10)
-        self.create_subscription(Float32MultiArray, "/distance_sensors", self.listener_distance_callback, 10)
+        self.subscriptor_ = self.create_subscription(Pose, 'end_effector_pose', self.end_effector_pose_callback, 10)
+        self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
+        self.create_subscription(Float32MultiArray, "distance_sensors", self.listener_distance_callback, 10)
 
     def end_effector_pose_callback(self, msg):
         self.end_effector_pose = msg

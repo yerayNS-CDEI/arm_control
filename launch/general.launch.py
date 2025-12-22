@@ -15,13 +15,13 @@ def generate_launch_description():
     # --- Parent-level args (edit at CLI if needed) ---
     arm_ip_arg = DeclareLaunchArgument(
         'robot_ip',
-        default_value=TextSubstitution(text='192.168.56.101'),
+        default_value=TextSubstitution(text='192.168.1.102'),
         description='IP for ARM UR robot',
     )
 
     use_fake_arg = DeclareLaunchArgument(
         'use_fake_hardware',
-        default_value=TextSubstitution(text='true'),
+        default_value=TextSubstitution(text='false'),
         description='Whether to use fake hardware in child launches',
     )
 
