@@ -165,7 +165,7 @@ def main(args=None):
     node_args = remove_ros_args(sys.argv)[1:]  # node-only args (excluding script name)
 
     if len(node_args) > 0:
-        position_name = sys.node_args[0]
+        position_name = node_args[0]
         
         if position_name == 'list':
             node.list_positions()

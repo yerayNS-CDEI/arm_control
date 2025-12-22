@@ -77,6 +77,28 @@ class RobotControlUI(QMainWindow):
         launch_row3.addWidget(self.btn_rqt_controller)
         layout.addLayout(launch_row3)
         
+        launch_row4 = QHBoxLayout()
+        self.btn_general_launch = QPushButton("Launch General")
+        self.btn_general_launch.clicked.connect(self.toggle_general_launch)
+        launch_row4.addWidget(self.btn_general_launch)
+        
+        self.btn_position_sender = QPushButton("Launch Position Sender")
+        self.btn_position_sender.clicked.connect(self.toggle_position_sender)
+        launch_row4.addWidget(self.btn_position_sender)
+        layout.addLayout(launch_row4)
+        
+        # Text input for position sender arguments
+        layout.addWidget(QLabel("Position Sender Position Name:"))
+        position_sender_layout = QHBoxLayout()
+        self.position_sender_args_input = QLineEdit()
+        self.position_sender_args_input.setPlaceholderText("Position name (e.g., custom, folded, unfolded, up, down, front)")
+        position_sender_layout.addWidget(self.position_sender_args_input)
+        
+        btn_send_position_args = QPushButton("Send Position")
+        btn_send_position_args.clicked.connect(self.send_position_once)
+        position_sender_layout.addWidget(btn_send_position_args)
+        layout.addLayout(position_sender_layout)
+        
         # Position inputs
         layout.addWidget(QLabel("Goal Position:"))
         pos_layout = QHBoxLayout()
@@ -264,6 +286,22 @@ class RobotControlUI(QMainWindow):
         self._toggle_process('rqt_controller', self.btn_rqt_controller, 'RQT Joint Controller',
                             'ros2', ['run', 'rqt_joint_trajectory_controller', 'rqt_joint_trajectory_controller', '--force-discover'])
     
+    def toggle_general_launch(self):
+        self._toggle_process('general_launch', self.btn_general_launch, 'General Launch',
+                            'ros2', ['launch', 'arm_control', 'general.launch.py'])
+    
+    def toggle_position_sender(self):
+        # Build args with custom input if provided
+        args = ['run', 'arm_control', 'position_sender_node', '--ros-args', '-r', '__ns:=/arm', '--']
+        
+        # Add the text input as argv[1] (position name)
+        position_arg = self.position_sender_args_input.text().strip()
+        if position_arg:
+            args.append(position_arg)
+        
+        self._toggle_process('position_sender', self.btn_position_sender, 'Position Sender',
+                            'ros2', args)
+    
     def _toggle_process(self, process_key, button, name, program, args):
         """Toggle a process on/off and update button state"""
         if process_key in self.process_map:
@@ -354,6 +392,25 @@ class RobotControlUI(QMainWindow):
             self.status_text.append(f"Published sensors: Ultra[{msg.data[0]:.3f}, {msg.data[1]:.3f}, {msg.data[2]:.3f}] ToF[{msg.data[3]:.3f}, {msg.data[4]:.3f}, {msg.data[5]:.3f}]")
         except Exception as e:
             self.status_text.append(f"⚠ Failed to publish sensors: {e}")
+    
+    def send_position_once(self):
+        """Launch position_sender_node once with the specified position name"""
+        position_name = self.position_sender_args_input.text().strip()
+        if not position_name:
+            self.status_text.append("⚠ Please enter a position name")
+            return
+        
+        try:
+            # Run the position sender node as a one-time command
+            args = ['run', 'arm_control', 'position_sender_node', '--ros-args', '-r', '__ns:=/arm', '--', position_name]
+            process = QProcess(self)
+            process.setProcessChannelMode(QProcess.MergedChannels)
+            process.readyReadStandardOutput.connect(lambda: self.handle_output(process))
+            process.finished.connect(lambda: self.status_text.append(f"✓ Position '{position_name}' command completed"))
+            process.start('ros2', args)
+            self.status_text.append(f"→ Sending position '{position_name}' via position_sender_node")
+        except Exception as e:
+            self.status_text.append(f"⚠ Failed to send position: {e}")
     
     def emergency_stop(self):
         """Trigger emergency stop and cancel current trajectory goal"""
