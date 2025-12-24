@@ -9,7 +9,7 @@ from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from scipy.spatial.transform import Rotation as R
-from arm_control.planner.planner_lib.closed_form_algorithm import closed_form_algorithm
+from planner.planner_lib.closed_form_algorithm import closed_form_algorithm
 
 class SensorsOrientation(Node):
 
@@ -18,19 +18,14 @@ class SensorsOrientation(Node):
 
         # Node Variables
         self.end_effector_pose = None
-        self.ideal_distance = 20.0  # cm
+        self.ideal_distance = 25.0  # cm
         self.toggle = 1
         # 3 sensors: A left, B right, C top 
         # Positions on the plate 
         # Define the positions of the sensors
-        # ULTRA
         xA, yA = -15, -15 # Position of sensor A 
         xB, yB = 15, -15 # Position of sensor B 
         xC, yC = 0.0, 15 # Position of sensor C 
-        # VL6180X ToF
-        # xA, yA = 15, 15 # Position of sensor A 
-        # xB, yB = -15, 15 # Position of sensor B 
-        # xC, yC = 0.0, -15 # Position of sensor C 
         self.pA= np.array([xA, yA, 0.0])
         self.pB= np.array([xB, yB, 0.0])
         self.pC= np.array([xC, yC, 0.0])
@@ -41,11 +36,11 @@ class SensorsOrientation(Node):
         self.last_x_ee = None
 
         self.publisher_ = self.create_publisher(String, 'topic', 10)
-        self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
+        self.trajectory_pub = self.create_publisher(JointTrajectory, '/planned_trajectory', 10)
 
-        self.subscriptor_ = self.create_subscription(Pose, 'end_effector_pose', self.end_effector_pose_callback, 10)
-        self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
-        self.create_subscription(Float32MultiArray, "distance_sensors", self.listener_distance_callback, 10)
+        self.subscriptor_ = self.create_subscription(Pose, '/end_effector_pose', self.end_effector_pose_callback, 10)
+        self.create_subscription(JointState, "/joint_states", self.joint_state_callback, 10)
+        self.create_subscription(Float32MultiArray, "/distance_sensors", self.listener_distance_callback, 10)
 
     def end_effector_pose_callback(self, msg):
         self.end_effector_pose = msg
@@ -54,7 +49,7 @@ class SensorsOrientation(Node):
         self.current_joint_state = msg
 
     def listener_distance_callback(self, msg):
-        if len(msg.data) == 6 and  all(v >= 0.0 for v in msg.data) and all(v < 255.0 for v in msg.data):
+        if len(msg.data) == 6:
             ultra1, ultra2, ultra3 = msg.data[0:3]
             s1, s2, s3 = msg.data[3:6]
             # self.dA = s1*1000
@@ -96,7 +91,7 @@ class SensorsOrientation(Node):
 
             # Pitch and yaw error angles 
             gamma = -np.arctan2(nw[1],nw[2])
-            beta = np.arctan2(nw[0],nw[2])
+            beta = -np.arctan2(nw[0],nw[2])
             gamma_deg = np.rad2deg(gamma)
             beta_deg = np.rad2deg(beta)
             self.get_logger().info(f"Pitch_ee: {beta_deg:.2f} degrees")
