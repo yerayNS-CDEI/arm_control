@@ -51,8 +51,8 @@ class PublisherJointTrajectory(Node):
                 if len(self.starting_point[name]) != 2:
                     raise Exception('"starting_point" parameter is not set correctly!')
             self.joint_state_sub = self.create_subscription(JointState, "/joint_states", self.joint_state_callback, 10)
-            self.create_subscription(JointTrajectory, "/planned_trajectory", self.joint_path_callback, 10)
-            self.create_subscription(Bool, "/emergency_stop", self.emergency_stop_callback, 10)
+            self.create_subscription(JointTrajectory, "planned_trajectory", self.joint_path_callback, 10)
+            self.create_subscription(Bool, "emergency_stop", self.emergency_stop_callback, 10)
 
         # initialize starting point status
         self.starting_point_ok = not self.check_starting_point

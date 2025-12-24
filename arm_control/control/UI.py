@@ -20,9 +20,9 @@ class RobotControlUI(QMainWindow):
             rclpy.init()
         
         self.node = rclpy.create_node('robot_control_ui')
-        self.goal_publisher = self.node.create_publisher(Pose, '/goal_pose', 10)
-        self.emergency_stop_publisher = self.node.create_publisher(Bool, '/emergency_stop', 10)
-        self.distance_sensor_publisher = self.node.create_publisher(Float32MultiArray, '/distance_sensors', 10)
+        self.goal_publisher = self.node.create_publisher(Pose, '/arm/goal_pose', 10)
+        self.emergency_stop_publisher = self.node.create_publisher(Bool, '/arm/emergency_stop', 10)
+        self.distance_sensor_publisher = self.node.create_publisher(Float32MultiArray, '/arm/distance_sensors', 10)
         
         # Track processes and their associated buttons
         self.process_map = {}
@@ -32,81 +32,54 @@ class RobotControlUI(QMainWindow):
         self.action_client = ActionClient(
             self.node, 
             FollowJointTrajectory, 
-            '/scaled_joint_trajectory_controller/follow_joint_trajectory'
+            '/arm/joint_trajectory_controller/follow_joint_trajectory'
         )
         self.current_goal_handle = None
         
         self.setWindowTitle("Robot Control Panel")
         self.setGeometry(100, 100, 800, 600)
         
-        # Central widget
+        # Central widget with tabs
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        main_layout = QVBoxLayout(central)
         
-        # Launch buttons - arranged horizontally
-        layout.addWidget(QLabel("Launch Controls:"))
+        # Create tab widget
+        tabs = QTabWidget()
+        main_layout.addWidget(tabs)
         
-        launch_row1 = QHBoxLayout()
-        self.btn_ur_control = QPushButton("Launch UR Control")
-        self.btn_ur_control.clicked.connect(self.toggle_ur_control)
-        launch_row1.addWidget(self.btn_ur_control)
+        # Control Tab
+        control_tab = QWidget()
+        control_layout = QVBoxLayout(control_tab)
         
-        self.btn_trajectory_launch = QPushButton("Launch Scaled Joint Trajectory")
-        self.btn_trajectory_launch.clicked.connect(self.toggle_trajectory)
-        launch_row1.addWidget(self.btn_trajectory_launch)
-        layout.addLayout(launch_row1)
-        
-        launch_row2 = QHBoxLayout()
-        self.btn_planner = QPushButton("Launch Planner Node")
-        self.btn_planner.clicked.connect(self.toggle_planner)
-        launch_row2.addWidget(self.btn_planner)
-        
-        self.btn_end_effector = QPushButton("Launch End Effector Pose Node")
-        self.btn_end_effector.clicked.connect(self.toggle_end_effector_pose)
-        launch_row2.addWidget(self.btn_end_effector)
-        layout.addLayout(launch_row2)
-        
-        launch_row3 = QHBoxLayout()
-        self.btn_sensors_orientation = QPushButton("Launch Sensors Orientation Node")
-        self.btn_sensors_orientation.clicked.connect(self.toggle_sensors_orientation)
-        launch_row3.addWidget(self.btn_sensors_orientation)
-        
-        self.btn_sensors_orientation_arduino = QPushButton("Launch Sensors Orientation Arduino")
-        self.btn_sensors_orientation_arduino.clicked.connect(self.toggle_sensors_orientation_arduino)
-        launch_row3.addWidget(self.btn_sensors_orientation_arduino)
-        layout.addLayout(launch_row3)
-        
-        launch_row3b = QHBoxLayout()
-        self.btn_rqt_controller = QPushButton("Launch RQT Joint Controller")
-        self.btn_rqt_controller.clicked.connect(self.toggle_rqt_controller)
-        launch_row3b.addWidget(self.btn_rqt_controller)
-        layout.addLayout(launch_row3b)
-        
-        launch_row4 = QHBoxLayout()
+        # Launch General button
+        control_layout.addWidget(QLabel("System Control:"))
         self.btn_general_launch = QPushButton("Launch General")
         self.btn_general_launch.clicked.connect(self.toggle_general_launch)
-        launch_row4.addWidget(self.btn_general_launch)
+        self.btn_general_launch.setToolTip("ros2 launch arm_control general.launch.py use_fake_hardware:=true robot_ip:=192.168.1.102")
+        control_layout.addWidget(self.btn_general_launch)
         
-        self.btn_position_sender = QPushButton("Launch Position Sender")
-        self.btn_position_sender.clicked.connect(self.toggle_position_sender)
-        launch_row4.addWidget(self.btn_position_sender)
-        layout.addLayout(launch_row4)
+        # RQT Joint Controller button
+        self.btn_rqt_controller = QPushButton("Launch RQT Joint Controller")
+        self.btn_rqt_controller.clicked.connect(self.toggle_rqt_controller)
+        self.btn_rqt_controller.setToolTip("ros2 run rqt_joint_trajectory_controller rqt_joint_trajectory_controller --force-discover")
+        control_layout.addWidget(self.btn_rqt_controller)
         
-        # Text input for position sender arguments
-        layout.addWidget(QLabel("Position Sender Position Name:"))
+        # Dropdown for position selection
+        control_layout.addWidget(QLabel("Select Position:"))
         position_sender_layout = QHBoxLayout()
-        self.position_sender_args_input = QLineEdit()
-        self.position_sender_args_input.setPlaceholderText("Position name (e.g., custom, folded, unfolded, up, down, front)")
-        position_sender_layout.addWidget(self.position_sender_args_input)
+        self.position_dropdown = QComboBox()
+        self.position_dropdown.addItems(['custom', 'folded', 'unfolded', 'up', 'down', 'front', 'list'])
+        position_sender_layout.addWidget(self.position_dropdown)
         
-        btn_send_position_args = QPushButton("Send Position")
-        btn_send_position_args.clicked.connect(self.send_position_once)
-        position_sender_layout.addWidget(btn_send_position_args)
-        layout.addLayout(position_sender_layout)
+        btn_send_position = QPushButton("Send Position")
+        btn_send_position.clicked.connect(self.send_position_command)
+        btn_send_position.setToolTip("ros2 run arm_control position_sender_node --ros-args -r __ns:=/arm -- <position>")
+        position_sender_layout.addWidget(btn_send_position)
+        control_layout.addLayout(position_sender_layout)
         
         # Position inputs
-        layout.addWidget(QLabel("Goal Position:"))
+        control_layout.addWidget(QLabel("Goal Position:"))
         pos_layout = QHBoxLayout()
         self.x_input = QDoubleSpinBox()
         self.x_input.setRange(-2, 2)
@@ -126,10 +99,10 @@ class RobotControlUI(QMainWindow):
         pos_layout.addWidget(self.x_input)
         pos_layout.addWidget(self.y_input)
         pos_layout.addWidget(self.z_input)
-        layout.addLayout(pos_layout)
+        control_layout.addLayout(pos_layout)
         
         # Orientation inputs
-        layout.addWidget(QLabel("Goal Orientation (Quaternion):"))
+        control_layout.addWidget(QLabel("Goal Orientation (Quaternion):"))
         orn_layout = QHBoxLayout()
         self.qx_input = QDoubleSpinBox()
         self.qx_input.setRange(-1, 1)
@@ -163,10 +136,45 @@ class RobotControlUI(QMainWindow):
         orn_layout.addWidget(self.qy_input)
         orn_layout.addWidget(self.qz_input)
         orn_layout.addWidget(self.qw_input)
-        layout.addLayout(orn_layout)
+        control_layout.addLayout(orn_layout)
+        
+        # Send goal and emergency stop buttons
+        goal_layout = QHBoxLayout()
+        btn_send_goal = QPushButton("Send Goal Pose")
+        btn_send_goal.clicked.connect(self.send_goal)
+        btn_send_goal.setToolTip("Publish Pose message to /arm/goal_pose topic")
+        goal_layout.addWidget(btn_send_goal)
+        
+        btn_emergency_stop = QPushButton("EMERGENCY STOP / Cancel Goals")
+        btn_emergency_stop.setStyleSheet("background-color: red; color: white; font-weight: bold;")
+        btn_emergency_stop.clicked.connect(self.emergency_stop)
+        btn_emergency_stop.setToolTip("Publish emergency stop to /arm/emergency_stop and cancel trajectory goals")
+        goal_layout.addWidget(btn_emergency_stop)
+        control_layout.addLayout(goal_layout)
+        
+        control_layout.addStretch()
+        tabs.addTab(control_tab, "Control")
+        
+        # Status Tab
+        status_tab = QWidget()
+        status_layout = QVBoxLayout(status_tab)
+        status_layout.addWidget(QLabel("Status information will be added here"))
+        status_layout.addStretch()
+        tabs.addTab(status_tab, "Status")
+        
+        # Sensors Tab
+        sensors_tab = QWidget()
+        sensors_layout = QVBoxLayout(sensors_tab)
         
         # Distance Sensor Simulation
-        layout.addWidget(QLabel("Distance Sensors (Simulation):"))
+        sensors_layout.addWidget(QLabel("Distance Sensors (Simulation):"))
+        
+        # Arduino sensor node button
+        self.btn_arduino_sensors = QPushButton("Launch Arduino Sensors")
+        self.btn_arduino_sensors.clicked.connect(self.toggle_arduino_sensors)
+        self.btn_arduino_sensors.setToolTip("ros2 run arm_control sensors_orientation_arduino --ros-args -r __ns:=/arm")
+        sensors_layout.addWidget(self.btn_arduino_sensors)
+        
         sensor_layout = QHBoxLayout()
         
         # Ultrasound sensors (in meters)
@@ -197,7 +205,7 @@ class RobotControlUI(QMainWindow):
         sensor_layout.addWidget(self.ultra1_input)
         sensor_layout.addWidget(self.ultra2_input)
         sensor_layout.addWidget(self.ultra3_input)
-        layout.addLayout(sensor_layout)
+        sensors_layout.addLayout(sensor_layout)
         
         # ToF sensors (in meters)
         tof_layout = QHBoxLayout()
@@ -228,30 +236,24 @@ class RobotControlUI(QMainWindow):
         tof_layout.addWidget(self.tof1_input)
         tof_layout.addWidget(self.tof2_input)
         tof_layout.addWidget(self.tof3_input)
-        layout.addLayout(tof_layout)
+        sensors_layout.addLayout(tof_layout)
         
         # Publish sensors button
         btn_publish_sensors = QPushButton("Publish Sensor Data")
         btn_publish_sensors.clicked.connect(self.publish_sensor_data)
-        layout.addWidget(btn_publish_sensors)
+        btn_publish_sensors.setToolTip("Publish Float32MultiArray to /arm/distance_sensors topic")
+        sensors_layout.addWidget(btn_publish_sensors)
         
-        # Send goal and emergency stop buttons
-        goal_layout = QHBoxLayout()
-        btn_send_goal = QPushButton("Send Goal Pose")
-        btn_send_goal.clicked.connect(self.send_goal)
-        goal_layout.addWidget(btn_send_goal)
+        sensors_layout.addStretch()
+        tabs.addTab(sensors_tab, "Sensors")
         
-        btn_emergency_stop = QPushButton("EMERGENCY STOP / Cancel Goals")
-        btn_emergency_stop.setStyleSheet("background-color: red; color: white; font-weight: bold;")
-        btn_emergency_stop.clicked.connect(self.emergency_stop)
-        goal_layout.addWidget(btn_emergency_stop)
-        layout.addLayout(goal_layout)
-        
-        # Status display
+        # Status display (shared across all tabs, at bottom of main window)
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
-        layout.addWidget(QLabel("Status:"))
-        layout.addWidget(self.status_text)
+        self.status_text.setAcceptRichText(True)
+        self.status_text.setStyleSheet("background-color: #22272e; color: #adbac7; border: 1px solid #444c56;")
+        main_layout.addWidget(QLabel("Status:"))
+        main_layout.addWidget(self.status_text)
         
         # Timer for ROS spinning
         self.timer = QTimer()
@@ -266,51 +268,18 @@ class RobotControlUI(QMainWindow):
         except Exception:
             pass  # Ignore errors if context is shutting down
         
-    def toggle_ur_control(self):
-        self._toggle_process('ur_control', self.btn_ur_control, 'UR Control',
-                            'ros2', ['launch', 'arm_control', 'ur_control.launch.py',
-                                    'ur_type:=ur10e', 'robot_ip:=192.168.56.102',
-                                    'use_fake_hardware:=true', 'launch_rviz:=true'])
-    
-    def toggle_trajectory(self):
-        self._toggle_process('trajectory', self.btn_trajectory_launch, 'Scaled Joint Trajectory',
-                            'ros2', ['launch', 'arm_control', 'test_scaled_joint_trajectory_planned.launch.py'])
-        
-    def toggle_planner(self):
-        self._toggle_process('planner', self.btn_planner, 'Planner Node',
-                            'ros2', ['run', 'arm_control', 'planner_node'])
-    
-    def toggle_end_effector_pose(self):
-        self._toggle_process('end_effector', self.btn_end_effector, 'End Effector Pose Node',
-                            'ros2', ['run', 'arm_control', 'end_effector_pose_node'])
-    
-    def toggle_sensors_orientation(self):
-        self._toggle_process('sensors_orientation', self.btn_sensors_orientation, 'Sensors Orientation Node',
-                            'ros2', ['run', 'arm_control', 'sensors_orientation'])
-    
-    def toggle_sensors_orientation_arduino(self):
-        self._toggle_process('sensors_orientation_arduino', self.btn_sensors_orientation_arduino, 'Sensors Orientation Arduino',
-                            'ros2', ['run', 'arm_control', 'sensors_orientation_arduino'])
+    def toggle_general_launch(self):
+        self._toggle_process('general_launch', self.btn_general_launch, 'General Launch',
+                            'ros2', ['launch', 'arm_control', 'general.launch.py', 
+                                    'use_fake_hardware:=true', 'robot_ip:=192.168.1.102'])
     
     def toggle_rqt_controller(self):
         self._toggle_process('rqt_controller', self.btn_rqt_controller, 'RQT Joint Controller',
                             'ros2', ['run', 'rqt_joint_trajectory_controller', 'rqt_joint_trajectory_controller', '--force-discover'])
     
-    def toggle_general_launch(self):
-        self._toggle_process('general_launch', self.btn_general_launch, 'General Launch',
-                            'ros2', ['launch', 'arm_control', 'general.launch.py'])
-    
-    def toggle_position_sender(self):
-        # Build args with custom input if provided
-        args = ['run', 'arm_control', 'position_sender_node', '--ros-args', '-r', '__ns:=/arm', '--']
-        
-        # Add the text input as argv[1] (position name)
-        position_arg = self.position_sender_args_input.text().strip()
-        if position_arg:
-            args.append(position_arg)
-        
-        self._toggle_process('position_sender', self.btn_position_sender, 'Position Sender',
-                            'ros2', args)
+    def toggle_arduino_sensors(self):
+        self._toggle_process('arduino_sensors', self.btn_arduino_sensors, 'Arduino Sensors',
+                            'ros2', ['run', 'arm_control', 'sensors_orientation_arduino', '--ros-args', '-r', '__ns:=/arm'])
     
     def _toggle_process(self, process_key, button, name, program, args):
         """Toggle a process on/off and update button state"""
@@ -324,11 +293,13 @@ class RobotControlUI(QMainWindow):
                 pass
             
             # For ur_control, kill rviz2 before terminating the launch process
-            if process_key == 'ur_control':
+            if process_key in ['ur_control', 'general_launch']:
                 try:
                     subprocess.run(['pkill', '-9', 'rviz2'], timeout=2, stderr=subprocess.DEVNULL)
                 except:
                     pass
+                # Extra cleanup for child ROS processes spawned by launch files
+                self._cleanup_ros_children()
             
             process.terminate()
             process.waitForFinished(3000)
@@ -345,11 +316,15 @@ class RobotControlUI(QMainWindow):
             process.setProcessChannelMode(QProcess.MergedChannels)
             process.readyReadStandardOutput.connect(lambda: self.handle_output(process))
             process.finished.connect(lambda: self._on_process_finished(process_key, button, name))
+            
+            # Display command in bold green
+            cmd_str = program + ' ' + ' '.join(args)
+            self.status_text.append(f"<b style='color: green;'>▶ {cmd_str}</b>")
+            
             process.start(program, args)
             self.process_map[process_key] = process
             button.setText(f"Stop {name}")
             button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
-            self.status_text.append(f"▶ Launched {name}")
     
     def _on_process_finished(self, process_key, button, name):
         """Handle when a process finishes unexpectedly"""
@@ -357,16 +332,25 @@ class RobotControlUI(QMainWindow):
             del self.process_map[process_key]
             button.setText(f"Launch {name}")
             button.setStyleSheet("")
-            self.status_text.append(f"⚠ {name} exited")
+            self.status_text.append(f"<span style='color: orange;'>⚠ {name} exited</span>")
     
     def handle_output(self, process):
         output = process.readAllStandardOutput().data().decode()
         if output.strip():
-            self.status_text.append(output.strip())
+            # Color-code ROS log messages
+            lines = output.strip().split('\n')
+            for line in lines:
+                if '[WARN]' in line or '[WARNING]' in line:
+                    self.status_text.append(f"<span style='color: orange;'>{line}</span>")
+                elif '[ERROR]' in line or '[FATAL]' in line:
+                    self.status_text.append(f"<span style='color: red;'>{line}</span>")
+                else:
+                    # INFO and other messages use default color
+                    self.status_text.append(line)
         
     def send_goal(self):
         if not rclpy.ok():
-            self.status_text.append("⚠ ROS context invalid - cannot publish")
+            self.status_text.append("<span style='color: orange;'>⚠ ROS context invalid - cannot publish</span>")
             return
         try:
             pose = Pose()
@@ -380,12 +364,12 @@ class RobotControlUI(QMainWindow):
             self.goal_publisher.publish(pose)
             self.status_text.append(f"Sent goal: pos({pose.position.x:.2f}, {pose.position.y:.2f}, {pose.position.z:.2f}) orn({pose.orientation.x:.2f}, {pose.orientation.y:.2f}, {pose.orientation.z:.2f}, {pose.orientation.w:.2f})")
         except Exception as e:
-            self.status_text.append(f"⚠ Failed to send goal: {e}")
+            self.status_text.append(f"<span style='color: red;'>❌ Failed to send goal: {e}</span>")
     
     def publish_sensor_data(self):
         """Publish simulated distance sensor data"""
         if not rclpy.ok():
-            self.status_text.append("⚠ ROS context invalid - cannot publish")
+            self.status_text.append("<span style='color: orange;'>⚠ ROS context invalid - cannot publish</span>")
             return
         try:
             msg = Float32MultiArray()
@@ -401,60 +385,105 @@ class RobotControlUI(QMainWindow):
             self.distance_sensor_publisher.publish(msg)
             self.status_text.append(f"Published sensors: Ultra[{msg.data[0]:.3f}, {msg.data[1]:.3f}, {msg.data[2]:.3f}] ToF[{msg.data[3]:.3f}, {msg.data[4]:.3f}, {msg.data[5]:.3f}]")
         except Exception as e:
-            self.status_text.append(f"⚠ Failed to publish sensors: {e}")
+            self.status_text.append(f"<span style='color: red;'>❌ Failed to publish sensors: {e}</span>")
     
-    def send_position_once(self):
-        """Launch position_sender_node once with the specified position name"""
-        position_name = self.position_sender_args_input.text().strip()
-        if not position_name:
-            self.status_text.append("⚠ Please enter a position name")
-            return
+    def send_position_command(self):
+        """Send position by launching node with selected position as argument"""
+        position_name = self.position_dropdown.currentText()
         
-        try:
-            # Run the position sender node as a one-time command
-            args = ['run', 'arm_control', 'position_sender_node', '--ros-args', '-r', '__ns:=/arm', '--', position_name]
-            process = QProcess(self)
-            process.setProcessChannelMode(QProcess.MergedChannels)
-            process.readyReadStandardOutput.connect(lambda: self.handle_output(process))
-            process.finished.connect(lambda: self.status_text.append(f"✓ Position '{position_name}' command completed"))
-            process.start('ros2', args)
-            self.status_text.append(f"→ Sending position '{position_name}' via position_sender_node")
-        except Exception as e:
-            self.status_text.append(f"⚠ Failed to send position: {e}")
+        # Build command
+        args = ['run', 'arm_control', 'position_sender_node', 
+                '--ros-args', '-r', '__ns:=/arm', '--', position_name]
+        
+        # Display command in bold green
+        cmd_str = 'ros2 ' + ' '.join(args)
+        self.status_text.append(f"<b style='color: green;'>→ {cmd_str}</b>")
+        
+        # Launch the position_sender_node with the selected position
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(lambda: self.handle_output(process))
+        
+        # Store process temporarily to prevent garbage collection
+        process_key = f'position_cmd_{position_name}'
+        process.finished.connect(lambda: self._cleanup_position_sender(process_key, position_name))
+        process.start('ros2', args)
+        self.process_map[process_key] = process
+    
+    def _cleanup_position_sender(self, process_key, position_name):
+        """Clean up finished position sender process"""
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+        self.status_text.append(f"✓ Position '{position_name}' command completed")
     
     def emergency_stop(self):
         """Trigger emergency stop and cancel current trajectory goal"""
         if not rclpy.ok():
-            self.status_text.append("⚠ ROS context invalid - cannot send emergency stop")
+            self.status_text.append("<span style='color: orange;'>⚠ ROS context invalid - cannot send emergency stop</span>")
             return
         try:
             # Publish emergency stop signal
             stop_msg = Bool()
             stop_msg.data = True
             self.emergency_stop_publisher.publish(stop_msg)
-            self.status_text.append("⚠️ EMERGENCY STOP - Published stop signal")
+            self.status_text.append("<span style='color: orange;'>⚠️ EMERGENCY STOP - Published stop signal</span>")
             
             # Cancel current goal if one exists
             if self.current_goal_handle is not None:
                 cancel_future = self.current_goal_handle.cancel_goal_async()
-                self.status_text.append("⚠️ Canceling current trajectory goal...")
+                self.status_text.append("<span style='color: orange;'>⚠️ Canceling current trajectory goal...</span>")
                 self.current_goal_handle = None
         except Exception as e:
-            self.status_text.append(f"Error during emergency stop: {e}")
+            self.status_text.append(f"<span style='color: red;'>❌ Error during emergency stop: {e}</span>")
         
     def closeEvent(self, event):
         self.timer.stop()
+        self.status_text.append("Shutting down and cleaning up processes...")
+        
         # Terminate all launched processes
-        for process in self.process_map.values():
+        for process_key, process in list(self.process_map.items()):
             if process.state() == QProcess.Running:
+                # Get PID and kill entire process group
+                pid = process.processId()
+                self.status_text.append(f"Terminating {process_key} (PID: {pid})...")
+                
+                # Try graceful termination first
                 process.terminate()
-                process.waitForFinished(3000)
-                if process.state() == QProcess.Running:
+                if not process.waitForFinished(2000):
+                    # Force kill if still running
                     process.kill()
+                    process.waitForFinished(1000)
+                
+                # Kill entire process group to catch child processes
+                if pid:
+                    try:
+                        subprocess.run(['pkill', '-9', '-P', str(pid)], timeout=1, stderr=subprocess.DEVNULL)
+                    except:
+                        pass
+
+        # Kill any remaining ROS2 processes from this session
+        self._cleanup_ros_children()
         self.node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
         event.accept()
+
+    def _cleanup_ros_children(self):
+        """Best-effort cleanup of ROS child processes launched by ros2 launch/run."""
+        patterns = [
+            'rviz2',
+            'ros2_control_node',
+            'publisher_joint_trajectory_planned',
+            'planner_node',
+            'end_effector_pose_node',
+            'position_sender_node',
+            'sensors_orientation',
+        ]
+        for pat in patterns:
+            try:
+                subprocess.run(['pkill', '-9', '-f', pat], timeout=1, stderr=subprocess.DEVNULL)
+            except:
+                pass
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

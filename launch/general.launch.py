@@ -21,7 +21,7 @@ def generate_launch_description():
 
     use_fake_arg = DeclareLaunchArgument(
         'use_fake_hardware',
-        default_value=TextSubstitution(text='false'),
+        default_value=TextSubstitution(text='true'),
         description='Whether to use fake hardware in child launches',
     )
 
@@ -77,7 +77,7 @@ def generate_launch_description():
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(publisher_launch),
             launch_arguments={
-                'check_starting_point': TextSubstitution(text='false'), # We do not pass 'namespace' here; it inherits '/arm' from GroupAction.
+                'check_starting_point': TextSubstitution(text='false'),
             }.items(),
         ),
 
@@ -93,6 +93,14 @@ def generate_launch_description():
             package="arm_control",
             executable="end_effector_pose_node",
             name="end_effector_pose_node",
+            output="screen",
+            parameters=[{'use_sim_time': arm_use_sim_time}],
+        ),
+        
+        Node(
+            package="arm_control",
+            executable="sensors_orientation",
+            name="sensors_orientation_node",
             output="screen",
             parameters=[{'use_sim_time': arm_use_sim_time}],
         ),
