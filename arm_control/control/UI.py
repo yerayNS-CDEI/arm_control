@@ -3,6 +3,7 @@ import sys
 import os
 import subprocess
 import signal
+import socket
 import rclpy
 from rclpy.action import ActionClient
 from PyQt5.QtWidgets import *
@@ -28,6 +29,11 @@ class RobotControlUI(QMainWindow):
         self.process_map = {}
         self.button_map = {}
         
+        # Robot dashboard connection
+        self.robot_socket = None
+        self.robot_host = '192.168.1.102'
+        self.robot_port = 29999
+        
         # Action client for canceling trajectory goals
         self.action_client = ActionClient(
             self.node, 
@@ -37,20 +43,21 @@ class RobotControlUI(QMainWindow):
         self.current_goal_handle = None
         
         self.setWindowTitle("Robot Control Panel")
-        self.setGeometry(100, 100, 800, 600)
+        self.setGeometry(100, 100, 1200, 700)
         
-        # Central widget with tabs
+        # Central widget
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
         
-        # Create tab widget
-        tabs = QTabWidget()
-        main_layout.addWidget(tabs)
+        # Horizontal layout for three boxes side by side
+        boxes_layout = QHBoxLayout()
+        main_layout.addLayout(boxes_layout)
         
-        # Control Tab
-        control_tab = QWidget()
-        control_layout = QVBoxLayout(control_tab)
+        # Control Box
+        control_box = QGroupBox("Control")
+        control_layout = QVBoxLayout()
+        control_box.setLayout(control_layout)
         
         # Launch General button
         control_layout.addWidget(QLabel("System Control:"))
@@ -62,7 +69,7 @@ class RobotControlUI(QMainWindow):
         # RQT Joint Controller button
         self.btn_rqt_controller = QPushButton("Launch RQT Joint Controller")
         self.btn_rqt_controller.clicked.connect(self.toggle_rqt_controller)
-        self.btn_rqt_controller.setToolTip("ros2 run rqt_joint_trajectory_controller rqt_joint_trajectory_controller --force-discover")
+        self.btn_rqt_controller.setToolTip("ros2 run rqt_joint_trajectory_controller rqt_joint_trajectory_controller --force-discover --ros-args -r __ns:=/arm\n(Requires General Launch to be running)")
         control_layout.addWidget(self.btn_rqt_controller)
         
         # Dropdown for position selection
@@ -153,18 +160,59 @@ class RobotControlUI(QMainWindow):
         control_layout.addLayout(goal_layout)
         
         control_layout.addStretch()
-        tabs.addTab(control_tab, "Control")
         
-        # Status Tab
-        status_tab = QWidget()
-        status_layout = QVBoxLayout(status_tab)
-        status_layout.addWidget(QLabel("Status information will be added here"))
-        status_layout.addStretch()
-        tabs.addTab(status_tab, "Status")
+        # Initialization Box (formerly Status, now first)
+        init_box = QGroupBox("Initialization")
+        init_layout = QVBoxLayout()
+        init_box.setLayout(init_layout)
         
-        # Sensors Tab
-        sensors_tab = QWidget()
-        sensors_layout = QVBoxLayout(sensors_tab)
+        # Status Commands
+        init_layout.addWidget(QLabel("Status Commands:"))
+        self.status_cmd_combo = QComboBox()
+        self.status_cmd_combo.addItems([
+            'robotmode',
+            'safetystatus',
+            'programState',
+            'running',
+            'get loaded program',
+            'is in remote control'
+        ])
+        init_layout.addWidget(self.status_cmd_combo)
+        
+        btn_send_status = QPushButton("Send Status Command")
+        btn_send_status.clicked.connect(self.send_status_command)
+        init_layout.addWidget(btn_send_status)
+        
+        # Control Commands
+        init_layout.addWidget(QLabel("\nControl Commands:"))
+        self.control_cmd_combo = QComboBox()
+        self.control_cmd_combo.addItems([
+            'power on',
+            'power off',
+            'brake release',
+            'play',
+            'pause',
+            'stop',
+            'close popup',
+            'close safety popup',
+            'unlock protective stop'
+        ])
+        init_layout.addWidget(self.control_cmd_combo)
+        
+        btn_send_control = QPushButton("Send Control Command")
+        btn_send_control.clicked.connect(self.send_control_command)
+        init_layout.addWidget(btn_send_control)
+        
+        init_layout.addStretch()
+        boxes_layout.addWidget(init_box)
+        
+        # Control Box (now second)
+        boxes_layout.addWidget(control_box)
+        
+        # Sensors Box
+        sensors_box = QGroupBox("Sensors")
+        sensors_layout = QVBoxLayout()
+        sensors_box.setLayout(sensors_layout)
         
         # Distance Sensor Simulation
         sensors_layout.addWidget(QLabel("Distance Sensors (Simulation):"))
@@ -245,14 +293,23 @@ class RobotControlUI(QMainWindow):
         sensors_layout.addWidget(btn_publish_sensors)
         
         sensors_layout.addStretch()
-        tabs.addTab(sensors_tab, "Sensors")
+        boxes_layout.addWidget(sensors_box)
         
-        # Status display (shared across all tabs, at bottom of main window)
+        # Status display (shared at bottom of main window)
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         self.status_text.setAcceptRichText(True)
         self.status_text.setStyleSheet("background-color: #22272e; color: #adbac7; border: 1px solid #444c56;")
-        main_layout.addWidget(QLabel("Status:"))
+        
+        status_header = QHBoxLayout()
+        status_header.addWidget(QLabel("Status:"))
+        status_header.addStretch()
+        btn_clear_status = QPushButton("Clear")
+        btn_clear_status.clicked.connect(self.status_text.clear)
+        btn_clear_status.setMaximumWidth(80)
+        status_header.addWidget(btn_clear_status)
+        main_layout.addLayout(status_header)
+        
         main_layout.addWidget(self.status_text)
         
         # Timer for ROS spinning
@@ -275,7 +332,8 @@ class RobotControlUI(QMainWindow):
     
     def toggle_rqt_controller(self):
         self._toggle_process('rqt_controller', self.btn_rqt_controller, 'RQT Joint Controller',
-                            'ros2', ['run', 'rqt_joint_trajectory_controller', 'rqt_joint_trajectory_controller', '--force-discover'])
+                            'ros2', ['run', 'rqt_joint_trajectory_controller', 'rqt_joint_trajectory_controller', 
+                                    '--force-discover', '--ros-args', '-r', '__ns:=/arm'])
     
     def toggle_arduino_sensors(self):
         self._toggle_process('arduino_sensors', self.btn_arduino_sensors, 'Arduino Sensors',
@@ -292,14 +350,17 @@ class RobotControlUI(QMainWindow):
             except:
                 pass
             
-            # For ur_control, kill rviz2 before terminating the launch process
+            # For launch processes, kill only child processes (including rviz2)
             if process_key in ['ur_control', 'general_launch']:
-                try:
-                    subprocess.run(['pkill', '-9', 'rviz2'], timeout=2, stderr=subprocess.DEVNULL)
-                except:
-                    pass
+                pid = process.processId()
+                if pid:
+                    try:
+                        # Kill all children of this specific launch process
+                        subprocess.run(['pkill', '-9', '-P', str(pid)], timeout=2, stderr=subprocess.DEVNULL)
+                    except:
+                        pass
                 # Extra cleanup for child ROS processes spawned by launch files
-                self._cleanup_ros_children()
+                self._cleanup_ros_children_of_pid(pid)
             
             process.terminate()
             process.waitForFinished(3000)
@@ -340,6 +401,10 @@ class RobotControlUI(QMainWindow):
             # Color-code ROS log messages
             lines = output.strip().split('\n')
             for line in lines:
+                # Skip expected shutdown messages (exit code -9 from our kill signals)
+                if 'process has died' in line and 'exit code -9' in line:
+                    continue
+                    
                 if '[WARN]' in line or '[WARNING]' in line:
                     self.status_text.append(f"<span style='color: orange;'>{line}</span>")
                 elif '[ERROR]' in line or '[FATAL]' in line:
@@ -347,6 +412,55 @@ class RobotControlUI(QMainWindow):
                 else:
                     # INFO and other messages use default color
                     self.status_text.append(line)
+    
+    def _connect_robot_socket(self):
+        """Connect to robot dashboard if not already connected"""
+        if self.robot_socket is None:
+            try:
+                self.robot_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.robot_socket.settimeout(5)
+                self.robot_socket.connect((self.robot_host, self.robot_port))
+                # Read initial connection message
+                data = self.robot_socket.recv(1024)
+                response = data.decode('utf-8').strip()
+                self.status_text.append(f"✓ Connected to robot: {response}")
+                return True
+            except Exception as e:
+                self.status_text.append(f"<span style='color: red;'>✗ Failed to connect to robot: {e}</span>")
+                self.robot_socket = None
+                return False
+        return True
+    
+    def _send_robot_command(self, command):
+        """Send command to robot dashboard and return response"""
+        if not self._connect_robot_socket():
+            return None
+        
+        try:
+            self.robot_socket.send(str.encode(command + '\n'))
+            self.status_text.append(f"<b style='color: green;'>→ SENT: {command}</b>")
+            
+            data = self.robot_socket.recv(1024)
+            response = data.decode('utf-8').strip()
+            self.status_text.append(f"← RECV: {response}")
+            return response
+        except Exception as e:
+            self.status_text.append(f"<span style='color: red;'>✗ Command failed: {e}</span>")
+            # Close socket on error so it reconnects next time
+            if self.robot_socket:
+                self.robot_socket.close()
+                self.robot_socket = None
+            return None
+    
+    def send_status_command(self):
+        """Send selected status command to robot"""
+        command = self.status_cmd_combo.currentText()
+        self._send_robot_command(command)
+    
+    def send_control_command(self):
+        """Send selected control command to robot"""
+        command = self.control_cmd_combo.currentText()
+        self._send_robot_command(command)
         
     def send_goal(self):
         if not rclpy.ok():
@@ -463,13 +577,21 @@ class RobotControlUI(QMainWindow):
 
         # Kill any remaining ROS2 processes from this session
         self._cleanup_ros_children()
+        
+        # Close robot socket if connected
+        if self.robot_socket:
+            try:
+                self.robot_socket.close()
+            except:
+                pass
+        
         self.node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
         event.accept()
 
     def _cleanup_ros_children(self):
-        """Best-effort cleanup of ROS child processes launched by ros2 launch/run."""
+        """Best-effort cleanup of ROS child processes launched by ros2 launch/run. Only called on window close."""
         patterns = [
             'rviz2',
             'ros2_control_node',
@@ -484,6 +606,29 @@ class RobotControlUI(QMainWindow):
                 subprocess.run(['pkill', '-9', '-f', pat], timeout=1, stderr=subprocess.DEVNULL)
             except:
                 pass
+    
+    def _cleanup_ros_children_of_pid(self, parent_pid):
+        """Kill specific ROS child processes that are descendants of the given parent PID."""
+        if not parent_pid:
+            return
+        
+        # Get all child PIDs recursively
+        try:
+            result = subprocess.run(['pgrep', '-P', str(parent_pid)], 
+                                  capture_output=True, text=True, timeout=1)
+            child_pids = result.stdout.strip().split('\n')
+            
+            for child_pid in child_pids:
+                if child_pid:
+                    # Recursively kill children's children
+                    self._cleanup_ros_children_of_pid(int(child_pid))
+                    # Kill this child
+                    try:
+                        subprocess.run(['kill', '-9', child_pid], timeout=1, stderr=subprocess.DEVNULL)
+                    except:
+                        pass
+        except:
+            pass
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
