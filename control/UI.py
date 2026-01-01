@@ -8,6 +8,8 @@ import rclpy
 from rclpy.action import ActionClient
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import QTimer, QProcess
+from PyQt5.QtGui import QIcon
+from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Pose
 from std_msgs.msg import Bool, Float32MultiArray
 from control_msgs.action import FollowJointTrajectory
@@ -44,6 +46,18 @@ class RobotControlUI(QMainWindow):
         
         self.setWindowTitle("Robot Control Panel")
         self.setGeometry(100, 100, 1200, 700)
+        
+        # Set window icon
+        try:
+            pkg_share = get_package_share_directory('arm_control')
+            icon_path = os.path.join(pkg_share, 'resource', 'robot_icon.png')
+            if os.path.exists(icon_path):
+                self.setWindowIcon(QIcon(icon_path))
+        except Exception:
+            # Fallback to source directory if package not found
+            icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'resource', 'robot_icon.png')
+            if os.path.exists(icon_path):
+                self.setWindowIcon(QIcon(icon_path))
         
         # Central widget
         central = QWidget()

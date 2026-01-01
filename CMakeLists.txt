@@ -26,6 +26,7 @@ find_package(rcl_interfaces REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(urdf REQUIRED)
+find_package(backward_ros REQUIRED)
 
 # Generate service interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
