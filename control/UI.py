@@ -4,6 +4,7 @@ import os
 import subprocess
 import signal
 import socket
+import re
 import rclpy
 from rclpy.action import ActionClient
 from PyQt5.QtWidgets import *
@@ -30,6 +31,10 @@ class RobotControlUI(QMainWindow):
         # Track processes and their associated buttons
         self.process_map = {}
         self.button_map = {}
+        
+        # Store cleared status text for restore functionality
+        self.cleared_status_backup = None
+        self.base_cleared_status_backup = None
         
         # Robot dashboard connection
         self.robot_socket = None
@@ -64,9 +69,17 @@ class RobotControlUI(QMainWindow):
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
         
+        # Create tab widget for Arm Control and Base Control
+        tabs = QTabWidget()
+        main_layout.addWidget(tabs)
+        
+        # ===== ARM CONTROL TAB =====
+        arm_tab = QWidget()
+        arm_tab_layout = QVBoxLayout(arm_tab)
+        
         # Horizontal layout for three boxes side by side
         boxes_layout = QHBoxLayout()
-        main_layout.addLayout(boxes_layout)
+        arm_tab_layout.addLayout(boxes_layout)
         
         # Control Box
         control_box = QGroupBox("Control")
@@ -99,72 +112,14 @@ class RobotControlUI(QMainWindow):
         position_sender_layout.addWidget(btn_send_position)
         control_layout.addLayout(position_sender_layout)
         
-        # Position inputs
-        control_layout.addWidget(QLabel("Goal Position:"))
-        pos_layout = QHBoxLayout()
-        self.x_input = QDoubleSpinBox()
-        self.x_input.setRange(-2, 2)
-        self.x_input.setValue(-0.4)
-        self.x_input.setPrefix("X: ")
+        # List Controllers button
+        btn_list_controllers = QPushButton("List Controllers")
+        btn_list_controllers.clicked.connect(self.list_controllers)
+        btn_list_controllers.setToolTip("ros2 control list_controllers -c /arm/controller_manager")
+        control_layout.addWidget(btn_list_controllers)
         
-        self.y_input = QDoubleSpinBox()
-        self.y_input.setRange(-2, 2)
-        self.y_input.setValue(-0.7)
-        self.y_input.setPrefix("Y: ")
-        
-        self.z_input = QDoubleSpinBox()
-        self.z_input.setRange(0, 2)
-        self.z_input.setValue(1.0)
-        self.z_input.setPrefix("Z: ")
-        
-        pos_layout.addWidget(self.x_input)
-        pos_layout.addWidget(self.y_input)
-        pos_layout.addWidget(self.z_input)
-        control_layout.addLayout(pos_layout)
-        
-        # Orientation inputs
-        control_layout.addWidget(QLabel("Goal Orientation (Quaternion):"))
-        orn_layout = QHBoxLayout()
-        self.qx_input = QDoubleSpinBox()
-        self.qx_input.setRange(-1, 1)
-        self.qx_input.setValue(0.0)
-        self.qx_input.setPrefix("QX: ")
-        self.qx_input.setDecimals(4)
-        self.qx_input.setSingleStep(0.01)
-        
-        self.qy_input = QDoubleSpinBox()
-        self.qy_input.setRange(-1, 1)
-        self.qy_input.setValue(-0.70710678)
-        self.qy_input.setPrefix("QY: ")
-        self.qy_input.setDecimals(4)
-        self.qy_input.setSingleStep(0.01)
-        
-        self.qz_input = QDoubleSpinBox()
-        self.qz_input.setRange(-1, 1)
-        self.qz_input.setValue(0.0)
-        self.qz_input.setPrefix("QZ: ")
-        self.qz_input.setDecimals(4)
-        self.qz_input.setSingleStep(0.01)
-        
-        self.qw_input = QDoubleSpinBox()
-        self.qw_input.setRange(-1, 1)
-        self.qw_input.setValue(0.70710678)
-        self.qw_input.setPrefix("QW: ")
-        self.qw_input.setDecimals(4)
-        self.qw_input.setSingleStep(0.01)
-        
-        orn_layout.addWidget(self.qx_input)
-        orn_layout.addWidget(self.qy_input)
-        orn_layout.addWidget(self.qz_input)
-        orn_layout.addWidget(self.qw_input)
-        control_layout.addLayout(orn_layout)
-        
-        # Send goal and emergency stop buttons
+        # Emergency stop button
         goal_layout = QHBoxLayout()
-        btn_send_goal = QPushButton("Send Goal Pose")
-        btn_send_goal.clicked.connect(self.send_goal)
-        btn_send_goal.setToolTip("Publish Pose message to /arm/goal_pose topic")
-        goal_layout.addWidget(btn_send_goal)
         
         btn_emergency_stop = QPushButton("EMERGENCY STOP / Cancel Goals")
         btn_emergency_stop.setStyleSheet("background-color: red; color: white; font-weight: bold;")
@@ -309,22 +264,154 @@ class RobotControlUI(QMainWindow):
         sensors_layout.addStretch()
         boxes_layout.addWidget(sensors_box)
         
-        # Status display (shared at bottom of main window)
+        # Status display for Arm Control tab
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         self.status_text.setAcceptRichText(True)
-        self.status_text.setStyleSheet("background-color: #22272e; color: #adbac7; border: 1px solid #444c56;")
+        self.status_text.setStyleSheet("background-color: #22272e; color: #adbac7; border: 1px solid #444c56; font-family: 'Courier New', monospace; white-space: pre;")
+        
+        # Set tab stops to 8 characters (standard terminal width)
+        from PyQt5.QtGui import QFontMetrics
+        font_metrics = QFontMetrics(self.status_text.font())
+        tab_width = font_metrics.horizontalAdvance(' ') * 8
+        self.status_text.setTabStopDistance(tab_width)
         
         status_header = QHBoxLayout()
         status_header.addWidget(QLabel("Status:"))
         status_header.addStretch()
+        
+        # Search bar
+        status_header.addWidget(QLabel("Search:"))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Enter search term...")
+        self.search_input.setMaximumWidth(150)
+        self.search_input.returnPressed.connect(lambda: self.search_status(forward=True))
+        status_header.addWidget(self.search_input)
+        
+        btn_search_prev = QPushButton("◀")
+        btn_search_prev.clicked.connect(lambda: self.search_status(forward=False))
+        btn_search_prev.setMaximumWidth(40)
+        btn_search_prev.setToolTip("Find previous")
+        status_header.addWidget(btn_search_prev)
+        
+        btn_search_next = QPushButton("▶")
+        btn_search_next.clicked.connect(lambda: self.search_status(forward=True))
+        btn_search_next.setMaximumWidth(40)
+        btn_search_next.setToolTip("Find next")
+        status_header.addWidget(btn_search_next)
+        
+        self.btn_restore_status = QPushButton("Restore")
+        self.btn_restore_status.clicked.connect(self.restore_status)
+        self.btn_restore_status.setMaximumWidth(80)
+        self.btn_restore_status.setVisible(False)
+        status_header.addWidget(self.btn_restore_status)
+        
         btn_clear_status = QPushButton("Clear")
-        btn_clear_status.clicked.connect(self.status_text.clear)
+        btn_clear_status.clicked.connect(self.clear_status)
         btn_clear_status.setMaximumWidth(80)
         status_header.addWidget(btn_clear_status)
-        main_layout.addLayout(status_header)
+        arm_tab_layout.addLayout(status_header)
         
-        main_layout.addWidget(self.status_text)
+        arm_tab_layout.addWidget(self.status_text)
+        
+        tabs.addTab(arm_tab, "Arm Control")
+        
+        # ===== BASE CONTROL TAB =====
+        base_tab = QWidget()
+        base_tab_layout = QVBoxLayout(base_tab)
+        
+        # Base Control Box
+        base_control_box = QGroupBox("Base Navigation & Mapping")
+        base_control_layout = QVBoxLayout()
+        base_control_box.setLayout(base_control_layout)
+        
+        # Simulation parameter selector
+        sim_param_layout = QHBoxLayout()
+        sim_param_layout.addWidget(QLabel("Simulation Mode:"))
+        self.sim_mode_combo = QComboBox()
+        self.sim_mode_combo.addItems(['true', 'false'])
+        sim_param_layout.addWidget(self.sim_mode_combo)
+        sim_param_layout.addStretch()
+        base_control_layout.addLayout(sim_param_layout)
+        
+        # Launch Mapping button
+        self.btn_launch_mapping = QPushButton("Launch Mapping")
+        self.btn_launch_mapping.clicked.connect(self.toggle_mapping)
+        self.btn_launch_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:=<mode> lidar:=sick")
+        base_control_layout.addWidget(self.btn_launch_mapping)
+        
+        # Launch Localization button
+        self.btn_launch_localization = QPushButton("Launch Localization")
+        self.btn_launch_localization.clicked.connect(self.toggle_localization)
+        self.btn_launch_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode>")
+        base_control_layout.addWidget(self.btn_launch_localization)
+        
+        # Launch Nav2 button
+        self.btn_launch_nav2 = QPushButton("Launch Nav2")
+        self.btn_launch_nav2.clicked.connect(self.toggle_nav2)
+        self.btn_launch_nav2.setToolTip("ros2 launch navi_wall navigation_launch.py use_sim_time:=<mode>")
+        base_control_layout.addWidget(self.btn_launch_nav2)
+        
+        # Launch Exploration button
+        self.btn_launch_exploration = QPushButton("Launch Exploration")
+        self.btn_launch_exploration.clicked.connect(self.toggle_exploration)
+        self.btn_launch_exploration.setToolTip("ros2 run navi_wall explore --ros-args --params-file <pkg>/config/explore_params.yaml")
+        base_control_layout.addWidget(self.btn_launch_exploration)
+        
+        base_control_layout.addStretch()
+        base_tab_layout.addWidget(base_control_box)
+        
+        # Status display for Base Control tab
+        self.base_status_text = QTextEdit()
+        self.base_status_text.setReadOnly(True)
+        self.base_status_text.setAcceptRichText(True)
+        self.base_status_text.setStyleSheet("background-color: #22272e; color: #adbac7; border: 1px solid #444c56; font-family: 'Courier New', monospace; white-space: pre;")
+        
+        # Set tab stops to 8 characters (standard terminal width)
+        from PyQt5.QtGui import QFontMetrics
+        font_metrics = QFontMetrics(self.base_status_text.font())
+        tab_width = font_metrics.horizontalAdvance(' ') * 8
+        self.base_status_text.setTabStopDistance(tab_width)
+        
+        base_status_header = QHBoxLayout()
+        base_status_header.addWidget(QLabel("Status:"))
+        base_status_header.addStretch()
+        
+        # Search bar
+        base_status_header.addWidget(QLabel("Search:"))
+        self.base_search_input = QLineEdit()
+        self.base_search_input.setPlaceholderText("Enter search term...")
+        self.base_search_input.setMaximumWidth(150)
+        self.base_search_input.returnPressed.connect(lambda: self.search_base_status(forward=True))
+        base_status_header.addWidget(self.base_search_input)
+        
+        btn_base_search_prev = QPushButton("◀")
+        btn_base_search_prev.clicked.connect(lambda: self.search_base_status(forward=False))
+        btn_base_search_prev.setMaximumWidth(40)
+        btn_base_search_prev.setToolTip("Find previous")
+        base_status_header.addWidget(btn_base_search_prev)
+        
+        btn_base_search_next = QPushButton("▶")
+        btn_base_search_next.clicked.connect(lambda: self.search_base_status(forward=True))
+        btn_base_search_next.setMaximumWidth(40)
+        btn_base_search_next.setToolTip("Find next")
+        base_status_header.addWidget(btn_base_search_next)
+        
+        self.btn_restore_base_status = QPushButton("Restore")
+        self.btn_restore_base_status.clicked.connect(self.restore_base_status)
+        self.btn_restore_base_status.setMaximumWidth(80)
+        self.btn_restore_base_status.setVisible(False)
+        base_status_header.addWidget(self.btn_restore_base_status)
+        
+        btn_clear_base_status = QPushButton("Clear")
+        btn_clear_base_status.clicked.connect(self.clear_base_status)
+        btn_clear_base_status.setMaximumWidth(80)
+        base_status_header.addWidget(btn_clear_base_status)
+        base_tab_layout.addLayout(base_status_header)
+        
+        base_tab_layout.addWidget(self.base_status_text)
+        
+        tabs.addTab(base_tab, "Base Control")
         
         # Timer for ROS spinning
         self.timer = QTimer()
@@ -338,6 +425,74 @@ class RobotControlUI(QMainWindow):
                 rclpy.spin_once(self.node, timeout_sec=0)
         except Exception:
             pass  # Ignore errors if context is shutting down
+    
+    def _ansi_to_html(self, text):
+        """Convert ANSI color codes to HTML"""
+        # ANSI color code mapping
+        ansi_colors = {
+            '30': '#adbac7',  # black (using default text color)
+            '31': '#f47067',  # red
+            '32': '#57ab5a',  # green
+            '33': '#c69026',  # yellow
+            '34': '#539bf5',  # blue
+            '35': '#b083f0',  # magenta
+            '36': '#76e3ea',  # cyan
+            '37': '#adbac7',  # white
+            '90': '#636e7b',  # bright black (gray)
+            '91': '#ff938a',  # bright red
+            '92': '#6bc46d',  # bright green
+            '93': '#daaa3f',  # bright yellow
+            '94': '#6cb6ff',  # bright blue
+            '95': '#d2a8ff',  # bright magenta
+            '96': '#96d0ff',  # bright cyan
+            '97': '#cdd9e5',  # bright white
+        }
+        
+        # First, expand tabs to spaces (8-char tab stops like terminal)
+        expanded_text = ''
+        col = 0
+        for char in text:
+            if char == '\t':
+                # Calculate spaces needed to reach next 8-char boundary
+                spaces_needed = 8 - (col % 8)
+                expanded_text += ' ' * spaces_needed
+                col += spaces_needed
+            elif char == '\033':
+                # ANSI escape sequence doesn't affect column position
+                expanded_text += char
+            else:
+                expanded_text += char
+                if char not in '\033\r':  # Don't count escape sequences
+                    col += 1
+        
+        # Now process ANSI codes
+        result = []
+        current_color = None
+        
+        # Split by ANSI codes
+        parts = re.split(r'\033\[([0-9;]+)m', expanded_text)
+        
+        for i, part in enumerate(parts):
+            if i % 2 == 0:  # Text content
+                if part:
+                    # Escape HTML special chars
+                    escaped_part = part.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    if current_color:
+                        result.append(f"<span style='color: {current_color};'>{escaped_part}</span>")
+                    else:
+                        result.append(escaped_part)
+            else:  # ANSI code
+                codes = part.split(';')
+                if '0' in codes or not codes[0]:  # Reset
+                    current_color = None
+                else:
+                    # Look for color code
+                    for code in codes:
+                        if code in ansi_colors:
+                            current_color = ansi_colors[code]
+                            break
+        
+        return ''.join(result)
         
     def toggle_general_launch(self):
         self._toggle_process('general_launch', self.btn_general_launch, 'General Launch',
@@ -352,6 +507,37 @@ class RobotControlUI(QMainWindow):
     def toggle_arduino_sensors(self):
         self._toggle_process('arduino_sensors', self.btn_arduino_sensors, 'Arduino Sensors',
                             'ros2', ['run', 'arm_control', 'sensors_orientation_arduino', '--ros-args', '-r', '__ns:=/arm'])
+    
+    def toggle_mapping(self):
+        sim_mode = self.sim_mode_combo.currentText()
+        self._toggle_base_process('mapping', self.btn_launch_mapping, 'Mapping',
+                                 'ros2', ['launch', 'navi_wall', 'mapping_3d.launch.py', 
+                                         f'sim:={sim_mode}', 'lidar:=sick'])
+    
+    def toggle_localization(self):
+        sim_mode = self.sim_mode_combo.currentText()
+        self._toggle_base_process('localization', self.btn_launch_localization, 'Localization',
+                                 'ros2', ['launch', 'navi_wall', 'move_robot.launch.py', 
+                                         f'sim:={sim_mode}'])
+    
+    def toggle_nav2(self):
+        sim_mode = self.sim_mode_combo.currentText()
+        self._toggle_base_process('nav2', self.btn_launch_nav2, 'Nav2',
+                                 'ros2', ['launch', 'navi_wall', 'navigation_launch.py', 
+                                         f'use_sim_time:={sim_mode}'])
+    
+    def toggle_exploration(self):
+        # Get package path for explore_params.yaml
+        try:
+            pkg_share = get_package_share_directory('navi_wall')
+            params_file = os.path.join(pkg_share, 'config', 'explore_params.yaml')
+        except:
+            # Fallback to source directory
+            params_file = '/home/zed/ros2_ws/src/navi-wall/config/explore_params.yaml'
+        
+        self._toggle_base_process('exploration', self.btn_launch_exploration, 'Exploration',
+                                 'ros2', ['run', 'navi_wall', 'explore', 
+                                         '--ros-args', '--params-file', params_file])
     
     def _toggle_process(self, process_key, button, name, program, args):
         """Toggle a process on/off and update button state"""
@@ -394,7 +580,53 @@ class RobotControlUI(QMainWindow):
             
             # Display command in bold green
             cmd_str = program + ' ' + ' '.join(args)
-            self.status_text.append(f"<b style='color: green;'>▶ {cmd_str}</b>")
+            self.status_text.append(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+            
+            process.start(program, args)
+            self.process_map[process_key] = process
+            button.setText(f"Stop {name}")
+            button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+    
+    def _toggle_base_process(self, process_key, button, name, program, args):
+        """Toggle a base control process on/off and update button state (outputs to base_status_text)"""
+        if process_key in self.process_map:
+            # Stop the process
+            process = self.process_map[process_key]
+            # Disconnect finished signal to prevent race condition
+            try:
+                process.finished.disconnect()
+            except:
+                pass
+            
+            # For launch processes, kill child processes
+            if process_key in ['mapping', 'localization', 'nav2', 'exploration']:
+                pid = process.processId()
+                if pid:
+                    try:
+                        subprocess.run(['pkill', '-9', '-P', str(pid)], timeout=2, stderr=subprocess.DEVNULL)
+                    except:
+                        pass
+                self._cleanup_ros_children_of_pid(pid)
+            
+            process.terminate()
+            process.waitForFinished(3000)
+            if process.state() == QProcess.Running:
+                process.kill()
+            
+            del self.process_map[process_key]
+            button.setText(f"Launch {name}")
+            button.setStyleSheet("")
+            self.base_status_text.append(f"⏹ Stopped {name}")
+        else:
+            # Start the process
+            process = QProcess(self)
+            process.setProcessChannelMode(QProcess.MergedChannels)
+            process.readyReadStandardOutput.connect(lambda: self.handle_base_output(process))
+            process.finished.connect(lambda: self._on_base_process_finished(process_key, button, name))
+            
+            # Display command in bold green
+            cmd_str = program + ' ' + ' '.join(args)
+            self.base_status_text.append(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
             
             process.start(program, args)
             self.process_map[process_key] = process
@@ -407,7 +639,15 @@ class RobotControlUI(QMainWindow):
             del self.process_map[process_key]
             button.setText(f"Launch {name}")
             button.setStyleSheet("")
-            self.status_text.append(f"<span style='color: orange;'>⚠ {name} exited</span>")
+            self.status_text.append(f"<span style='color: #c69026;'>⚠ {name} exited</span>")
+    
+    def _on_base_process_finished(self, process_key, button, name):
+        """Handle when a base process finishes unexpectedly"""
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+            button.setText(f"Launch {name}")
+            button.setStyleSheet("")
+            self.base_status_text.append(f"<span style='color: #c69026;'>⚠ {name} exited</span>")
     
     def handle_output(self, process):
         output = process.readAllStandardOutput().data().decode()
@@ -418,14 +658,37 @@ class RobotControlUI(QMainWindow):
                 # Skip expected shutdown messages (exit code -9 from our kill signals)
                 if 'process has died' in line and 'exit code -9' in line:
                     continue
-                    
-                if '[WARN]' in line or '[WARNING]' in line:
-                    self.status_text.append(f"<span style='color: orange;'>{line}</span>")
-                elif '[ERROR]' in line or '[FATAL]' in line:
-                    self.status_text.append(f"<span style='color: red;'>{line}</span>")
-                else:
-                    # INFO and other messages use default color
-                    self.status_text.append(line)
+                
+                # Convert ANSI color codes to HTML
+                html_line = self._ansi_to_html(line)
+                
+                # Use insertHtml to properly render HTML entities
+                cursor = self.status_text.textCursor()
+                cursor.movePosition(cursor.End)
+                self.status_text.setTextCursor(cursor)
+                self.status_text.insertHtml(html_line)
+                cursor.insertText('\n')  # Use plain text newline to preserve formatting
+    
+    def handle_base_output(self, process):
+        """Handle output for base control processes (outputs to base_status_text)"""
+        output = process.readAllStandardOutput().data().decode()
+        if output.strip():
+            # Color-code ROS log messages
+            lines = output.strip().split('\n')
+            for line in lines:
+                # Skip expected shutdown messages (exit code -9 from our kill signals)
+                if 'process has died' in line and 'exit code -9' in line:
+                    continue
+                
+                # Convert ANSI color codes to HTML
+                html_line = self._ansi_to_html(line)
+                
+                # Use insertHtml to properly render HTML entities
+                cursor = self.base_status_text.textCursor()
+                cursor.movePosition(cursor.End)
+                self.base_status_text.setTextCursor(cursor)
+                self.base_status_text.insertHtml(html_line)
+                cursor.insertText('\n')  # Use plain text newline to preserve formatting
     
     def _connect_robot_socket(self):
         """Connect to robot dashboard if not already connected"""
@@ -440,7 +703,7 @@ class RobotControlUI(QMainWindow):
                 self.status_text.append(f"✓ Connected to robot: {response}")
                 return True
             except Exception as e:
-                self.status_text.append(f"<span style='color: red;'>✗ Failed to connect to robot: {e}</span>")
+                self.status_text.append(f"<span style='color: #f47067;'>✗ Failed to connect to robot: {e}</span>")
                 self.robot_socket = None
                 return False
         return True
@@ -452,14 +715,14 @@ class RobotControlUI(QMainWindow):
         
         try:
             self.robot_socket.send(str.encode(command + '\n'))
-            self.status_text.append(f"<b style='color: green;'>→ SENT: {command}</b>")
+            self.status_text.append(f"<b style='color: #57ab5a;'>→ SENT: {command}</b>")
             
             data = self.robot_socket.recv(1024)
             response = data.decode('utf-8').strip()
             self.status_text.append(f"← RECV: {response}")
             return response
         except Exception as e:
-            self.status_text.append(f"<span style='color: red;'>✗ Command failed: {e}</span>")
+            self.status_text.append(f"<span style='color: #f47067;'>✗ Command failed: {e}</span>")
             # Close socket on error so it reconnects next time
             if self.robot_socket:
                 self.robot_socket.close()
@@ -475,10 +738,108 @@ class RobotControlUI(QMainWindow):
         """Send selected control command to robot"""
         command = self.control_cmd_combo.currentText()
         self._send_robot_command(command)
+    
+    def list_controllers(self):
+        """List ROS2 controllers using ros2 control CLI"""
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(lambda: self.handle_output(process))
+        
+        # Display command in bold green
+        cmd_str = 'ros2 control list_controllers -c /arm/controller_manager'
+        self.status_text.append(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+        
+        # Run the command
+        process_key = 'list_controllers'
+        process.finished.connect(lambda: self._cleanup_list_controllers(process_key))
+        process.start('ros2', ['control', 'list_controllers', '-c', '/arm/controller_manager'])
+        self.process_map[process_key] = process
+    
+    def _cleanup_list_controllers(self, process_key):
+        """Clean up finished list controllers process"""
+        if process_key in self.process_map:
+            exit_code = self.process_map[process_key].exitCode()
+            del self.process_map[process_key]
+            if exit_code != 0:
+                self.status_text.append(f"<span style='color: #c69026;'>⚠ List controllers command finished with exit code {exit_code}</span>")
+            else:
+                self.status_text.append("✓ List controllers command completed")
+    
+    def clear_status(self):
+        """Clear status text and save backup for restore"""
+        self.cleared_status_backup = self.status_text.toHtml()
+        self.status_text.clear()
+        self.btn_restore_status.setVisible(True)
+    
+    def restore_status(self):
+        """Restore previously cleared status text (prepends old content like Ctrl+L undo)"""
+        if self.cleared_status_backup:
+            current_content = self.status_text.toHtml()
+            self.status_text.setHtml(self.cleared_status_backup + current_content)
+            self.cleared_status_backup = None
+            self.btn_restore_status.setVisible(False)
+    
+    def clear_base_status(self):
+        """Clear base status text and save backup for restore"""
+        self.base_cleared_status_backup = self.base_status_text.toHtml()
+        self.base_status_text.clear()
+        self.btn_restore_base_status.setVisible(True)
+    
+    def restore_base_status(self):
+        """Restore previously cleared base status text (prepends old content like Ctrl+L undo)"""
+        if self.base_cleared_status_backup:
+            current_content = self.base_status_text.toHtml()
+            self.base_status_text.setHtml(self.base_cleared_status_backup + current_content)
+            self.base_cleared_status_backup = None
+            self.btn_restore_base_status.setVisible(False)
+    
+    def search_status(self, forward=True):
+        """Search for text in arm status box"""
+        search_text = self.search_input.text()
+        if not search_text:
+            return
+        
+        from PyQt5.QtGui import QTextDocument
+        flags = QTextDocument.FindFlags()
+        if not forward:
+            flags |= QTextDocument.FindBackward
+        
+        found = self.status_text.find(search_text, flags)
+        if not found:
+            # Wrap around: move cursor to start/end and try again
+            cursor = self.status_text.textCursor()
+            if forward:
+                cursor.movePosition(cursor.Start)
+            else:
+                cursor.movePosition(cursor.End)
+            self.status_text.setTextCursor(cursor)
+            self.status_text.find(search_text, flags)
+    
+    def search_base_status(self, forward=True):
+        """Search for text in base status box"""
+        search_text = self.base_search_input.text()
+        if not search_text:
+            return
+        
+        from PyQt5.QtGui import QTextDocument
+        flags = QTextDocument.FindFlags()
+        if not forward:
+            flags |= QTextDocument.FindBackward
+        
+        found = self.base_status_text.find(search_text, flags)
+        if not found:
+            # Wrap around: move cursor to start/end and try again
+            cursor = self.base_status_text.textCursor()
+            if forward:
+                cursor.movePosition(cursor.Start)
+            else:
+                cursor.movePosition(cursor.End)
+            self.base_status_text.setTextCursor(cursor)
+            self.base_status_text.find(search_text, flags)
         
     def send_goal(self):
         if not rclpy.ok():
-            self.status_text.append("<span style='color: orange;'>⚠ ROS context invalid - cannot publish</span>")
+            self.status_text.append("<span style='color: #c69026;'>⚠ ROS context invalid - cannot publish</span>")
             return
         try:
             pose = Pose()
@@ -492,12 +853,12 @@ class RobotControlUI(QMainWindow):
             self.goal_publisher.publish(pose)
             self.status_text.append(f"Sent goal: pos({pose.position.x:.2f}, {pose.position.y:.2f}, {pose.position.z:.2f}) orn({pose.orientation.x:.2f}, {pose.orientation.y:.2f}, {pose.orientation.z:.2f}, {pose.orientation.w:.2f})")
         except Exception as e:
-            self.status_text.append(f"<span style='color: red;'>❌ Failed to send goal: {e}</span>")
+            self.status_text.append(f"<span style='color: #f47067;'>❌ Failed to send goal: {e}</span>")
     
     def publish_sensor_data(self):
         """Publish simulated distance sensor data"""
         if not rclpy.ok():
-            self.status_text.append("<span style='color: orange;'>⚠ ROS context invalid - cannot publish</span>")
+            self.status_text.append("<span style='color: #c69026;'>⚠ ROS context invalid - cannot publish</span>")
             return
         try:
             msg = Float32MultiArray()
@@ -513,7 +874,7 @@ class RobotControlUI(QMainWindow):
             self.distance_sensor_publisher.publish(msg)
             self.status_text.append(f"Published sensors: Ultra[{msg.data[0]:.3f}, {msg.data[1]:.3f}, {msg.data[2]:.3f}] ToF[{msg.data[3]:.3f}, {msg.data[4]:.3f}, {msg.data[5]:.3f}]")
         except Exception as e:
-            self.status_text.append(f"<span style='color: red;'>❌ Failed to publish sensors: {e}</span>")
+            self.status_text.append(f"<span style='color: #f47067;'>❌ Failed to publish sensors: {e}</span>")
     
     def send_position_command(self):
         """Send position by launching node with selected position as argument"""
@@ -525,7 +886,7 @@ class RobotControlUI(QMainWindow):
         
         # Display command in bold green
         cmd_str = 'ros2 ' + ' '.join(args)
-        self.status_text.append(f"<b style='color: green;'>→ {cmd_str}</b>")
+        self.status_text.append(f"<b style='color: #57ab5a;'>→ {cmd_str}</b>")
         
         # Launch the position_sender_node with the selected position
         process = QProcess(self)
@@ -547,22 +908,22 @@ class RobotControlUI(QMainWindow):
     def emergency_stop(self):
         """Trigger emergency stop and cancel current trajectory goal"""
         if not rclpy.ok():
-            self.status_text.append("<span style='color: orange;'>⚠ ROS context invalid - cannot send emergency stop</span>")
+            self.status_text.append("<span style='color: #c69026;'>⚠ ROS context invalid - cannot send emergency stop</span>")
             return
         try:
             # Publish emergency stop signal
             stop_msg = Bool()
             stop_msg.data = True
             self.emergency_stop_publisher.publish(stop_msg)
-            self.status_text.append("<span style='color: orange;'>⚠️ EMERGENCY STOP - Published stop signal</span>")
+            self.status_text.append("<span style='color: #c69026; font-weight: bold;'>⚠️ EMERGENCY STOP - Published stop signal</span>")
             
             # Cancel current goal if one exists
             if self.current_goal_handle is not None:
                 cancel_future = self.current_goal_handle.cancel_goal_async()
-                self.status_text.append("<span style='color: orange;'>⚠️ Canceling current trajectory goal...</span>")
+                self.status_text.append("<span style='color: #c69026;'>⚠️ Canceling current trajectory goal...</span>")
                 self.current_goal_handle = None
         except Exception as e:
-            self.status_text.append(f"<span style='color: red;'>❌ Error during emergency stop: {e}</span>")
+            self.status_text.append(f"<span style='color: #f47067;'>❌ Error during emergency stop: {e}</span>")
         
     def closeEvent(self, event):
         self.timer.stop()
