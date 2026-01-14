@@ -97,13 +97,13 @@ def generate_launch_description():
             parameters=[{'use_sim_time': arm_use_sim_time}],
         ),
         
-        Node(
-            package="arm_control",
-            executable="sensors_orientation",
-            name="sensors_orientation_node",
-            output="screen",
-            parameters=[{'use_sim_time': arm_use_sim_time}],
-        ),
+        # Node(
+        #     package="arm_control",
+        #     executable="sensors_orientation",
+        #     name="sensors_orientation_node",
+        #     output="screen",
+        #     parameters=[{'use_sim_time': arm_use_sim_time}],
+        # ),
         
     ])
 

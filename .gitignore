@@ -1,4 +1,2 @@
-/arm_control
-/**/__pycache__/*
-
-/**/planner_lib/__pycache__/*
+arm_control/
+**/__pycache__/
