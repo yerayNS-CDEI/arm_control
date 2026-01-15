@@ -26,7 +26,7 @@ class MultiSensorNode(Node):
         self.pub_sensors = self.create_publisher(Float32MultiArray, 'distance_sensors', 10)
 
         # Timer
-        self.timer = self.create_timer(0.5, self.read_serial)
+        self.timer = self.create_timer(3.0, self.read_serial)
 
         # Almacenamiento de últimos datos
         self.last_data = None
