@@ -167,8 +167,11 @@ class RobotControlUI(QMainWindow):
             'brake release',
             'play',
             'pause',
+            'shutdown',
             'stop',
             'close popup',
+            'restart safety',
+            'load Test_external_control.urp',
             'close safety popup',
             'unlock protective stop'
         ])
@@ -385,6 +388,120 @@ class RobotControlUI(QMainWindow):
  
         tabs.addTab(base_tab, "Base Control")
  
+        # ===== JOINT CONTROL TAB =====
+        joint_tab = QWidget()
+        joint_tab_layout = QVBoxLayout(joint_tab)
+        
+        # Joint Control Box
+        joint_control_box = QGroupBox("Joint Position Control")
+        joint_control_layout = QVBoxLayout()
+        joint_control_box.setLayout(joint_control_layout)
+        
+        joint_control_layout.addWidget(QLabel("<b>Joint Positions (radians):</b>"))
+        
+        # Joint names in the correct order for publishing
+        joint_names = [
+            'shoulder_pan_joint', 
+            'shoulder_lift_joint', 
+            'elbow_joint', 
+            'wrist_1_joint', 
+            'wrist_2_joint', 
+            'wrist_3_joint'
+        ]
+        
+        # Create sliders and input fields for each joint
+        self.joint_inputs = []
+        self.joint_sliders = []
+        for joint_name in joint_names:
+            joint_row = QHBoxLayout()
+            
+            # Joint label
+            label = QLabel(f"{joint_name}:")
+            label.setMinimumWidth(150)
+            joint_row.addWidget(label)
+            
+            # Slider
+            slider = QSlider()
+            slider.setOrientation(1)  # Horizontal
+            slider.setRange(-628, 628)  # -6.28 to 6.28 in hundredths
+            slider.setValue(0)
+            slider.setTickPosition(QSlider.TicksBelow)
+            slider.setTickInterval(100)
+            joint_row.addWidget(slider)
+            
+            # Input field (shorter)
+            input_field = QDoubleSpinBox()
+            input_field.setRange(-6.28, 6.28)  # Approximately -2π to 2π
+            input_field.setValue(0.0)
+            input_field.setDecimals(3)
+            input_field.setSingleStep(0.1)
+            input_field.setSuffix(" rad")
+            input_field.setMaximumWidth(120)
+            joint_row.addWidget(input_field)
+            
+            # Connect slider and input field
+            slider.valueChanged.connect(lambda val, field=input_field: field.setValue(val / 100.0))
+            input_field.valueChanged.connect(lambda val, s=slider: s.setValue(int(val * 100)))
+            
+            self.joint_inputs.append(input_field)
+            self.joint_sliders.append(slider)
+            joint_control_layout.addLayout(joint_row)
+        
+        # Time from start input
+        time_layout = QHBoxLayout()
+        time_layout.addWidget(QLabel("Time from start:"))
+        self.time_from_start_input = QDoubleSpinBox()
+        self.time_from_start_input.setRange(0.1, 60.0)
+        self.time_from_start_input.setValue(1.0)
+        self.time_from_start_input.setDecimals(1)
+        self.time_from_start_input.setSingleStep(0.5)
+        self.time_from_start_input.setSuffix(" sec")
+        time_layout.addWidget(self.time_from_start_input)
+        time_layout.addStretch()
+        joint_control_layout.addLayout(time_layout)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        
+        btn_read_joints = QPushButton("Read Current Joint Positions")
+        btn_read_joints.clicked.connect(self.read_joint_positions)
+        btn_read_joints.setToolTip("Read current joint positions from /arm/joint_states and populate fields")
+        button_layout.addWidget(btn_read_joints)
+        
+        btn_publish_joints = QPushButton("Publish Joint Trajectory")
+        btn_publish_joints.clicked.connect(self.publish_joint_trajectory)
+        btn_publish_joints.setToolTip("Publish joint trajectory to /arm/planned_trajectory topic")
+        button_layout.addWidget(btn_publish_joints)
+        
+        joint_control_layout.addLayout(button_layout)
+        
+        joint_tab_layout.addWidget(joint_control_box)
+        
+        # Status display for Joint Control tab
+        self.joint_status_text = QTextEdit()
+        self.joint_status_text.setReadOnly(True)
+        self.joint_status_text.setAcceptRichText(True)
+        self.joint_status_text.setStyleSheet("background-color: #22272e; color: #adbac7; border: 1px solid #444c56; font-family: 'Courier New', monospace; white-space: pre;")
+        
+        # Set tab stops to 8 characters (standard terminal width)
+        from PyQt5.QtGui import QFontMetrics
+        font_metrics = QFontMetrics(self.joint_status_text.font())
+        tab_width = font_metrics.horizontalAdvance(' ') * 8
+        self.joint_status_text.setTabStopDistance(tab_width)
+        
+        joint_status_header = QHBoxLayout()
+        joint_status_header.addWidget(QLabel("Status:"))
+        joint_status_header.addStretch()
+        
+        btn_clear_joint_status = QPushButton("Clear")
+        btn_clear_joint_status.clicked.connect(self.clear_joint_status)
+        btn_clear_joint_status.setMaximumWidth(80)
+        joint_status_header.addWidget(btn_clear_joint_status)
+        joint_tab_layout.addLayout(joint_status_header)
+        
+        joint_tab_layout.addWidget(self.joint_status_text)
+        
+        tabs.addTab(joint_tab, "Joint Control")
         # Timer for ROS spinning
         self.timer = QTimer()
         self.timer.timeout.connect(self._spin_ros)
@@ -897,7 +1014,148 @@ class RobotControlUI(QMainWindow):
                 cursor.movePosition(cursor.End)
             self.base_status_text.setTextCursor(cursor)
             self.base_status_text.find(search_text, flags)
- 
+   
+    def clear_joint_status(self):
+        """Clear joint control status text"""
+        self.joint_status_text.clear()
+    
+    def read_joint_positions(self):
+        """Read current joint positions from /arm/joint_states and populate input fields"""
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        
+        # Display command in bold green
+        cmd_str = 'ros2 topic echo /arm/joint_states --once'
+        cursor = self.joint_status_text.textCursor()
+        cursor.movePosition(cursor.End)
+        self.joint_status_text.setTextCursor(cursor)
+        self.joint_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+        cursor.insertText('\n')
+        
+        # Store the process to retrieve output later
+        process.finished.connect(lambda: self._parse_joint_states(process))
+        process.start('bash', ['-c', 'timeout 5 ros2 topic echo /arm/joint_states --once'])
+    
+    def _parse_joint_states(self, process):
+        """Parse joint states output and populate input fields"""
+        output = process.readAllStandardOutput().data().decode('utf-8')
+        
+        # Display the output
+        html_output = self._ansi_to_html(output)
+        self.joint_status_text.insertHtml(html_output)
+        self.joint_status_text.append("")
+        
+        try:
+            # Parse the YAML-like output
+            lines = output.split('\n')
+            name_section = False
+            position_section = False
+            joint_names = []
+            positions = []
+            
+            for line in lines:
+                if 'name:' in line:
+                    name_section = True
+                    position_section = False
+                    continue
+                elif 'position:' in line:
+                    position_section = True
+                    name_section = False
+                    continue
+                elif 'velocity:' in line or 'effort:' in line:
+                    name_section = False
+                    position_section = False
+                    continue
+                
+                if name_section and line.strip().startswith('- '):
+                    joint_name = line.strip()[2:].strip()
+                    joint_names.append(joint_name)
+                elif position_section and line.strip().startswith('- '):
+                    try:
+                        position = float(line.strip()[2:].strip())
+                        positions.append(position)
+                    except ValueError:
+                        pass
+            
+            # Create a mapping from joint name to position
+            if len(joint_names) == len(positions):
+                joint_position_map = dict(zip(joint_names, positions))
+                
+                # Expected joint order
+                expected_joints = [
+                    'shoulder_pan_joint', 
+                    'shoulder_lift_joint', 
+                    'elbow_joint', 
+                    'wrist_1_joint', 
+                    'wrist_2_joint', 
+                    'wrist_3_joint'
+                ]
+                
+                # Populate input fields
+                for i, joint_name in enumerate(expected_joints):
+                    if joint_name in joint_position_map:
+                        self.joint_inputs[i].setValue(joint_position_map[joint_name])
+                
+                self.joint_status_text.append("<span style='color: #57ab5a;'>✓ Joint positions updated</span>")
+            else:
+                self.joint_status_text.append("<span style='color: #f47067;'>✗ Error: Could not parse joint states</span>")
+        
+        except Exception as e:
+            self.joint_status_text.append(f"<span style='color: #f47067;'>✗ Error parsing joint states: {str(e)}</span>")
+    
+    def publish_joint_trajectory(self):
+        """Publish joint trajectory to /arm/planned_trajectory topic"""
+        # Get values from input fields
+        positions = [input_field.value() for input_field in self.joint_inputs]
+        time_sec = int(self.time_from_start_input.value())
+        time_nanosec = int((self.time_from_start_input.value() - time_sec) * 1e9)
+        
+        # Format positions for the command
+        positions_str = ', '.join([f'{p:.3f}' for p in positions])
+        
+        # Build the ros2 topic pub command
+        cmd = f"""ros2 topic pub --once /arm/planned_trajectory trajectory_msgs/msg/JointTrajectory "{{
+  header: {{stamp: {{sec: 0, nanosec: 0}}, frame_id: ''}},
+  joint_names: ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'],
+  points: [
+    {{positions: [{positions_str}], velocities: [], accelerations: [], effort: [], time_from_start: {{sec: {time_sec}, nanosec: {time_nanosec}}}}}
+  ]
+}}\""""
+        
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(lambda: self._handle_joint_publish_output(process))
+        
+        # Display command in bold green
+        cursor = self.joint_status_text.textCursor()
+        cursor.movePosition(cursor.End)
+        self.joint_status_text.setTextCursor(cursor)
+        self.joint_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ Publishing joint trajectory...</b>")
+        cursor.insertText('\n')
+        
+        # Show the positions being published
+        self.joint_status_text.append(f"  Positions: [{positions_str}]")
+        self.joint_status_text.append(f"  Time from start: {self.time_from_start_input.value():.1f} sec")
+        
+        process.finished.connect(lambda: self._on_joint_publish_finished(process))
+        process.start('bash', ['-c', cmd])
+    
+    def _handle_joint_publish_output(self, process):
+        """Handle output from joint trajectory publish command"""
+        output = process.readAllStandardOutput().data().decode('utf-8')
+        if output.strip():
+            html_output = self._ansi_to_html(output)
+            self.joint_status_text.insertHtml(html_output)
+    
+    def _on_joint_publish_finished(self, process):
+        """Handle completion of joint trajectory publish command"""
+        exit_code = process.exitCode()
+        if exit_code == 0:
+            self.joint_status_text.append("<span style='color: #57ab5a;'>✓ Joint trajectory published successfully</span>")
+        else:
+            self.joint_status_text.append(f"<span style='color: #f47067;'>✗ Publish failed with exit code {exit_code}</span>")
+        self.joint_status_text.append("")
+
     def send_goal(self):
         if not rclpy.ok():
             self.status_text.append("<span style='color: #c69026;'>⚠ ROS context invalid - cannot publish</span>")
