@@ -586,7 +586,7 @@ class RobotControlUI(QMainWindow):
     def toggle_general_launch(self):
         self._toggle_process('general_launch', self.btn_general_launch, 'General Launch',
                             'ros2', ['launch', 'arm_control', 'general.launch.py', 
-                                    'use_fake_hardware:=false', 'robot_ip:=192.168.1.102',
+                                    'use_fake_hardware:=true', 'robot_ip:=192.168.1.102',
                                     'initial_joint_controller:=joint_trajectory_controller'
                                     ])
  
@@ -597,7 +597,7 @@ class RobotControlUI(QMainWindow):
  
     def toggle_arduino_sensors(self):
         self._toggle_process('arduino_sensors', self.btn_arduino_sensors, 'Arduino Sensors',
-                            'ros2', ['run', 'arm_control', 'sensors_orientation_arduino', '--ros-args', '-r', '__ns:=/arm'])
+                            'ros2', ['run', 'arm_control', 'arduino_sensors', '--ros-args', '-r', '__ns:=/arm'])
  
     def toggle_sensors_orientation(self):
         self._toggle_process('sensors_orientation', self.btn_sensors_orientation, 'Sensors Orientation',
