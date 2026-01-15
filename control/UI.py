@@ -437,11 +437,15 @@ class RobotControlUI(QMainWindow):
             input_field.setSingleStep(0.1)
             input_field.setSuffix(" rad")
             input_field.setMaximumWidth(120)
+            input_field.setEnabled(False)  # Disabled until positions are read
             joint_row.addWidget(input_field)
             
             # Connect slider and input field
             slider.valueChanged.connect(lambda val, field=input_field: field.setValue(val / 100.0))
             input_field.valueChanged.connect(lambda val, s=slider: s.setValue(int(val * 100)))
+            
+            # Disable slider by default for safety
+            slider.setEnabled(False)
             
             self.joint_inputs.append(input_field)
             self.joint_sliders.append(slider)
@@ -468,10 +472,11 @@ class RobotControlUI(QMainWindow):
         btn_read_joints.setToolTip("Read current joint positions from /arm/joint_states and populate fields")
         button_layout.addWidget(btn_read_joints)
         
-        btn_publish_joints = QPushButton("Publish Joint Trajectory")
-        btn_publish_joints.clicked.connect(self.publish_joint_trajectory)
-        btn_publish_joints.setToolTip("Publish joint trajectory to /arm/planned_trajectory topic")
-        button_layout.addWidget(btn_publish_joints)
+        self.btn_publish_joints = QPushButton("Publish Joint Trajectory")
+        self.btn_publish_joints.clicked.connect(self.publish_joint_trajectory)
+        self.btn_publish_joints.setToolTip("Publish joint trajectory to /arm/planned_trajectory topic")
+        self.btn_publish_joints.setEnabled(False)  # Disabled until positions are read
+        button_layout.addWidget(self.btn_publish_joints)
         
         joint_control_layout.addLayout(button_layout)
         
@@ -502,6 +507,10 @@ class RobotControlUI(QMainWindow):
         joint_tab_layout.addWidget(self.joint_status_text)
         
         tabs.addTab(joint_tab, "Joint Control")
+        
+        # Connect tab change signal to check joint states when Joint Control tab is activated
+        tabs.currentChanged.connect(lambda index: self._on_tab_changed(index, tabs))
+        
         # Timer for ROS spinning
         self.timer = QTimer()
         self.timer.timeout.connect(self._spin_ros)
@@ -514,6 +523,21 @@ class RobotControlUI(QMainWindow):
                 rclpy.spin_once(self.node, timeout_sec=0)
         except Exception:
             pass  # Ignore errors if context is shutting down
+    
+    def _on_tab_changed(self, index, tabs):
+        """Handle tab change - check joint states when Joint Control tab is activated"""
+        # Check if the Joint Control tab (index 2) is now active
+        if index == 2 and tabs.tabText(index) == "Joint Control":
+            # Disable controls first for safety
+            for input_field in self.joint_inputs:
+                input_field.setEnabled(False)
+            for slider in self.joint_sliders:
+                slider.setEnabled(False)
+            self.btn_publish_joints.setEnabled(False)
+            
+            # Automatically read current joint positions to verify topic is still publishing
+            self.joint_status_text.append("<span style='color: #539bf5;'>ℹ Checking for current joint positions...</span>")
+            self.read_joint_positions()
  
     def _ansi_to_html(self, text):
         """Convert ANSI color codes to HTML"""
@@ -1045,6 +1069,12 @@ class RobotControlUI(QMainWindow):
         self.joint_status_text.insertHtml(html_output)
         self.joint_status_text.append("")
         
+        # Check if topic actually published data (not timeout or error)
+        if not output.strip() or 'ERROR' in output or output.strip().startswith('timeout:'):
+            self.joint_status_text.append("<span style='color: #f47067;'>✗ No data received - Topic may not be publishing yet</span>")
+            self.joint_status_text.append("<span style='color: #c69026;'>⚠ Controls remain disabled for safety</span>")
+            return
+        
         try:
             # Parse the YAML-like output
             lines = output.split('\n')
@@ -1077,6 +1107,12 @@ class RobotControlUI(QMainWindow):
                     except ValueError:
                         pass
             
+            # Verify we have valid data before enabling controls
+            if len(joint_names) == 0 or len(positions) == 0:
+                self.joint_status_text.append("<span style='color: #f47067;'>✗ No valid joint data received</span>")
+                self.joint_status_text.append("<span style='color: #c69026;'>⚠ Controls remain disabled for safety</span>")
+                return
+            
             # Create a mapping from joint name to position
             if len(joint_names) == len(positions):
                 joint_position_map = dict(zip(joint_names, positions))
@@ -1091,17 +1127,33 @@ class RobotControlUI(QMainWindow):
                     'wrist_3_joint'
                 ]
                 
+                # Verify all expected joints are present
+                missing_joints = [j for j in expected_joints if j not in joint_position_map]
+                if missing_joints:
+                    self.joint_status_text.append(f"<span style='color: #f47067;'>✗ Missing joints: {', '.join(missing_joints)}</span>")
+                    self.joint_status_text.append("<span style='color: #c69026;'>⚠ Controls remain disabled for safety</span>")
+                    return
+                
                 # Populate input fields
                 for i, joint_name in enumerate(expected_joints):
                     if joint_name in joint_position_map:
                         self.joint_inputs[i].setValue(joint_position_map[joint_name])
                 
-                self.joint_status_text.append("<span style='color: #57ab5a;'>✓ Joint positions updated</span>")
+                # Enable controls only after confirming we have valid, complete joint data
+                for input_field in self.joint_inputs:
+                    input_field.setEnabled(True)
+                for slider in self.joint_sliders:
+                    slider.setEnabled(True)
+                self.btn_publish_joints.setEnabled(True)
+                
+                self.joint_status_text.append("<span style='color: #57ab5a;'>✓ Joint positions updated - Controls enabled</span>")
             else:
-                self.joint_status_text.append("<span style='color: #f47067;'>✗ Error: Could not parse joint states</span>")
+                self.joint_status_text.append("<span style='color: #f47067;'>✗ Error: Joint names and positions count mismatch</span>")
+                self.joint_status_text.append("<span style='color: #c69026;'>⚠ Controls remain disabled for safety</span>")
         
         except Exception as e:
             self.joint_status_text.append(f"<span style='color: #f47067;'>✗ Error parsing joint states: {str(e)}</span>")
+            self.joint_status_text.append("<span style='color: #c69026;'>⚠ Controls remain disabled for safety</span>")
     
     def publish_joint_trajectory(self):
         """Publish joint trajectory to /arm/planned_trajectory topic"""
