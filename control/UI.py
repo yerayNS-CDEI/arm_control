@@ -278,8 +278,6 @@ class RobotControlUI(QMainWindow):
  
         arm_tab_layout.addWidget(self.status_text)
  
-        tabs.addTab(arm_tab, "Arm Control")
- 
         # ===== BASE CONTROL TAB =====
         base_tab = QWidget()
         base_tab_layout = QVBoxLayout(base_tab)
@@ -408,6 +406,7 @@ class RobotControlUI(QMainWindow):
         base_tab_layout.addWidget(self.base_status_text)
  
         tabs.addTab(base_tab, "Base Control")
+        tabs.addTab(arm_tab, "Arm Control")
  
         # ===== JOINT CONTROL TAB =====
         joint_tab = QWidget()
