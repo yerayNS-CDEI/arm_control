@@ -19,6 +19,7 @@ from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from ur_msgs.msg import IOStates
 from ur_msgs.srv import SetIO
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 class RobotControlUI(QMainWindow):
     def __init__(self):
@@ -27,12 +28,19 @@ class RobotControlUI(QMainWindow):
         # Initialize ROS only if not already initialized
         if not rclpy.ok():
             rclpy.init()
+            
+        qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
  
         self.node = rclpy.create_node('robot_control_ui')
         self.goal_publisher = self.node.create_publisher(Pose, '/arm/goal_pose', 10)
-        self.emergency_stop_publisher = self.node.create_publisher(Bool, '/arm/emergency_stop', 10)
+        self.emergency_stop_publisher = self.node.create_publisher(Bool, '/arm/emergency_stop', qos)
         self.distance_sensor_publisher = self.node.create_publisher(Float32MultiArray, '/arm/distance_sensors', 10)
- 
+        self.emergency_stop_subscriber = self.node.create_subscription(Bool, '/arm/emergency_stop', self._on_emergency_stop_state, qos)
  
         # Track processes and their associated buttons
         self.process_map = {}
@@ -41,6 +49,9 @@ class RobotControlUI(QMainWindow):
         # Store cleared status text for restore functionality
         self.cleared_status_backup = None
         self.base_cleared_status_backup = None
+        
+        # Emergency stop UI state
+        self.emergency_stop_active = False
  
         # Robot dashboard connection
         self.robot_socket = None
@@ -136,11 +147,12 @@ class RobotControlUI(QMainWindow):
         # Emergency stop button
         goal_layout = QHBoxLayout()
  
-        btn_emergency_stop = QPushButton("EMERGENCY STOP / Cancel Goals")
-        btn_emergency_stop.setStyleSheet("background-color: red; color: white; font-weight: bold;")
-        btn_emergency_stop.clicked.connect(self.emergency_stop)
-        btn_emergency_stop.setToolTip("Publish emergency stop to /arm/emergency_stop and cancel trajectory goals")
-        goal_layout.addWidget(btn_emergency_stop)
+        self.btn_emergency_stop = QPushButton("EMERGENCY STOP (Click to Activate)")
+        self.btn_emergency_stop.setCheckable(True)
+        self.btn_emergency_stop.setStyleSheet("background-color: red; color: white; font-weight: bold;")
+        self.btn_emergency_stop.clicked.connect(self.emergency_stop)
+        self.btn_emergency_stop.setToolTip("Toggle emergency stop on /arm/emergency_stop and cancel trajectory goals when activating")
+        goal_layout.addWidget(self.btn_emergency_stop)
         control_layout.addLayout(goal_layout)
  
         control_layout.addStretch()
@@ -524,6 +536,10 @@ class RobotControlUI(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self._spin_ros)
         self.timer.start(100)  # 10 Hz
+        
+        # Initial UI update for consistent visuals
+        self._update_emergency_stop_button_ui()
+        # QApplication.processEvents()
  
     def _spin_ros(self):
         """Safely spin ROS, checking context is valid first"""
@@ -1287,37 +1303,91 @@ class RobotControlUI(QMainWindow):
         self.status_text.append(f"✓ Position '{position_name}' command completed")
  
     def emergency_stop(self):
-        """Trigger emergency stop and cancel current trajectory goal"""
-        if not rclpy.ok():
-            self.status_text.append("<span style='color: #c69026;'>⚠ ROS context invalid - cannot send emergency stop</span>")
+        """Toggle emergency stop state (latched)."""
+        self.set_emergency_stop_state(not self.emergency_stop_active, source="ui")
+            
+    def _on_emergency_stop_state(self, msg: Bool):
+        """Sync UI with the latched /arm/emergency_stop state (even if published externally)."""
+        self.set_emergency_stop_state(bool(msg.data), source="topic")
+
+    def set_emergency_stop_state(self, active: bool, source: str = "ui"):
+        """
+        Centralized state setter.
+
+        Behavior (matches old behavior):
+        - Only publishes to /arm/emergency_stop when source == "ui"
+        - Only publishes when the state actually changes
+        - Topic callbacks only update UI (no re-publish), preventing feedback loops
+        """
+        # If no change, do nothing (prevents repeated publishes / UI churn)
+        if active == getattr(self, "emergency_stop_active", False):
             return
+
+        # Update internal state + UI
+        self.emergency_stop_active = active
+        self._update_emergency_stop_button_ui()
+        # QApplication.processEvents()
+
+        # If this came from the topic, do not publish or trigger side effects
+        if source != "ui":
+            return
+
+        if not rclpy.ok():
+            self.status_text.append("<span style='color: #c69026;'>⚠ ROS context invalid - cannot set emergency stop</span>")
+            return
+
+        # Publish only on user-triggered change
         try:
-            # 1. Publish ROS emergency stop signal
             stop_msg = Bool()
-            stop_msg.data = True
+            stop_msg.data = active
             self.emergency_stop_publisher.publish(stop_msg)
-            self.status_text.append("<span style='color: #c69026; font-weight: bold;'>⚠️ EMERGENCY STOP - Published stop signal</span>")
- 
-            # 2. Cancel current trajectory goal if one exists
-            if self.current_goal_handle is not None:
-                cancel_future = self.current_goal_handle.cancel_goal_async()
-                self.status_text.append("<span style='color: #c69026;'>⚠️ Canceling current trajectory goal...</span>")
-                self.current_goal_handle = None
- 
-            # 3. Send protective stop to robot via Dashboard Server
-            # This triggers the robot's safety system similar to teach pendant e-stop
-            response = self._send_robot_command('stop')
-            if response:
-                self.status_text.append("<span style='color: #c69026; font-weight: bold;'>⚠️ Robot protective stop triggered</span>")
- 
-            # # 4. Stop any active jogging
-            # if hasattr(self, 'jog_timer'):
-            #     self.jog_timer.stop()
-            # if hasattr(self, 'active_jog'):
-            #     delattr(self, 'active_jog')
- 
         except Exception as e:
-            self.status_text.append(f"<span style='color: #f47067;'>❌ Error during emergency stop: {e}</span>")
+            self.status_text.append(f"<span style='color: #f47067;'>❌ Failed to publish /arm/emergency_stop: {e}</span>")
+            return
+
+        # User-triggered side-effects only
+        try:
+            if active:
+                self.status_text.append("<span style='color: #c69026; font-weight: bold;'>⚠ EMERGENCY STOP - Published stop signal</span>")
+
+                if self.current_goal_handle is not None:
+                    self.current_goal_handle.cancel_goal_async()
+                    self.status_text.append("<span style='color: #c69026;'>⚠ Canceling current trajectory goal...</span>")
+                    self.current_goal_handle = None
+
+                response = self._send_robot_command('stop')
+                if response:
+                    self.status_text.append("<span style='color: #c69026; font-weight: bold;'>⚠ Robot protective stop triggered</span>")
+
+            else:
+                self.status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ EMERGENCY STOP RELEASED - Published release signal</span>")
+
+                self._send_robot_command('close safety popup')
+                response = self._send_robot_command('unlock protective stop')
+                if response:
+                    self.status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ Robot protective stop released (requested)</span>")
+                    
+                    play_resp = self._send_robot_command('play')
+                    if play_resp:
+                        self.status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ Robot program started (play)</span>")
+                    
+        except Exception as e:
+            self.status_text.append(f"<span style='color: #f47067;'>❌ Error while applying emergency stop state: {e}</span>")
+
+
+    def _update_emergency_stop_button_ui(self):
+        """Update button label + color according to emergency stop state."""
+        if not hasattr(self, "btn_emergency_stop"):
+            return
+
+        if self.emergency_stop_active:
+            self.btn_emergency_stop.setText("EMERGENCY STOP ACTIVE (Click to Release)")
+            self.btn_emergency_stop.setStyleSheet("background-color: #8b0000; color: white; font-weight: bold;")
+            self.btn_emergency_stop.setChecked(True)
+        else:
+            self.btn_emergency_stop.setText("EMERGENCY STOP (Click to Activate)")
+            self.btn_emergency_stop.setStyleSheet("background-color: red; color: white; font-weight: bold;")
+            self.btn_emergency_stop.setChecked(False)
  
     def closeEvent(self, event):
         self.timer.stop()
