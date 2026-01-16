@@ -83,10 +83,19 @@ class RobotControlUI(QMainWindow):
         arm_tab = QWidget()
         arm_tab_layout = QVBoxLayout(arm_tab)
  
+        # Simulation parameter selector (at top)
+        arm_sim_param_layout = QHBoxLayout()
+        arm_sim_param_layout.addWidget(QLabel("Simulation Mode:"))
+        self.arm_sim_mode_combo = QComboBox()
+        self.arm_sim_mode_combo.addItems(['false', 'true'])
+        arm_sim_param_layout.addWidget(self.arm_sim_mode_combo)
+        arm_sim_param_layout.addStretch()
+        arm_tab_layout.addLayout(arm_sim_param_layout)
+        
         # Horizontal layout for three boxes side by side
         boxes_layout = QHBoxLayout()
         arm_tab_layout.addLayout(boxes_layout)
- 
+        
         # Control Box
         control_box = QGroupBox("Control")
         control_layout = QVBoxLayout()
@@ -608,9 +617,11 @@ class RobotControlUI(QMainWindow):
         return ''.join(result)
  
     def toggle_general_launch(self):
+        sim_mode = self.arm_sim_mode_combo.currentText()
         self._toggle_process('general_launch', self.btn_general_launch, 'General Launch',
                             'ros2', ['launch', 'arm_control', 'general.launch.py', 
-                                    'use_fake_hardware:=true', 'robot_ip:=192.168.1.102',
+                                    f'use_fake_hardware:={sim_mode}', 'robot_ip:=192.168.1.102',
+                                    f'launch_rviz:={sim_mode}',
                                     'initial_joint_controller:=joint_trajectory_controller'
                                     ])
  
@@ -1139,6 +1150,9 @@ class RobotControlUI(QMainWindow):
                     if joint_name in joint_position_map:
                         self.joint_inputs[i].setValue(joint_position_map[joint_name])
                 
+                # Store current joint positions for safety comparison
+                self.current_joint_positions = [joint_position_map[j] for j in expected_joints]
+                
                 # Enable controls only after confirming we have valid, complete joint data
                 for input_field in self.joint_inputs:
                     input_field.setEnabled(True)
@@ -1159,6 +1173,23 @@ class RobotControlUI(QMainWindow):
         """Publish joint trajectory to /arm/planned_trajectory topic"""
         # Get values from input fields
         positions = [input_field.value() for input_field in self.joint_inputs]
+        
+        # Safety check: ensure only one joint position is different from current
+        if hasattr(self, 'current_joint_positions') and self.current_joint_positions:
+            differences = []
+            for i, (current, requested) in enumerate(zip(self.current_joint_positions, positions)):
+                # Use small tolerance for floating point comparison
+                if abs(current - requested) > 0.001:
+                    differences.append(i)
+            
+            if len(differences) > 1:
+                joint_names_changed = [f"Joint {i}" for i in differences]
+                self.joint_status_text.append(f"<span style='color: #c69026;'>⚠ Safety Warning: Cannot change multiple joints at once!</span>")
+                self.joint_status_text.append(f"<span style='color: #c69026;'>   Changed joints: {', '.join(joint_names_changed)}</span>")
+                self.joint_status_text.append(f"<span style='color: #c69026;'>   Requested joint positions should be only one for safety.</span>")
+                self.joint_status_text.append("")
+                return
+        
         time_sec = int(self.time_from_start_input.value())
         time_nanosec = int((self.time_from_start_input.value() - time_sec) * 1e9)
         
