@@ -8,22 +8,25 @@ import yaml
 import os
 from ament_index_python.packages import get_package_share_directory
 from rclpy.utilities import remove_ros_args
-
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 class PositionSenderNode(Node):
     def __init__(self):
         super().__init__('position_sender_node')
         
+        qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
+        
         # Publisher for goal pose
         self.publisher_ = self.create_publisher(Pose, 'goal_pose', 10)
         
         # Subscriber for execution status
-        self.execution_status_sub = self.create_subscription(
-            Bool,
-            'execution_status',
-            self.execution_status_callback,
-            10
-        )
+        self.execution_status_sub = self.create_subscription(Bool,'execution_status',self.execution_status_callback,10)
+        self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
         
         # Predefined positions (can be loaded from config file)
         self.positions = {
@@ -58,6 +61,7 @@ class PositionSenderNode(Node):
         self.movement_done = False
         self.execution_status = False
         self.current_position_name = None
+        self.emergency_stop = False
         
         # Timer for checking status
         self.timer = self.create_timer(0.5, self.check_status)
@@ -66,16 +70,26 @@ class PositionSenderNode(Node):
         self.get_logger().info(f"Available positions: {list(self.positions.keys())}")
         self.get_logger().info("Use: ros2 run arm_control position_sender <position_name>")
         
+    def emergency_callback(self, msg):
+        self.emergency_stop = msg.data
+        
     def execution_status_callback(self, msg):
         """Callback for execution status updates."""
         self.execution_status = msg.data
+        if self.emergency_stop:
+            self.get_logger().info(f"Goal '{self.current_position_name}' canceled!")
+            return
         if self.execution_status and self.goal_sent:
             self.movement_done = True
-            self.get_logger().info(f"✓ Position '{self.current_position_name}' reached successfully!")
+            self.get_logger().info(f"Position '{self.current_position_name}' reached successfully!")
             self.goal_sent = False
             
     def send_position(self, position_name):
         """Send a predefined position to the manipulator."""
+        if self.emergency_stop:
+            self.get_logger().warn("Cannot send position while emergency stop is active.")
+            return False
+        
         if position_name not in self.positions:
             self.get_logger().error(f"Position '{position_name}' not found!")
             self.get_logger().info(f"Available positions: {list(self.positions.keys())}")
