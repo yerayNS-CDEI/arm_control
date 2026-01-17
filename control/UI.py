@@ -5,6 +5,7 @@ import subprocess
 import signal
 import socket
 import re
+import time
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -818,18 +819,25 @@ class RobotControlUI(QMainWindow):
  
             # For launch processes, kill child processes
             if process_key in ['mapping', 'localization', 'nav2', 'exploration']:
+                # Add status message for mapping shutdown
+                if process_key == 'mapping':
+                    self.base_status_text.append(f"💾 Saving {name} database...")
+                
                 pid = process.processId()
                 if pid:
                     try:
-                        subprocess.run(['pkill', '-9', '-P', str(pid)], timeout=2, stderr=subprocess.DEVNULL)
+                        # Use SIGINT (same as CTRL+C) for graceful termination
+                        subprocess.run(['pkill', '-INT', '-P', str(pid)], timeout=2, stderr=subprocess.DEVNULL)
+                        # Wait a moment for graceful shutdown
+                        time.sleep(3)
                     except:
                         pass
                 self._cleanup_ros_children_of_pid(pid)
- 
-            process.terminate()
-            process.waitForFinished(3000)
+
+            process.terminate()  # SIGTERM - graceful
+            process.waitForFinished(5000)  # Wait up to 5 seconds for graceful shutdown
             if process.state() == QProcess.Running:
-                process.kill()
+                process.kill()  # SIGKILL - force kill only if still running
  
             del self.process_map[process_key]
             button.setText(f"Launch {name}")
