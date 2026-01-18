@@ -353,6 +353,12 @@ class RobotControlUI(QMainWindow):
         btn_list_base_controllers.setToolTip("ros2 control list_controllers")
         troubleshooting_layout.addWidget(btn_list_base_controllers)
  
+        # Launch RQT button
+        self.btn_launch_rqt = QPushButton("Launch RQT")
+        self.btn_launch_rqt.clicked.connect(self.toggle_rqt)
+        self.btn_launch_rqt.setToolTip("rqt")
+        troubleshooting_layout.addWidget(self.btn_launch_rqt)
+ 
         troubleshooting_layout.addStretch()
         base_boxes_layout.addWidget(troubleshooting_box)
  
@@ -698,6 +704,10 @@ class RobotControlUI(QMainWindow):
         self._toggle_base_process('exploration', self.btn_launch_exploration, 'Exploration',
                                  'ros2', ['run', 'navi_wall', 'explore', 
                                          '--ros-args', '--params-file', params_file])
+ 
+    def toggle_rqt(self):
+        """Toggle RQT on/off"""
+        self._toggle_base_process('rqt', self.btn_launch_rqt, 'RQT', 'rqt', [])
  
     def run_ps_ros(self):
         """Run ps aux | grep ros2 command"""
