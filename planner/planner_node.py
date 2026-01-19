@@ -11,15 +11,20 @@ from std_msgs.msg import Float64MultiArray
 from visualization_msgs.msg import Marker
 from ament_index_python.packages import get_package_share_directory
 import numpy as np
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
-# Import your planning functions
-from arm_control.planner.planner_lib.closed_form_algorithm import closed_form_algorithm
-from arm_control.planner.planner_lib.Astar3D import find_path, world_to_grid, grid_to_world, dilate_obstacles
+# Import planning functions
+from planner.planner_lib.closed_form_algorithm import closed_form_algorithm
+from planner.planner_lib.Astar3D import find_path, world_to_grid, grid_to_world, dilate_obstacles
 from scipy.spatial.transform import Rotation as R, Slerp
 
 class PlannerNode(Node):
     def __init__(self):
         super().__init__('planner_node')
+        
+        # Declare and get joint prefix parameter
+        self.declare_parameter('joint_prefix', 'arm_')
+        self.joint_prefix = self.get_parameter('joint_prefix').get_parameter_value().string_value
         
         # --- Parameters for the grid / reachability ---
         self.robot_name = 'ur10e'
@@ -37,6 +42,7 @@ class PlannerNode(Node):
         self.goal_queue = []
         self.current_joint_state = None
         self.emergency_stop = False
+        self.invalid_path = False
         self.end_effector_pose = None
         self.i = 0
 
@@ -49,16 +55,29 @@ class PlannerNode(Node):
         z_min = min(self.z_levels)
         z_max = max(self.z_levels)
         self.z_vals = np.linspace(z_min, z_max, len(self.z_levels))  # assumes uniform spacing
+        
+        qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
 
         # Create subscriber and publishers
         self.create_subscription(Pose, 'goal_pose', self.goal_callback, 10)
         self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
         self.create_subscription(Bool, "execution_status", self.execution_status_callback, 10)
         self.create_subscription(Pose, "end_effector_pose", self.end_effector_pose_callback, 10)
+        self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
         self.marker_pub = self.create_publisher(Marker, 'obstacle_markers', 10)
 
         self.get_logger().info("Planner node initialized and waiting for goal poses...")
+        
+    def emergency_callback(self, msg):
+        self.emergency_stop = msg.data
+        if self.emergency_stop:
+            self.execution_complete = True
 
     def joint_state_callback(self, msg):
         self.current_joint_state = msg
@@ -77,19 +96,19 @@ class PlannerNode(Node):
                 self.plan_and_send_trajectory(next_goal)
 
     def goal_callback(self, msg: Pose):
+        if self.emergency_stop:
+            self.get_logger().warn("Emergency stop is active, aborting trajectory planning. Ignoring goal.")
+            return  # Aborting if emergency state is active
+        
         if not self.execution_complete:
             self.get_logger().warn("Previous trajectory not finished. Goal queued.")
             self.goal_queue.append(msg)
             return
-
+        
         self.execution_complete = False
         self.plan_and_send_trajectory(msg)
 
     def plan_and_send_trajectory(self, msg: Pose):
-        if self.emergency_stop:
-            self.get_logger().warn("Emergency stop is active, aborting trajectory planning.")
-            return  # Aborting if emergency state is active
-
         if self.current_joint_state is None:
             self.get_logger().error("No current joint state received yet. Cannot calculate trajectory.")
             return
@@ -218,7 +237,7 @@ class PlannerNode(Node):
             q_new = closed_form_algorithm(T, q_current, type=0)
             if np.any(np.isnan(q_new)):
                 self.get_logger().error(f"Invalid IK at step {i}: pose = {T[:3, 3]}. Path world = {path_world[i]}")
-                self.emergency_stop = True 
+                self.invalid_path = True 
             all_joint_values.append(q_new)
             all_joint_values_print.append(q_new)
             q_current = q_new
@@ -242,19 +261,24 @@ class PlannerNode(Node):
         # Publish success
         self.get_logger().info("Joint planning published.")
                 
-        if self.emergency_stop:  # Verifies if emergency stop is active
-            self.get_logger().warn("Emergency stop is active. Halting trajectory.")
+        # if self.emergency_stop:  # Verifies if emergency stop is active
+        #     self.get_logger().warn("Emergency stop is active. Halting trajectory.")
+        #     return
+        
+        if self.invalid_path:  # Verifies if invalid IK in path
+            self.get_logger().warn("Invalid path detected. Halting trajectory.")
+            self.invalid_path = False
             return
         
         # Publish trajectory
         traj_msg = JointTrajectory()
         traj_msg.joint_names = [
-            'shoulder_pan_joint',
-            'shoulder_lift_joint',
-            'elbow_joint',
-            'wrist_1_joint',
-            'wrist_2_joint',
-            'wrist_3_joint'
+            'arm_shoulder_pan_joint',
+            'arm_shoulder_lift_joint',
+            'arm_elbow_joint',
+            'arm_wrist_1_joint',
+            'arm_wrist_2_joint',
+            'arm_wrist_3_joint'
         ]
 
         time_from_start = 1.0
@@ -262,10 +286,11 @@ class PlannerNode(Node):
         for q in all_joint_values:
             point = JointTrajectoryPoint()
             point.positions = q.tolist()
+            point.velocities = [0.0] * 6  # Zero velocities = smoother interpolation
             point.time_from_start.sec = int(time_from_start)
             point.time_from_start.nanosec = int((time_from_start % 1.0) * 1e9)
             traj_msg.points.append(point)
-            time_from_start += 1
+            time_from_start += 3.0  # 3 seconds per waypoint for slow, smooth motion
 
         self.trajectory_pub.publish(traj_msg)
         self.get_logger().info("Published planned trajectory.")

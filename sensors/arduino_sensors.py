@@ -14,7 +14,7 @@ class MultiSensorNode(Node):
     def __init__(self):
         super().__init__('multi_sensor_node')
 
-        self.serial = serial.Serial('/dev/ttyACM2', 115200, timeout=1)
+        self.serial = serial.Serial('/dev/ttyACM0', 115200, timeout=1)
 
         # Publishers
         self.pub_s4 = self.create_publisher(Range, 'vl6180/sensor1', 10)
@@ -26,7 +26,7 @@ class MultiSensorNode(Node):
         self.pub_sensors = self.create_publisher(Float32MultiArray, 'distance_sensors', 10)
 
         # Timer
-        self.timer = self.create_timer(0.5, self.read_serial)
+        self.timer = self.create_timer(3.0, self.read_serial)
 
         # Almacenamiento de últimos datos
         self.last_data = None

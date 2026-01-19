@@ -18,6 +18,7 @@ from control_msgs.action import FollowJointTrajectory
 from control_msgs.msg import JointTolerance
 from copy import deepcopy
 from std_srvs.srv import Trigger
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 class PublisherJointTrajectoryActionClient(Node):
 
@@ -25,9 +26,9 @@ class PublisherJointTrajectoryActionClient(Node):
         super().__init__("publisher_joint_trajectory_action_client")
 
         self.declare_parameter("controller_name", "joint_trajectory_controller")
-        self.declare_parameter("joints", ["shoulder_pan_joint", "shoulder_lift_joint",
-                                          "elbow_joint", "wrist_1_joint",
-                                          "wrist_2_joint", "wrist_3_joint"])
+        self.declare_parameter("joints", ["arm_shoulder_pan_joint", "arm_shoulder_lift_joint",
+                                          "arm_elbow_joint", "arm_wrist_1_joint",
+                                          "arm_wrist_2_joint", "arm_wrist_3_joint"])
         self.declare_parameter("check_starting_point", False)
 
         controller_name = self.get_parameter("controller_name").value
@@ -48,10 +49,17 @@ class PublisherJointTrajectoryActionClient(Node):
                 if len(self.starting_point[name]) != 2:
                     raise Exception('"starting_point" parameter is not set correctly!')
                 
+        qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
+                
         self.joint_state_sub = self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
         self.trajectory_sub = self.create_subscription(JointTrajectory, "planned_trajectory", self.trajectory_callback, 10)
         self.status_pub = self.create_publisher(Bool, "execution_status", 10)
-        self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, 10)
+        self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
 
         self.emergency_srv = self.create_service(Trigger, "emergency_stop", self.handle_emergency_service)
 

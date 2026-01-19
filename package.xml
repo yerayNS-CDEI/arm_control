@@ -43,7 +43,8 @@
   <!-- External Python dependencies -->
   <depend>numpy</depend>
   <depend>example_interfaces</depend>
-
+  <depend>backward_ros</depend> <!-- for automatic backtrace -->
+  
   <!-- Test dependencies -->
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
