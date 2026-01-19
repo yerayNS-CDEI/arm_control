@@ -273,12 +273,12 @@ class PlannerNode(Node):
         # Publish trajectory
         traj_msg = JointTrajectory()
         traj_msg.joint_names = [
-            f'{self.joint_prefix}shoulder_pan_joint',
-            f'{self.joint_prefix}shoulder_lift_joint',
-            f'{self.joint_prefix}elbow_joint',
-            f'{self.joint_prefix}wrist_1_joint',
-            f'{self.joint_prefix}wrist_2_joint',
-            f'{self.joint_prefix}wrist_3_joint'
+            'arm_shoulder_pan_joint',
+            'arm_shoulder_lift_joint',
+            'arm_elbow_joint',
+            'arm_wrist_1_joint',
+            'arm_wrist_2_joint',
+            'arm_wrist_3_joint'
         ]
 
         time_from_start = 1.0

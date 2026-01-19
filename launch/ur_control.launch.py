@@ -84,6 +84,7 @@ def launch_setup(context, *args, **kwargs):
     trajectory_port = LaunchConfiguration("trajectory_port")
     # My arguments
     initial_position_package = LaunchConfiguration("initial_position_package")
+    use_sim_time = LaunchConfiguration("use_sim_time")
 
 
     joint_limit_params = PathJoinSubstitution(
@@ -207,7 +208,7 @@ def launch_setup(context, *args, **kwargs):
         "robot_description": ParameterValue(value=robot_description_content, value_type=str)
     }
     frame_prefix = {
-        "frame_prefix": "arm_"
+        "frame_prefix": ""
     }
 
     initial_joint_controllers = PathJoinSubstitution(
@@ -234,6 +235,7 @@ def launch_setup(context, *args, **kwargs):
             robot_description,
             update_rate_config_file,
             ParameterFile(initial_joint_controllers, allow_substs=True),
+            {"use_sim_time": use_sim_time},
         ],
         output="screen",
         condition=IfCondition(use_fake_hardware),
@@ -246,6 +248,7 @@ def launch_setup(context, *args, **kwargs):
             robot_description,
             update_rate_config_file,
             ParameterFile(initial_joint_controllers, allow_substs=True),
+            {"use_sim_time": use_sim_time},
         ],
         output="screen",
         condition=UnlessCondition(use_fake_hardware),
@@ -260,7 +263,7 @@ def launch_setup(context, *args, **kwargs):
         name="dashboard_client",
         output="screen",
         emulate_tty=True,
-        parameters=[{"robot_ip": robot_ip}],
+        parameters=[{"robot_ip": robot_ip, "use_sim_time": use_sim_time}],
     )
 
     tool_communication_node = Node(
@@ -274,6 +277,7 @@ def launch_setup(context, *args, **kwargs):
                 "robot_ip": robot_ip,
                 "tcp_port": tool_tcp_port,
                 "device_name": tool_device_name,
+                "use_sim_time": use_sim_time,
             }
         ],
     )
@@ -281,7 +285,7 @@ def launch_setup(context, *args, **kwargs):
     urscript_interface = Node(
         package="ur_robot_driver",
         executable="urscript_interface",
-        parameters=[{"robot_ip": robot_ip}],
+        parameters=[{"robot_ip": robot_ip, "use_sim_time": use_sim_time}],
         output="screen",
     )
 
@@ -305,6 +309,7 @@ def launch_setup(context, *args, **kwargs):
                     "ur_configuration_controller",
                 ]
             },
+            {"use_sim_time": use_sim_time},
         ],
     )
 
@@ -313,7 +318,8 @@ def launch_setup(context, *args, **kwargs):
         executable="robot_state_publisher",
         output="both",
         parameters=[robot_description,
-                    frame_prefix
+                    frame_prefix,
+                    {"use_sim_time": use_sim_time}
                     ],
     )
 
@@ -324,6 +330,7 @@ def launch_setup(context, *args, **kwargs):
         name="rviz2",
         output="log",
         arguments=["-d", rviz_config_file],
+        parameters=[{"use_sim_time": use_sim_time}],
     )
 
     # Spawn controllers
@@ -644,6 +651,13 @@ def generate_launch_description():
             "initial_position_package",
             default_value="arm_control",
             description="Package in where to find the initial positions file.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "use_sim_time",
+            default_value="false",
+            description="Use simulation time",
         )
     )
     return LaunchDescription(declared_arguments + [OpaqueFunction(function=launch_setup)])

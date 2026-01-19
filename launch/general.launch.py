@@ -71,6 +71,7 @@ def generate_launch_description():
                 'tf_prefix':          LaunchConfiguration('tf_prefix'),
                 'launch_rviz':        LaunchConfiguration('launch_rviz'),
                 'controllers_file':   TextSubstitution(text='ur_controllers_namespace.yaml'),
+                'use_sim_time':     LaunchConfiguration('arm_use_sim_time'),
             }.items(),
         ),
         
@@ -78,6 +79,7 @@ def generate_launch_description():
             PythonLaunchDescriptionSource(publisher_launch),
             launch_arguments={
                 'check_starting_point': TextSubstitution(text='false'),
+                'use_sim_time':     LaunchConfiguration('arm_use_sim_time'),
             }.items(),
         ),
 
