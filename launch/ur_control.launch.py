@@ -207,7 +207,7 @@ def launch_setup(context, *args, **kwargs):
         "robot_description": ParameterValue(value=robot_description_content, value_type=str)
     }
     frame_prefix = {
-        "frame_prefix": "arm/"
+        "frame_prefix": "arm_"
     }
 
     initial_joint_controllers = PathJoinSubstitution(

@@ -22,6 +22,10 @@ class PlannerNode(Node):
     def __init__(self):
         super().__init__('planner_node')
         
+        # Declare and get joint prefix parameter
+        self.declare_parameter('joint_prefix', 'arm_')
+        self.joint_prefix = self.get_parameter('joint_prefix').get_parameter_value().string_value
+        
         # --- Parameters for the grid / reachability ---
         self.robot_name = 'ur10e'
         self.filename = "reachability_map_27_fused"
@@ -269,12 +273,12 @@ class PlannerNode(Node):
         # Publish trajectory
         traj_msg = JointTrajectory()
         traj_msg.joint_names = [
-            'shoulder_pan_joint',
-            'shoulder_lift_joint',
-            'elbow_joint',
-            'wrist_1_joint',
-            'wrist_2_joint',
-            'wrist_3_joint'
+            f'{self.joint_prefix}shoulder_pan_joint',
+            f'{self.joint_prefix}shoulder_lift_joint',
+            f'{self.joint_prefix}elbow_joint',
+            f'{self.joint_prefix}wrist_1_joint',
+            f'{self.joint_prefix}wrist_2_joint',
+            f'{self.joint_prefix}wrist_3_joint'
         ]
 
         time_from_start = 1.0
@@ -282,10 +286,11 @@ class PlannerNode(Node):
         for q in all_joint_values:
             point = JointTrajectoryPoint()
             point.positions = q.tolist()
+            point.velocities = [0.0] * 6  # Zero velocities = smoother interpolation
             point.time_from_start.sec = int(time_from_start)
             point.time_from_start.nanosec = int((time_from_start % 1.0) * 1e9)
             traj_msg.points.append(point)
-            time_from_start += 1
+            time_from_start += 3.0  # 3 seconds per waypoint for slow, smooth motion
 
         self.trajectory_pub.publish(traj_msg)
         self.get_logger().info("Published planned trajectory.")
