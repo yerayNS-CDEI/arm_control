@@ -642,7 +642,7 @@ class RobotControlUI(QMainWindow):
         sim_mode = self.arm_sim_mode_combo.currentText()
         self._toggle_process('general_launch', self.btn_general_launch, 'General Launch',
                             'ros2', ['launch', 'arm_control', 'general.launch.py', 
-                                    f'use_fake_hardware:={sim_mode}', 'robot_ip:=192.168.1.102',
+                                    f'use_fake_hardware:={sim_mode}', f'arm_use_sim_time:={sim_mode}', 'robot_ip:=192.168.1.102',
                                     f'launch_rviz:={sim_mode}',
                                     'initial_joint_controller:=joint_trajectory_controller'
                                     ])
@@ -1163,12 +1163,12 @@ class RobotControlUI(QMainWindow):
                 
                 # Expected joint order
                 expected_joints = [
-                    'shoulder_pan_joint', 
-                    'shoulder_lift_joint', 
-                    'elbow_joint', 
-                    'wrist_1_joint', 
-                    'wrist_2_joint', 
-                    'wrist_3_joint'
+                    'arm_shoulder_pan_joint', 
+                    'arm_shoulder_lift_joint', 
+                    'arm_elbow_joint', 
+                    'arm_wrist_1_joint', 
+                    'arm_wrist_2_joint', 
+                    'arm_wrist_3_joint'
                 ]
                 
                 # Verify all expected joints are present
