@@ -3,6 +3,7 @@
 
 /**/controller_manager:
   ros__parameters:
+    update_rate: 100  # Hz
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
 
@@ -44,6 +45,10 @@
 
     ur_configuration_controller:
       type: ur_controllers/URConfigurationController
+
+/**/joint_state_broadcaster:
+  ros__parameters:
+    frame_id: $(var tf_prefix)base_link
 
 /**/speed_scaling_state_broadcaster:
   ros__parameters:
