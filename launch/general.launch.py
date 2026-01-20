@@ -98,14 +98,15 @@ def generate_launch_description():
             output="screen",
             parameters=[{'use_sim_time': arm_use_sim_time}],
         ),
-        
-        # Node(
-        #     package="arm_control",
-        #     executable="sensors_orientation",
-        #     name="sensors_orientation_node",
-        #     output="screen",
-        #     parameters=[{'use_sim_time': arm_use_sim_time}],
-        # ),
+        # Static TF from column_link to arm_base_link
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="static_tf_publisher",
+            output="screen",
+            arguments=['0', '0', '0.73', '0', '0', '-0.7071068', '0.7071068', "column_link", "arm_base_link"],
+            parameters=[{'use_sim_time': arm_use_sim_time}],
+        ),
         
     ])
 
