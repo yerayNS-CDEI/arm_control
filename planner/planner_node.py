@@ -228,7 +228,7 @@ class PlannerNode(Node):
         home_position = np.array([self.current_joint_state.position])
         all_joint_values = []
         all_joint_values_print = []
-        q_current = np.array([self.current_joint_state.position[-1], self.current_joint_state.position[0], self.current_joint_state.position[1], self.current_joint_state.position[2], self.current_joint_state.position[3], self.current_joint_state.position[4]])
+        q_current = np.array([self.current_joint_state.position[2], self.current_joint_state.position[4], self.current_joint_state.position[0], self.current_joint_state.position[1], self.current_joint_state.position[3], self.current_joint_state.position[5]])
         self.get_logger().error(f"Current joint state = {self.current_joint_state.position}")
         all_joint_values_print.append(q_current)
 
@@ -298,7 +298,7 @@ class PlannerNode(Node):
     def publish_cylinder_marker(self, center_xy, radius, z_min, z_max):
         """Publish a cylinder marker for RViz visualization."""
         marker = Marker()
-        marker.header.frame_id = "base_link"  # Change to your robot's base frame if different
+        marker.header.frame_id = "arm_base_link"  # Change to your robot's base frame if different
         marker.header.stamp = self.get_clock().now().to_msg()
         marker.ns = "obstacles"
         marker.id = 0

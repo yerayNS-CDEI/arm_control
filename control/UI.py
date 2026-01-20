@@ -1295,14 +1295,18 @@ class RobotControlUI(QMainWindow):
         position_name = self.position_dropdown.currentText()
  
         # Build command
-        args = ['run', 'arm_control', 'position_sender_node', 
-                '--ros-args', '-r', '__ns:=/arm', '--', position_name]
+        ros2_args = ['run', 'arm_control', 'position_sender_node', 
+                     '--ros-args', '-r', '__ns:=/arm']
+        
+        # Build xterm command
+        ros2_cmd = 'ros2 ' + ' '.join(ros2_args)
+        xterm_args = ['-e', 'bash', '-c', ros2_cmd]
  
         # Display command in bold green
-        cmd_str = 'ros2 ' + ' '.join(args)
+        cmd_str = 'xterm -e ' + ros2_cmd
         self.status_text.append(f"<b style='color: #57ab5a;'>→ {cmd_str}</b>")
  
-        # Launch the position_sender_node with the selected position
+        # Launch the position_sender_node in xterm
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
         process.readyReadStandardOutput.connect(lambda: self.handle_output(process))
@@ -1310,7 +1314,7 @@ class RobotControlUI(QMainWindow):
         # Store process temporarily to prevent garbage collection
         process_key = f'position_cmd_{position_name}'
         process.finished.connect(lambda: self._cleanup_position_sender(process_key, position_name))
-        process.start('ros2', args)
+        process.start('xterm', xterm_args)
         self.process_map[process_key] = process
  
     def _cleanup_position_sender(self, process_key, position_name):
