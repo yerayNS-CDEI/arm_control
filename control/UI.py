@@ -897,9 +897,9 @@ class RobotControlUI(QMainWindow):
  
     def handle_output(self, process):
         output = process.readAllStandardOutput().data().decode()
-        if output.strip():
-            # Color-code ROS log messages
-            lines = output.strip().split('\n')
+        if output:
+            # Don't strip output to preserve formatting (especially for YAML)
+            lines = output.split('\n')
             for line in lines:
                 # Skip expected shutdown messages (exit code -9 from our kill signals)
                 if 'process has died' in line and 'exit code -9' in line:
@@ -918,9 +918,9 @@ class RobotControlUI(QMainWindow):
     def handle_base_output(self, process):
         """Handle output for base control processes (outputs to base_status_text)"""
         output = process.readAllStandardOutput().data().decode()
-        if output.strip():
-            # Color-code ROS log messages
-            lines = output.strip().split('\n')
+        if output:
+            # Don't strip output to preserve formatting (especially for YAML)
+            lines = output.split('\n')
             for line in lines:
                 # Skip expected shutdown messages (exit code -9 from our kill signals)
                 if 'process has died' in line and 'exit code -9' in line:
@@ -962,6 +962,7 @@ class RobotControlUI(QMainWindow):
         try:
             self.robot_socket.send(str.encode(command + '\n'))
             self.status_text.append(f"<b style='color: #57ab5a;'>→ SENT: {command}</b>")
+            self.status_text.append("")  # Add newline after command
  
             data = self.robot_socket.recv(1024)
             response = data.decode('utf-8').strip()
@@ -994,6 +995,7 @@ class RobotControlUI(QMainWindow):
         # Display command in bold green
         cmd_str = 'ros2 control list_controllers -c /arm/controller_manager'
         self.status_text.append(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+        self.status_text.append("")  # Add newline after command
  
         # Run the command
         process_key = 'list_controllers'
@@ -1108,10 +1110,15 @@ class RobotControlUI(QMainWindow):
         """Parse joint states output and populate input fields"""
         output = process.readAllStandardOutput().data().decode('utf-8')
         
-        # Display the output
-        html_output = self._ansi_to_html(output)
-        self.joint_status_text.insertHtml(html_output)
-        self.joint_status_text.append("")
+        # Display the output line by line to preserve formatting
+        lines = output.split('\n')
+        for line in lines:
+            html_line = self._ansi_to_html(line)
+            cursor = self.joint_status_text.textCursor()
+            cursor.movePosition(cursor.End)
+            self.joint_status_text.setTextCursor(cursor)
+            self.joint_status_text.insertHtml(html_line)
+            cursor.insertText('\n')
         
         # Check if topic actually published data (not timeout or error)
         if not output.strip() or 'ERROR' in output or output.strip().startswith('timeout:'):
@@ -1259,9 +1266,16 @@ class RobotControlUI(QMainWindow):
     def _handle_joint_publish_output(self, process):
         """Handle output from joint trajectory publish command"""
         output = process.readAllStandardOutput().data().decode('utf-8')
-        if output.strip():
-            html_output = self._ansi_to_html(output)
-            self.joint_status_text.insertHtml(html_output)
+        if output:
+            # Display output line by line to preserve formatting
+            lines = output.split('\n')
+            for line in lines:
+                html_line = self._ansi_to_html(line)
+                cursor = self.joint_status_text.textCursor()
+                cursor.movePosition(cursor.End)
+                self.joint_status_text.setTextCursor(cursor)
+                self.joint_status_text.insertHtml(html_line)
+                cursor.insertText('\n')
     
     def _on_joint_publish_finished(self, process):
         """Handle completion of joint trajectory publish command"""
@@ -1305,6 +1319,7 @@ class RobotControlUI(QMainWindow):
         # Display command in bold green
         cmd_str = 'xterm -e ' + ros2_cmd
         self.status_text.append(f"<b style='color: #57ab5a;'>→ {cmd_str}</b>")
+        self.status_text.append("")  # Add newline after command
  
         # Launch the position_sender_node in xterm
         process = QProcess(self)
