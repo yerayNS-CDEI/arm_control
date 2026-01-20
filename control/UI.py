@@ -643,7 +643,7 @@ class RobotControlUI(QMainWindow):
         self._toggle_process('general_launch', self.btn_general_launch, 'General Launch',
                             'ros2', ['launch', 'arm_control', 'general.launch.py', 
                                     f'use_fake_hardware:={sim_mode}', f'arm_use_sim_time:={sim_mode}', 'robot_ip:=192.168.1.102',
-                                    f'launch_rviz:={sim_mode}',
+                                    f'launch_rviz:=false',
                                     'initial_joint_controller:=joint_trajectory_controller'
                                     ])
  
