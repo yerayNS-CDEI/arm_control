@@ -428,12 +428,12 @@ class RobotControlUI(QMainWindow):
         
         # Joint names in the correct order for publishing
         joint_names = [
-            'shoulder_pan_joint', 
-            'shoulder_lift_joint', 
-            'elbow_joint', 
-            'wrist_1_joint', 
-            'wrist_2_joint', 
-            'wrist_3_joint'
+            'arm_shoulder_pan_joint', 
+            'arm_shoulder_lift_joint', 
+            'arm_elbow_joint', 
+            'arm_wrist_1_joint', 
+            'arm_wrist_2_joint', 
+            'arm_wrist_3_joint'
         ]
         
         # Create sliders and input fields for each joint
@@ -1239,7 +1239,7 @@ class RobotControlUI(QMainWindow):
         # Build the ros2 topic pub command
         cmd = f"""ros2 topic pub --once /arm/planned_trajectory trajectory_msgs/msg/JointTrajectory "{{
   header: {{stamp: {{sec: 0, nanosec: 0}}, frame_id: ''}},
-  joint_names: ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'],
+  joint_names: ['arm_shoulder_pan_joint', 'arm_shoulder_lift_joint', 'arm_elbow_joint', 'arm_wrist_1_joint', 'arm_wrist_2_joint', 'arm_wrist_3_joint'],
   points: [
     {{positions: [{positions_str}], velocities: [], accelerations: [], effort: [], time_from_start: {{sec: {time_sec}, nanosec: {time_nanosec}}}}}
   ]
