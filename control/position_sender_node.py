@@ -4,11 +4,18 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Pose
 from std_msgs.msg import Bool
+from sensor_msgs.msg import JointState
 import yaml
 import os
 from ament_index_python.packages import get_package_share_directory
 from rclpy.utilities import remove_ros_args
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+from planner.planner_lib.closed_form_algorithm import closed_form_algorithm
 
 class PositionSenderNode(Node):
     def __init__(self):
@@ -23,10 +30,14 @@ class PositionSenderNode(Node):
         
         # Publisher for goal pose
         self.publisher_ = self.create_publisher(Pose, 'goal_pose', 10)
+        self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
         
         # Subscriber for execution status
+        self.subscriptor_ = self.create_subscription(Pose, 'end_effector_pose', self.end_effector_pose_callback, 10)
         self.execution_status_sub = self.create_subscription(Bool,'execution_status',self.execution_status_callback,10)
-        self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
+        self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)        
+        self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
+
         
         # Predefined positions (can be loaded from config file)
         self.positions = {
@@ -44,15 +55,23 @@ class PositionSenderNode(Node):
             },
             'up': {
                 'joints': (),
-                'pose': (-1.011, 0.154, 0.374, -0.468, -0.261, 0.346, 0.770)
+                'pose': (-0.286, 0.230, 0.572, -0.067, 0.562, 0.821, -0.071)
             },
             'down': {
                 'joints': (),
-                'pose': (-0.88, 0.128, 0.264, 0.693, 0.561, -0.265, -0.367)
+                'pose': (-0.281, 0.209, 0.451, -0.105, 0.908, 0.404, -0.032)
             },
             'front': {
                 'joints': (),
-                'pose': (-0.9, 0.199, 0.301, -0.695, -0.227, 0.135, 0.669)
+                'pose': (-0.287, 0.238, 0.530, -0.083, 0.702, 0.705, -0.06)
+            },
+            'left': {   
+                'joints': (),
+                'pose': (-0.388, 0.113, 0.501, -0.442, 0.549, 0.564,-0.430)
+            },
+            'right': {
+                'joints': (),
+                'pose': (-0.7725, 0.2310, 0.321, 0.17737, 0.65857, 0.727895, 0.07055)
             }
         }
         
@@ -69,6 +88,12 @@ class PositionSenderNode(Node):
         self.get_logger().info("Position Sender Node initialized.")
         self.get_logger().info(f"Available positions: {list(self.positions.keys())}")
         self.get_logger().info("Use: ros2 run arm_control position_sender <position_name>")
+        
+    def joint_state_callback(self, msg):
+        self.current_joint_state = msg
+        
+    def end_effector_pose_callback(self, msg):
+        self.end_effector_pose = msg
         
     def emergency_callback(self, msg):
         self.emergency_stop = msg.data
@@ -106,17 +131,73 @@ class PositionSenderNode(Node):
             self.get_logger().error(f"Invalid pose data for '{position_name}': expected 7 values (x,y,z,qx,qy,qz,qw)")
             return False
         
-        # Create and publish Pose message
-        msg = Pose()
-        msg.position.x = pose_data[0]
-        msg.position.y = pose_data[1]
-        msg.position.z = pose_data[2]
-        msg.orientation.x = pose_data[3]
-        msg.orientation.y = pose_data[4]
-        msg.orientation.z = pose_data[5]
-        msg.orientation.w = pose_data[6]
+        current_position  = np.array([self.end_effector_pose.position.x, self.end_effector_pose.position.y, self.end_effector_pose.position.z])
+        dist_diff = pose_data[0:3] - current_position
+        distance = np.linalg.norm(dist_diff)
+        if distance > 0.2:
+            self.get_logger().warn(f"Large movement detected ({distance:.2f} m). Using planner.")
+            #########################
+            ## GOAL POSE PUBLISHING FOR PLANNER
+            
+            # Create and publish Pose message
+            msg = Pose()
+            msg.position.x = pose_data[0]
+            msg.position.y = pose_data[1]
+            msg.position.z = pose_data[2]
+            msg.orientation.x = pose_data[3]
+            msg.orientation.y = pose_data[4]
+            msg.orientation.z = pose_data[5]
+            msg.orientation.w = pose_data[6]
+            
+            self.publisher_.publish(msg)
+        else:
+            self.get_logger().warn(f"Target position '{position_name}' is very close to current position (distance: {distance:.4f} m). Using IK solution and direct trajectory publishing.")
+            ##########################
+            ## IK SOLUTION AND JOINT TRAJECTORY PUBLISHING
+            
+            # Rotation matrix and transform matrix
+            pos = pose_data[0:3]
+            orn = pose_data[3:7]
+            T = np.eye(4)
+            T[:3, :3] = R.from_quat(orn).as_matrix()
+            T[:3, 3] = pos
+            
+            q_current = np.array([self.current_joint_state.position[2], self.current_joint_state.position[4], self.current_joint_state.position[0], self.current_joint_state.position[1], self.current_joint_state.position[3], self.current_joint_state.position[5]])
+            joint_values = closed_form_algorithm(T, q_current, type=0)
+            if np.any(np.isnan(joint_values)):
+                self.get_logger().error("IK solution contains NaN. Aborting.")
+                return
+            # if {
+            #     (joint_values[0] < -1.57 or joint_values[0] > 1.57) or 
+                # (joint_values[1] < -3.3 or joint_values[1] > 0.16)  or
+            #     (joint_values[2] < -1.57 or joint_values[2] > 1.57) or 
+            #     (joint_values[3] < -1.57 or joint_values[3] > 1.57) or 
+            #     (joint_values[4] < -1.57 or joint_values[4] > 1.57) or 
+            #     (joint_values[5] < -1.57 or joint_values[5] > 1.57)
+                # }:
+                # self.get_logger().error("Selected solution with possible collision. Joint values outside of safety margins. Aborting.")
+                # return
+            # joint_values[5] = 0.0   # NEEDS TO BE MODIFIED IN CASE ANOTHER INITIAL SENSORS POSITION IS USED!!!
+            
+            # Publish GoalPose
+            traj_msg = JointTrajectory()
+            traj_msg.joint_names = [
+                'arm_shoulder_pan_joint',
+                'arm_shoulder_lift_joint',
+                'arm_elbow_joint',
+                'arm_wrist_1_joint',
+                'arm_wrist_2_joint',
+                'arm_wrist_3_joint'
+            ]
+            time_from_start = 0.5
+            goal_pose = JointTrajectoryPoint()
+            goal_pose.positions = joint_values.tolist()
+            # goal_pose.positions[5] += (0.7854+1.5708)
+            goal_pose.time_from_start.sec = int(time_from_start)
+            goal_pose.time_from_start.nanosec = int((time_from_start % 1.0) * 1e9)
+            traj_msg.points.append(goal_pose)
+            self.trajectory_pub.publish(traj_msg)
         
-        self.publisher_.publish(msg)
         self.goal_sent = True
         self.movement_done = False
         self.current_position_name = position_name
