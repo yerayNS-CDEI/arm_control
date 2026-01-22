@@ -9,7 +9,7 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     # --- Package and child launch paths ---
     ur_pkg = FindPackageShare('arm_control')
-    ur_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_control.launch.py'])
+    ur_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_sim_control.launch.py'])
     publisher_launch = PathJoinSubstitution([ur_pkg, 'launch', 'test_scaled_joint_trajectory_planned.launch.py'])
 
     # --- Parent-level args (edit at CLI if needed) ---
@@ -31,6 +31,13 @@ def generate_launch_description():
         # default_value=TextSubstitution(text=''),
         description='The prefix to use for the TF tree',
     )
+    
+    prefix_arg = DeclareLaunchArgument(
+    'prefix',
+    default_value=TextSubstitution(text='arm_'),
+    # default_value=TextSubstitution(text=''),
+    description='The prefix to use for the TF tree',
+)
 
     # Optionally toggle RViz from the parent (usually off to avoid duplicate RViz instances)
     launch_rviz_arg = DeclareLaunchArgument(
@@ -58,7 +65,7 @@ def generate_launch_description():
     # --- Namespaced groups (namespace ONLY in the parent) ---
     arm_group = GroupAction([
         PushRosNamespace('arm'),
-        SetParameter(name='use_sim_time', value=arm_use_sim_time),
+        # SetParameter(name='use_sim_time', value=arm_use_sim_time),
         # Include the UR control stack for the arm
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(ur_control_launch),
@@ -66,12 +73,13 @@ def generate_launch_description():
             # The parent namespace applies to everything inside this group.
             launch_arguments={
                 'ur_type':            LaunchConfiguration('ur_type'),
-                'robot_ip':           LaunchConfiguration('robot_ip'),
-                'use_fake_hardware':  LaunchConfiguration('use_fake_hardware'),
+                # 'robot_ip':           LaunchConfiguration('robot_ip'),
+                # 'use_fake_hardware':  LaunchConfiguration('use_fake_hardware'),
                 'tf_prefix':          LaunchConfiguration('tf_prefix'),
-                'launch_rviz':        LaunchConfiguration('launch_rviz'),
-                'controllers_file':   TextSubstitution(text='ur_controllers_namespace.yaml'),
-                'use_sim_time':     LaunchConfiguration('arm_use_sim_time'),
+                'prefix':          LaunchConfiguration('prefix'),
+                # 'launch_rviz':        LaunchConfiguration('launch_rviz'),
+                # 'controllers_file':   TextSubstitution(text='ur_controllers_namespace.yaml'),
+                # 'use_sim_time':     LaunchConfiguration('arm_use_sim_time'),
             }.items(),
         ),
         
@@ -114,6 +122,7 @@ def generate_launch_description():
         arm_ip_arg,
         use_fake_arg,
         tf_prefix_arg,
+        prefix_arg,
         launch_rviz_arg,
         arm_type_arg,
         arm_use_sim_time_arg,

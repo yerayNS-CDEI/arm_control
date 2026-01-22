@@ -37,7 +37,7 @@ class PositionSenderNode(Node):
         self.execution_status_sub = self.create_subscription(Bool,'execution_status',self.execution_status_callback,10)
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)        
         self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
-
+        
         
         # Predefined positions (can be loaded from config file)
         self.positions = {
@@ -72,7 +72,37 @@ class PositionSenderNode(Node):
             'right': {
                 'joints': (),
                 'pose': (-0.7725, 0.2310, 0.321, 0.17737, 0.65857, 0.727895, 0.07055)
-            }
+            },
+            
+            
+            
+            # scanning
+              'one': {
+                'joints': (),
+                'pose': (-0.6, -0.7, 0.8, 0.0, -0.70710678, 0.0, 0.70710678)
+            },
+            'two': {
+                'joints': (),
+                'pose': (-0.6, 0.7, 0.8, 0.0, -0.70710678, 0.0, 0.70710678)
+            },
+            'three': {
+                'joints': (),
+                'pose': (-0.6, 0.7, 0.6, 0.0, -0.70710678, 0.0, 0.70710678)
+            },
+            'four': {
+                'joints': (),
+                'pose': (-0.6, -0.7, 0.6, 0.0, -0.70710678, 0.0, 0.70710678)
+            },
+            
+            'five': {
+                'joints': (),
+                'pose': (-0.6, -0.7, 0.4, 0.0, -0.70710678, 0.0, 0.70710678)
+            },
+            
+            'six': {
+                'joints': (),
+                'pose': (-0.6, 0.7, 0.4, 0.0, -0.70710678, 0.0, 0.70710678)
+            },
         }
         
         # State variables
@@ -82,6 +112,17 @@ class PositionSenderNode(Node):
         self.current_position_name = None
         self.emergency_stop = False
         
+        # Expected joint names in desired order
+        self.expected_joint_names = [
+            'arm_shoulder_pan_joint',
+            'arm_shoulder_lift_joint',
+            'arm_elbow_joint',
+            'arm_wrist_1_joint',
+            'arm_wrist_2_joint',
+            'arm_wrist_3_joint'
+        ]
+        self.joint_indices = None
+        
         # Timer for checking status
         self.timer = self.create_timer(0.5, self.check_status)
         
@@ -90,6 +131,18 @@ class PositionSenderNode(Node):
         self.get_logger().info("Use: ros2 run arm_control position_sender <position_name>")
         
     def joint_state_callback(self, msg):
+        # Generate index array mapping expected order to actual message order
+        if self.joint_indices is None:
+            self.joint_indices = []
+            for expected_name in self.expected_joint_names:
+                try:
+                    idx = msg.name.index(expected_name)
+                    self.joint_indices.append(idx)
+                except ValueError:
+                    self.get_logger().error(f"Joint '{expected_name}' not found in joint_states message")
+                    self.joint_indices = None
+                    return
+        
         self.current_joint_state = msg
         
     def end_effector_pose_callback(self, msg):
@@ -162,7 +215,7 @@ class PositionSenderNode(Node):
             T[:3, :3] = R.from_quat(orn).as_matrix()
             T[:3, 3] = pos
             
-            q_current = np.array([self.current_joint_state.position[2], self.current_joint_state.position[4], self.current_joint_state.position[0], self.current_joint_state.position[1], self.current_joint_state.position[3], self.current_joint_state.position[5]])
+            q_current = np.array([self.current_joint_state.position[i] for i in self.joint_indices])
             joint_values = closed_form_algorithm(T, q_current, type=0)
             if np.any(np.isnan(joint_values)):
                 self.get_logger().error("IK solution contains NaN. Aborting.")
@@ -181,14 +234,7 @@ class PositionSenderNode(Node):
             
             # Publish GoalPose
             traj_msg = JointTrajectory()
-            traj_msg.joint_names = [
-                'arm_shoulder_pan_joint',
-                'arm_shoulder_lift_joint',
-                'arm_elbow_joint',
-                'arm_wrist_1_joint',
-                'arm_wrist_2_joint',
-                'arm_wrist_3_joint'
-            ]
+            traj_msg.joint_names = self.expected_joint_names
             time_from_start = 0.5
             goal_pose = JointTrajectoryPoint()
             goal_pose.positions = joint_values.tolist()

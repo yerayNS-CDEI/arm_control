@@ -64,16 +64,16 @@
        <visual>
          <origin rpy="0 0 0" xyz="0 0 0"/>
          <geometry>
-           <box size="5 5 0"/>
+           <box size="0 0 0"/>
          </geometry>
-         <material name="ground_white">
+         <!-- <material name="ground_white">
            <color rgba="1 1 1 0.5"/>
-         </material>
+         </material> -->
        </visual>
        <collision>
          <origin rpy="0 0 0" xyz="0 0 0"/>
          <geometry>
-           <box size="5 5 0"/>
+           <box size="0 0 0"/>
          </geometry>
        </collision>
      </link>
@@ -133,6 +133,10 @@
     <gazebo>
       <plugin filename="libgazebo_ros2_control.so" name="gazebo_ros2_control">
         <parameters>$(arg simulation_controllers)</parameters>
+        <ros>
+          <namespace>/arm</namespace>
+          <remapping>/robot_description:=/arm/robot_description</remapping>
+        </ros>
       </plugin>
     </gazebo>
   </xacro:if>

@@ -12,7 +12,9 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import QTimer, QProcess
 from PyQt5.QtGui import QIcon
+from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
+from qtermwidget_wrapper import QTermWidget
 from geometry_msgs.msg import Pose
 from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray
 from sensor_msgs.msg import JointState
@@ -229,22 +231,30 @@ class RobotControlUI(QMainWindow):
         sensors_layout.addStretch()
         boxes_layout.addWidget(sensors_box)
  
-        # Status display for Arm Control tab
+# Terminal and Status for Arm Control tab (side by side)
+        arm_terminal_status_layout = QHBoxLayout()
+        
+        # Left side: Terminal
+        self.arm_terminal = QTermWidget()
+        arm_terminal_status_layout.addWidget(self.arm_terminal)
+        
+        # Right side: Status display
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         self.status_text.setAcceptRichText(True)
         self.status_text.setStyleSheet("background-color: #22272e; color: #adbac7; border: 1px solid #444c56; font-family: 'Courier New', monospace; white-space: pre;")
- 
+        
         # Set tab stops to 8 characters (standard terminal width)
         from PyQt5.QtGui import QFontMetrics
         font_metrics = QFontMetrics(self.status_text.font())
         tab_width = font_metrics.horizontalAdvance(' ') * 8
         self.status_text.setTabStopDistance(tab_width)
- 
+        arm_terminal_status_layout.addWidget(self.status_text)
+
         status_header = QHBoxLayout()
-        status_header.addWidget(QLabel("Status:"))
+        status_header.addWidget(QLabel("sudo apt install libqtermwidget5-0-dev qtermwidget5-data"))
         status_header.addStretch()
- 
+
         # Search bar
         status_header.addWidget(QLabel("Search:"))
         self.search_input = QLineEdit()
@@ -252,32 +262,32 @@ class RobotControlUI(QMainWindow):
         self.search_input.setMaximumWidth(150)
         self.search_input.returnPressed.connect(lambda: self.search_status(forward=True))
         status_header.addWidget(self.search_input)
- 
+
         btn_search_prev = QPushButton("◀")
         btn_search_prev.clicked.connect(lambda: self.search_status(forward=False))
         btn_search_prev.setMaximumWidth(40)
         btn_search_prev.setToolTip("Find previous")
         status_header.addWidget(btn_search_prev)
- 
+
         btn_search_next = QPushButton("▶")
         btn_search_next.clicked.connect(lambda: self.search_status(forward=True))
         btn_search_next.setMaximumWidth(40)
         btn_search_next.setToolTip("Find next")
         status_header.addWidget(btn_search_next)
- 
+
         self.btn_restore_status = QPushButton("Restore")
         self.btn_restore_status.clicked.connect(self.restore_status)
         self.btn_restore_status.setMaximumWidth(80)
         self.btn_restore_status.setVisible(False)
         status_header.addWidget(self.btn_restore_status)
- 
+
         btn_clear_status = QPushButton("Clear")
         btn_clear_status.clicked.connect(self.clear_status)
         btn_clear_status.setMaximumWidth(80)
         status_header.addWidget(btn_clear_status)
         arm_tab_layout.addLayout(status_header)
- 
-        arm_tab_layout.addWidget(self.status_text)
+
+        arm_tab_layout.addLayout(arm_terminal_status_layout)
  
         # ===== BASE CONTROL TAB =====
         base_tab = QWidget()
@@ -362,22 +372,30 @@ class RobotControlUI(QMainWindow):
         troubleshooting_layout.addStretch()
         base_boxes_layout.addWidget(troubleshooting_box)
  
-        # Status display for Base Control tab
+# Terminal and Status for Base Control tab (side by side)
+        base_terminal_status_layout = QHBoxLayout()
+        
+        # Left side: Terminal
+        self.base_terminal = QTermWidget()
+        base_terminal_status_layout.addWidget(self.base_terminal)
+        
+        # Right side: Status display
         self.base_status_text = QTextEdit()
         self.base_status_text.setReadOnly(True)
         self.base_status_text.setAcceptRichText(True)
         self.base_status_text.setStyleSheet("background-color: #22272e; color: #adbac7; border: 1px solid #444c56; font-family: 'Courier New', monospace; white-space: pre;")
- 
+        
         # Set tab stops to 8 characters (standard terminal width)
         from PyQt5.QtGui import QFontMetrics
         font_metrics = QFontMetrics(self.base_status_text.font())
         tab_width = font_metrics.horizontalAdvance(' ') * 8
         self.base_status_text.setTabStopDistance(tab_width)
- 
+        base_terminal_status_layout.addWidget(self.base_status_text)
+
         base_status_header = QHBoxLayout()
-        base_status_header.addWidget(QLabel("Status:"))
+        base_status_header.addWidget(QLabel("Terminal + Status:"))
         base_status_header.addStretch()
- 
+
         # Search bar
         base_status_header.addWidget(QLabel("Search:"))
         self.base_search_input = QLineEdit()
@@ -385,32 +403,32 @@ class RobotControlUI(QMainWindow):
         self.base_search_input.setMaximumWidth(150)
         self.base_search_input.returnPressed.connect(lambda: self.search_base_status(forward=True))
         base_status_header.addWidget(self.base_search_input)
- 
+
         btn_base_search_prev = QPushButton("◀")
         btn_base_search_prev.clicked.connect(lambda: self.search_base_status(forward=False))
         btn_base_search_prev.setMaximumWidth(40)
         btn_base_search_prev.setToolTip("Find previous")
         base_status_header.addWidget(btn_base_search_prev)
- 
+
         btn_base_search_next = QPushButton("▶")
         btn_base_search_next.clicked.connect(lambda: self.search_base_status(forward=True))
         btn_base_search_next.setMaximumWidth(40)
         btn_base_search_next.setToolTip("Find next")
         base_status_header.addWidget(btn_base_search_next)
- 
+
         self.btn_restore_base_status = QPushButton("Restore")
         self.btn_restore_base_status.clicked.connect(self.restore_base_status)
         self.btn_restore_base_status.setMaximumWidth(80)
         self.btn_restore_base_status.setVisible(False)
         base_status_header.addWidget(self.btn_restore_base_status)
- 
+
         btn_clear_base_status = QPushButton("Clear")
         btn_clear_base_status.clicked.connect(self.clear_base_status)
         btn_clear_base_status.setMaximumWidth(80)
         base_status_header.addWidget(btn_clear_base_status)
         base_tab_layout.addLayout(base_status_header)
- 
-        base_tab_layout.addWidget(self.base_status_text)
+
+        base_tab_layout.addLayout(base_terminal_status_layout)
  
         tabs.addTab(base_tab, "Base Control")
         tabs.addTab(arm_tab, "Arm Control")
@@ -509,7 +527,14 @@ class RobotControlUI(QMainWindow):
         
         joint_tab_layout.addWidget(joint_control_box)
         
-        # Status display for Joint Control tab
+        # Terminal and Status for Joint Control tab (side by side)
+        joint_terminal_status_layout = QHBoxLayout()
+        
+        # Left side: Terminal
+        self.joint_terminal = QTermWidget()
+        joint_terminal_status_layout.addWidget(self.joint_terminal)
+        
+        # Right side: Status display
         self.joint_status_text = QTextEdit()
         self.joint_status_text.setReadOnly(True)
         self.joint_status_text.setAcceptRichText(True)
@@ -520,9 +545,10 @@ class RobotControlUI(QMainWindow):
         font_metrics = QFontMetrics(self.joint_status_text.font())
         tab_width = font_metrics.horizontalAdvance(' ') * 8
         self.joint_status_text.setTabStopDistance(tab_width)
+        joint_terminal_status_layout.addWidget(self.joint_status_text)
         
         joint_status_header = QHBoxLayout()
-        joint_status_header.addWidget(QLabel("Status:"))
+        joint_status_header.addWidget(QLabel("1:sudo apt install xterm 2:apt-get install xterm 3: sudo apt install libqtermwidget5-0"))
         joint_status_header.addStretch()
         
         btn_clear_joint_status = QPushButton("Clear")
@@ -531,7 +557,7 @@ class RobotControlUI(QMainWindow):
         joint_status_header.addWidget(btn_clear_joint_status)
         joint_tab_layout.addLayout(joint_status_header)
         
-        joint_tab_layout.addWidget(self.joint_status_text)
+        joint_tab_layout.addLayout(joint_terminal_status_layout)
         
         tabs.addTab(joint_tab, "Joint Control")
         

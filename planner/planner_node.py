@@ -45,6 +45,23 @@ class PlannerNode(Node):
         self.invalid_path = False
         self.end_effector_pose = None
         self.i = 0
+        
+        
+        # Define cilinder parameters
+        self.cyl_center_xy = (0.0, 0.0)   # (xc, yc)
+        self.cyl_radius    = 0.3
+        self.z_min, self.z_max  = 0.0, 1.3
+        
+        # Expected joint names in desired order
+        self.expected_joint_names = [
+            'arm_shoulder_pan_joint',
+            'arm_shoulder_lift_joint',
+            'arm_elbow_joint',
+            'arm_wrist_1_joint',
+            'arm_wrist_2_joint',
+            'arm_wrist_3_joint'
+        ]
+        self.joint_indices = None
 
         # Create grid space
         self.resolution = 2*self.radius / self.grid_size
@@ -71,8 +88,48 @@ class PlannerNode(Node):
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
         self.marker_pub = self.create_publisher(Marker, 'obstacle_markers', 10)
+        self.marker_wall_pub = self.create_publisher(Marker, 'wall_marker', 10)
 
         self.get_logger().info("Planner node initialized and waiting for goal poses...")
+        
+        #! publish simulalted wall markers
+        self.publish_wall()    
+        self.publish_cylinder_marker(self.cyl_center_xy, self.cyl_radius, self.z_min, self.z_max)
+        
+    def publish_wall(self):
+        """Publish a wall marker for RViz visualization."""
+        marker = Marker()
+        marker.header.frame_id = "map"  # Change to your robot's base frame if different
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "obstacles"
+        marker.id = 1
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        
+        # Position: center of wall
+        marker.pose.position.x = -2.5
+        marker.pose.position.y = 2.0
+        marker.pose.position.z = 2.0
+        marker.pose.orientation.x = 0.0
+        marker.pose.orientation.y = 0.0
+        marker.pose.orientation.z = 0.0
+        marker.pose.orientation.w = 1.0
+        
+        # Scale: width, depth, and height
+        marker.scale.x = 0.1  # thickness in x
+        marker.scale.y = 8.0  # width in y
+        marker.scale.z = 4.0  # height
+        
+        # Color: semi-transparent blue
+        marker.color.r = 1.0
+        marker.color.g = 1.0
+        marker.color.b = 1.0
+        marker.color.a = 1.0  # opaque
+        
+        marker.lifetime.sec = 0  # 0 means it persists until deleted
+         
+        self.marker_wall_pub.publish(marker)
+        self.get_logger().info(f"Published wall marker at (2.5, 2.0) with thickness 0.1, width 4.0, and height 4.0")
         
     def emergency_callback(self, msg):
         self.emergency_stop = msg.data
@@ -80,7 +137,20 @@ class PlannerNode(Node):
             self.execution_complete = True
 
     def joint_state_callback(self, msg):
+        # Generate index array mapping expected order to actual message order
+        if self.joint_indices is None:
+            self.joint_indices = []
+            for expected_name in self.expected_joint_names:
+                try:
+                    idx = msg.name.index(expected_name)
+                    self.joint_indices.append(idx)
+                except ValueError:
+                    self.get_logger().error(f"Joint '{expected_name}' not found in joint_states message")
+                    self.joint_indices = None
+                    return
+        
         self.current_joint_state = msg
+        
 
     def end_effector_pose_callback(self, msg):
         self.end_effector_pose = msg
@@ -172,19 +242,17 @@ class PlannerNode(Node):
             sphere_mask = dist_squared <= sphere_radius[i]**2
             # occupancy_grid[sphere_mask] = 1
 
-        # Define cilinder parameters
-        cyl_center_xy = (0.0, 0.0)   # (xc, yc)
-        cyl_radius    = 0.3
-        z_min, z_max  = 0.0, 1.3
+
 
         # Create mask for cilinder
         cyl_mask = (
-            ((X - cyl_center_xy[0])**2 + (Y - cyl_center_xy[1])**2) <= cyl_radius**2
-        ) & (Z >= z_min) & (Z <= z_max)
+            ((X - self.cyl_center_xy[0])**2 + (Y - self.cyl_center_xy[1])**2) <= self.cyl_radius**2
+        ) & (Z >= self.z_min) & (Z <= self.z_max)
         occupancy_grid[cyl_mask] = 1
         
         # Publish cylinder marker for visualization
-        self.publish_cylinder_marker(cyl_center_xy, cyl_radius, z_min, z_max)
+        self.publish_cylinder_marker(self.cyl_center_xy, self.cyl_radius, self.z_min, self.z_max)
+        self.publish_wall()
 
         # Define the dilation distance (in meters)
         dilation_distance = 0.001  # Enlarge obstacles by 0.X meters in all directions
@@ -228,7 +296,7 @@ class PlannerNode(Node):
         home_position = np.array([self.current_joint_state.position])
         all_joint_values = []
         all_joint_values_print = []
-        q_current = np.array([self.current_joint_state.position[2], self.current_joint_state.position[4], self.current_joint_state.position[0], self.current_joint_state.position[1], self.current_joint_state.position[3], self.current_joint_state.position[5]])
+        q_current = np.array([self.current_joint_state.position[i] for i in self.joint_indices])
         self.get_logger().error(f"Current joint state = {self.current_joint_state.position}")
         all_joint_values_print.append(q_current)
 
@@ -272,14 +340,7 @@ class PlannerNode(Node):
         
         # Publish trajectory
         traj_msg = JointTrajectory()
-        traj_msg.joint_names = [
-            'arm_shoulder_pan_joint',
-            'arm_shoulder_lift_joint',
-            'arm_elbow_joint',
-            'arm_wrist_1_joint',
-            'arm_wrist_2_joint',
-            'arm_wrist_3_joint'
-        ]
+        traj_msg.joint_names = self.expected_joint_names
 
         time_from_start = 1.0
 
