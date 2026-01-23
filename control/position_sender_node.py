@@ -3,8 +3,9 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Pose
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, ColorRGBA
 from sensor_msgs.msg import JointState
+from visualization_msgs.msg import Marker
 import yaml
 import os
 from ament_index_python.packages import get_package_share_directory
@@ -31,6 +32,7 @@ class PositionSenderNode(Node):
         # Publisher for goal pose
         self.publisher_ = self.create_publisher(Pose, 'goal_pose', 10)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
+        self.marker_pub = self.create_publisher(Marker, 'goal_pose_marker', 10)
         
         # Subscriber for execution status
         self.subscriptor_ = self.create_subscription(Pose, 'end_effector_pose', self.end_effector_pose_callback, 10)
@@ -161,6 +163,42 @@ class PositionSenderNode(Node):
             self.movement_done = True
             self.get_logger().info(f"Position '{self.current_position_name}' reached successfully!")
             self.goal_sent = False
+    
+    def publish_goal_marker(self, pose_data):
+        """Publish a marker in RViz for the goal pose."""
+        marker = Marker()
+        marker.header.frame_id = "arm_base"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "goal_pose"
+        marker.id = 0
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        
+        # Set position
+        marker.pose.position.x = pose_data[0]
+        marker.pose.position.y = pose_data[1]
+        marker.pose.position.z = pose_data[2]
+        
+        # Set orientation
+        marker.pose.orientation.x = pose_data[3]
+        marker.pose.orientation.y = pose_data[4]
+        marker.pose.orientation.z = pose_data[5]
+        marker.pose.orientation.w = pose_data[6]
+        
+        # Set scale (sphere diameter)
+        marker.scale.x = 0.05
+        marker.scale.y = 0.05
+        marker.scale.z = 0.05
+        
+        # Set color (cyan/blue)
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0
+        
+        marker.lifetime.sec = 0  # Marker persists until replaced
+        
+        self.marker_pub.publish(marker)
             
     def send_position(self, position_name):
         """Send a predefined position to the manipulator."""
@@ -203,6 +241,7 @@ class PositionSenderNode(Node):
             msg.orientation.w = pose_data[6]
             
             self.publisher_.publish(msg)
+            self.publish_goal_marker(pose_data)
         else:
             self.get_logger().warn(f"Target position '{position_name}' is very close to current position (distance: {distance:.4f} m). Using IK solution and direct trajectory publishing.")
             ##########################
@@ -243,6 +282,7 @@ class PositionSenderNode(Node):
             goal_pose.time_from_start.nanosec = int((time_from_start % 1.0) * 1e9)
             traj_msg.points.append(goal_pose)
             self.trajectory_pub.publish(traj_msg)
+            self.publish_goal_marker(pose_data)
         
         self.goal_sent = True
         self.movement_done = False
