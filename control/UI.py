@@ -323,6 +323,12 @@ class RobotControlUI(QMainWindow):
         self.btn_launch_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode>")
         mapping_loc_layout.addWidget(self.btn_launch_localization)
  
+        # View map button
+        self.btn_view_map = QPushButton("View map")
+        self.btn_view_map.clicked.connect(self.toggle_view_map)
+        self.btn_view_map.setToolTip("rtabmap-databaseViewer rtabmap.db")
+        mapping_loc_layout.addWidget(self.btn_view_map)
+ 
         mapping_loc_layout.addStretch()
         base_boxes_layout.addWidget(mapping_loc_box)
  
@@ -712,6 +718,18 @@ class RobotControlUI(QMainWindow):
         else:
             self.btn_launch_mapping.setEnabled(True)
  
+    def toggle_view_map(self):
+        # Get package path for rtabmap.db
+        try:
+            pkg_share = get_package_share_directory('navi_wall')
+            db_path = os.path.join(pkg_share, 'maps', 'rtabmap.db')
+        except Exception as e:
+            self.base_status_text.append(f"Error: Could not find navi_wall package: {e}")
+            return
+        
+        self._toggle_base_process('view_map', self.btn_view_map, 'View map',
+                                 'rtabmap-databaseViewer', [db_path])
+ 
     def toggle_nav2(self):
         sim_mode = self.sim_mode_combo.currentText()
         self._toggle_base_process('nav2', self.btn_launch_nav2, 'Nav2',
@@ -876,7 +894,7 @@ class RobotControlUI(QMainWindow):
                 process.kill()  # SIGKILL - force kill only if still running
  
             del self.process_map[process_key]
-            button.setText(f"Launch {name}")
+            button.setText(f"{name}")
             button.setStyleSheet("")
             self.base_status_text.append(f"⏹ Stopped {name}")
         else:
