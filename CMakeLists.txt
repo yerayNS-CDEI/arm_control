@@ -53,6 +53,9 @@ install(CODE "
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
     ${CMAKE_CURRENT_SOURCE_DIR}/sensors
     ${PYTHON_INSTALL_DIR}/sensors)
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+    ${CMAKE_CURRENT_SOURCE_DIR}/UI_utils
+    ${PYTHON_INSTALL_DIR}/UI_utils)
 ")
 
 # Install Python executables as symlinks (for instant updates during development)
@@ -122,6 +125,12 @@ install(DIRECTORY rviz/
 # Install resource files
 install(DIRECTORY resource/
   DESTINATION share/${PROJECT_NAME}/resource
+)
+
+# Install UI_utils
+install(DIRECTORY UI_utils/
+  DESTINATION share/${PROJECT_NAME}/UI_utils
+  FILES_MATCHING PATTERN "*.py"
 )
 
 # Testing

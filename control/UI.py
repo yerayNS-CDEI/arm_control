@@ -14,7 +14,7 @@ from PyQt5.QtCore import QTimer, QProcess
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
-from qtermwidget_wrapper import QTermWidget
+from UI_utils.qtermwidget_wrapper import QTermWidget
 from geometry_msgs.msg import Pose
 from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray
 from sensor_msgs.msg import JointState
@@ -760,7 +760,7 @@ class RobotControlUI(QMainWindow):
         process.readyReadStandardOutput.connect(lambda: self.handle_base_output(process))
  
         # Display command in bold green
-        cmd_str = 'ps aux | grep ros2'
+        cmd_str = 'ps aux | grep -E ros2|ros'
         cursor = self.base_status_text.textCursor()
         cursor.movePosition(cursor.End)
         self.base_status_text.setTextCursor(cursor)

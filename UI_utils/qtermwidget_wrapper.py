@@ -110,9 +110,15 @@ class QTermWidget(QWidget):
                 '-bg', '#300a24',
                 '-fg', '#ffffff',
                 '-fa', 'Monospace',
-                '-fs', '10',                '-sb',           # Enable scrollbar
+                '-fs', '10',
+                '-sb',           # Enable scrollbar
                 '-rightbar',     # Position scrollbar on the right
-                '-sl', '10000',  # Scrollback lines (10000 lines)                '-e', '/bin/bash'
+                '-sl', '10000',  # Scrollback lines (10000 lines)
+                '+sb',           # Actually show scrollbar
+                '-xrm', 'XTerm.vt100.allowWindowOps: true',  # Allow window operations
+                '-xrm', 'XTerm.vt100.selectToClipboard: true',  # Copy selection to clipboard
+                '-xrm', 'XTerm.vt100.translations: #override \\n Ctrl Shift <Key>C: copy-selection(CLIPBOARD) \\n Ctrl Shift <Key>V: insert-selection(CLIPBOARD)',
+                '-e', '/bin/bash'
             ])
             # print(f"[DEBUG] xterm process started with PID: {self._xterm_process.pid}")
             
