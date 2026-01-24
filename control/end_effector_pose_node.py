@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import TransformStamped, Pose
+from geometry_msgs.msg import TransformStamped, PoseStamped
 import tf2_ros
 from scipy.spatial.transform import Rotation as R
 
@@ -14,7 +14,7 @@ class EndEffectorListener(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         self.timer = self.create_timer(1.0, self.timer_callback)  # 1 Hz
-        self.publisher_ = self.create_publisher(Pose, 'end_effector_pose', 10)
+        self.publisher_ = self.create_publisher(PoseStamped, 'end_effector_pose', 10)
 
     def timer_callback(self):
         try:
@@ -43,14 +43,16 @@ class EndEffectorListener(Node):
             # Convert back to quaternion
             new_quat = new_rot.as_quat()  # Returns [x, y, z, w]
 
-            pose_msg = Pose()
-            pose_msg.position.x = pos.x
-            pose_msg.position.y = pos.y
-            pose_msg.position.z = pos.z
-            pose_msg.orientation.x = new_quat[0]
-            pose_msg.orientation.y = new_quat[1]
-            pose_msg.orientation.z = new_quat[2]
-            pose_msg.orientation.w = new_quat[3]
+            pose_msg = PoseStamped()
+            pose_msg.header.stamp = self.get_clock().now().to_msg()
+            pose_msg.header.frame_id = 'arm_base'
+            pose_msg.pose.position.x = pos.x
+            pose_msg.pose.position.y = pos.y
+            pose_msg.pose.position.z = pos.z
+            pose_msg.pose.orientation.x = new_quat[0]
+            pose_msg.pose.orientation.y = new_quat[1]
+            pose_msg.pose.orientation.z = new_quat[2]
+            pose_msg.pose.orientation.w = new_quat[3]
 
 
             self.publisher_.publish(pose_msg)

@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Bool, ColorRGBA
 from sensor_msgs.msg import JointState
 from visualization_msgs.msg import Marker
@@ -30,12 +30,12 @@ class PositionSenderNode(Node):
         )
         
         # Publisher for goal pose
-        self.publisher_ = self.create_publisher(Pose, 'goal_pose', 10)
+        self.publisher_ = self.create_publisher(PoseStamped, '/arm/goal_pose', 10)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
         self.marker_pub = self.create_publisher(Marker, 'goal_pose_marker', 10)
         
         # Subscriber for execution status
-        self.subscriptor_ = self.create_subscription(Pose, 'end_effector_pose', self.end_effector_pose_callback, 10)
+        self.subscriptor_ = self.create_subscription(PoseStamped, 'end_effector_pose', self.end_effector_pose_callback, 10)
         self.execution_status_sub = self.create_subscription(Bool,'execution_status',self.execution_status_callback,10)
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)        
         self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
@@ -167,7 +167,7 @@ class PositionSenderNode(Node):
     def publish_goal_marker(self, pose_data):
         """Publish a marker in RViz for the goal pose."""
         marker = Marker()
-        marker.header.frame_id = "arm_base"
+        marker.header.frame_id = "map"
         marker.header.stamp = self.get_clock().now().to_msg()
         marker.ns = "goal_pose"
         marker.id = 0
@@ -222,7 +222,7 @@ class PositionSenderNode(Node):
             self.get_logger().error(f"Invalid pose data for '{position_name}': expected 7 values (x,y,z,qx,qy,qz,qw)")
             return False
         
-        current_position  = np.array([self.end_effector_pose.position.x, self.end_effector_pose.position.y, self.end_effector_pose.position.z])
+        current_position  = np.array([self.end_effector_pose.pose.position.x, self.end_effector_pose.pose.position.y, self.end_effector_pose.pose.position.z])
         dist_diff = pose_data[0:3] - current_position
         distance = np.linalg.norm(dist_diff)
         if distance > 0.2:
@@ -230,20 +230,22 @@ class PositionSenderNode(Node):
             #########################
             ## GOAL POSE PUBLISHING FOR PLANNER
             
-            # Create and publish Pose message
-            msg = Pose()
-            msg.position.x = pose_data[0]
-            msg.position.y = pose_data[1]
-            msg.position.z = pose_data[2]
-            msg.orientation.x = pose_data[3]
-            msg.orientation.y = pose_data[4]
-            msg.orientation.z = pose_data[5]
-            msg.orientation.w = pose_data[6]
+            # Create and publish PoseStamped message
+            msg = PoseStamped()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'arm_base'
+            msg.pose.position.x = pose_data[0]
+            msg.pose.position.y = pose_data[1]
+            msg.pose.position.z = pose_data[2]
+            msg.pose.orientation.x = pose_data[3]
+            msg.pose.orientation.y = pose_data[4]
+            msg.pose.orientation.z = pose_data[5]
+            msg.pose.orientation.w = pose_data[6]
             
             self.publisher_.publish(msg)
             self.publish_goal_marker(pose_data)
         else:
-            self.get_logger().warn(f"Target position '{position_name}' is very close to current position (distance: {distance:.4f} m). Using IK solution and direct trajectory publishing.")
+            self.get_logger().warn(f"Target position '{position_name}' is very close to current position (distance: {distance:.4f} m). Using IK.")
             ##########################
             ## IK SOLUTION AND JOINT TRAJECTORY PUBLISHING
             

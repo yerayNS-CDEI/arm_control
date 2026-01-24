@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Pose, Point
+from geometry_msgs.msg import Pose, Point, PoseStamped
 from std_msgs.msg import Bool
 from arm_control.srv import ComputeWallDiscretization
 from statistics import median
@@ -16,7 +16,7 @@ class ExhaustiveScanNode(Node):
         super().__init__('exhaustive_scan_node')
         
         # Publisher for goal poses
-        self.goal_pub = self.create_publisher(Pose, 'goal_pose', 10)
+        self.goal_pub = self.create_publisher(PoseStamped, '/arm/goal_pose', 10)
         
         # Subscriber for execution status
         self.execution_status_sub = self.create_subscription(

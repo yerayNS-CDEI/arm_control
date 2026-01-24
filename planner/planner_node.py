@@ -3,7 +3,7 @@
 import rclpy
 from rclpy.node import Node
 import os
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -81,10 +81,10 @@ class PlannerNode(Node):
         )
 
         # Create subscriber and publishers
-        self.create_subscription(Pose, 'goal_pose', self.goal_callback, 10)
+        self.create_subscription(PoseStamped, '/arm/goal_pose', self.goal_callback, 10)
         self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
         self.create_subscription(Bool, "execution_status", self.execution_status_callback, 10)
-        self.create_subscription(Pose, "end_effector_pose", self.end_effector_pose_callback, 10)
+        self.create_subscription(PoseStamped, "end_effector_pose", self.end_effector_pose_callback, 10)
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
         self.marker_pub = self.create_publisher(Marker, 'obstacle_markers', 10)
@@ -165,7 +165,7 @@ class PlannerNode(Node):
                 self.execution_complete = True
                 self.plan_and_send_trajectory(next_goal)
 
-    def goal_callback(self, msg: Pose):
+    def goal_callback(self, msg: PoseStamped):
         if self.emergency_stop:
             self.get_logger().warn("Emergency stop is active, aborting trajectory planning. Ignoring goal.")
             return  # Aborting if emergency state is active
@@ -178,14 +178,14 @@ class PlannerNode(Node):
         self.execution_complete = False
         self.plan_and_send_trajectory(msg)
 
-    def plan_and_send_trajectory(self, msg: Pose):
+    def plan_and_send_trajectory(self, msg: PoseStamped):
         if self.current_joint_state is None:
             self.get_logger().error("No current joint state received yet. Cannot calculate trajectory.")
             return
         
         # Goal definition
-        goal_pos = [msg.position.x, msg.position.y, msg.position.z]
-        goal_orn = [msg.orientation.x,msg.orientation.y,msg.orientation.z,msg.orientation.w]
+        goal_pos = [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]
+        goal_orn = [msg.pose.orientation.x,msg.pose.orientation.y,msg.pose.orientation.z,msg.pose.orientation.w]
         goal_orientation = R.from_quat(goal_orn)
         self.get_logger().info(f"Received goal position: {goal_pos}")
         self.get_logger().info(f"Received goal orientation: {goal_orn}")
@@ -198,8 +198,8 @@ class PlannerNode(Node):
         # else:
         
         # Obtainin gcurrent robot pose from JointState
-        start_pos = [self.end_effector_pose.position.x, self.end_effector_pose.position.y, self.end_effector_pose.position.z]
-        start_orn = [self.end_effector_pose.orientation.x, self.end_effector_pose.orientation.y, self.end_effector_pose.orientation.z, self.end_effector_pose.orientation.w]
+        start_pos = [self.end_effector_pose.pose.position.x, self.end_effector_pose.pose.position.y, self.end_effector_pose.pose.position.z]
+        start_orn = [self.end_effector_pose.pose.orientation.x, self.end_effector_pose.pose.orientation.y, self.end_effector_pose.pose.orientation.z, self.end_effector_pose.pose.orientation.w]
         start_orientation = R.from_quat(start_orn)
             
         try:
