@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 import numpy as np
 from std_msgs.msg import String, Float32MultiArray
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, PoseStamped
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
@@ -43,14 +43,36 @@ class SensorsOrientation(Node):
         self.publisher_ = self.create_publisher(String, 'topic', 10)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
 
-        self.subscriptor_ = self.create_subscription(Pose, 'end_effector_pose', self.end_effector_pose_callback, 10)
+        self.subscriptor_ = self.create_subscription(PoseStamped, 'end_effector_pose', self.end_effector_pose_callback, 10)
         self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
         self.create_subscription(Float32MultiArray, "distance_sensors", self.listener_distance_callback, 10)
+        
+        # Expected joint names in desired order
+        self.expected_joint_names = [
+            'arm_shoulder_pan_joint',
+            'arm_shoulder_lift_joint',
+            'arm_elbow_joint',
+            'arm_wrist_1_joint',
+            'arm_wrist_2_joint',
+            'arm_wrist_3_joint'
+        ]
+        self.joint_indices = None
 
     def end_effector_pose_callback(self, msg):
         self.end_effector_pose = msg
 
     def joint_state_callback(self, msg):
+        # Generate index array mapping expected order to actual message order
+        if self.joint_indices is None:
+            self.joint_indices = []
+            for expected_name in self.expected_joint_names:
+                try:
+                    idx = msg.name.index(expected_name)
+                    self.joint_indices.append(idx)
+                except ValueError:
+                    self.get_logger().error(f"Joint '{expected_name}' not found in joint_states message")
+                    self.joint_indices = None
+                    return
         self.current_joint_state = msg
 
     def listener_distance_callback(self, msg):
@@ -103,7 +125,7 @@ class SensorsOrientation(Node):
             self.get_logger().info(f"Roll_ee: {gamma_deg:.2f} degrees")
 
             # Current rotation of the EE w.r.t. base frame
-            rot = self.end_effector_pose.orientation
+            rot = self.end_effector_pose.pose.orientation
             curr_orn_rot = R.from_quat([rot.x, rot.y, rot.z, rot.w])
             curr_orn = R.from_quat([rot.x, rot.y, rot.z, rot.w]).as_euler('ZYX', degrees=True)
             self.get_logger().info(f"Current Orientation (rpy w.r.t. base frame): Roll={curr_orn[0]:.2f}, Pitch={curr_orn[1]:.2f}, Yaw={curr_orn[2]:.2f}")
@@ -140,7 +162,7 @@ class SensorsOrientation(Node):
             self.get_logger().info(f"Final Corrected Orientation (rpy w.r.t. base frame): Roll={final_euler[0]:.2f}, Pitch={final_euler[1]:.2f}, Yaw={final_euler[2]:.2f}")
 
             # Current end effector position
-            pos = self.end_effector_pose.position
+            pos = self.end_effector_pose.pose.position
             p_current = np.array([pos.x, pos.y, pos.z])
 
             # Compute corrected position
@@ -153,8 +175,7 @@ class SensorsOrientation(Node):
             T = np.eye(4)
             T[:3, :3] = R.from_quat(q).as_matrix()
             T[:3, 3] = p_new
-
-            q_current = np.array([self.current_joint_state.position[-1], self.current_joint_state.position[0], self.current_joint_state.position[1], self.current_joint_state.position[2], self.current_joint_state.position[3], self.current_joint_state.position[4]])
+            q_current = np.array([self.current_joint_state.position[i] for i in self.joint_indices])
             joint_values = closed_form_algorithm(T, q_current, type=0)
             if np.any(np.isnan(joint_values)):
                 self.get_logger().error("IK solution contains NaN. Aborting.")
@@ -173,14 +194,7 @@ class SensorsOrientation(Node):
             
             # Publish GoalPose
             traj_msg = JointTrajectory()
-            traj_msg.joint_names = [
-                'shoulder_pan_joint',
-                'shoulder_lift_joint',
-                'elbow_joint',
-                'wrist_1_joint',
-                'wrist_2_joint',
-                'wrist_3_joint'
-            ]
+            traj_msg.joint_names = self.expected_joint_names
             time_from_start = 0.5
             goal_pose = JointTrajectoryPoint()
             goal_pose.positions = joint_values.tolist()
