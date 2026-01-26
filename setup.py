@@ -52,6 +52,7 @@ setup(
             'sensors_orientation = sensors.sensors_orientation:main',
             'sensors_orientation_arduino = sensors.sensors_orientation_arduino:main',
             'test_hyperspectral_client = sensors.test_hyperspectral_client:main',
+            'arduino_sensors_sim = sensors.arduino_sensors_sim:main',
         ],
     },
 )

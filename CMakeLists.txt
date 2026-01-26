@@ -93,6 +93,7 @@ install(CODE "
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/sensors_distance_orientation_sim.py \${LIB_DIR}/sensors_distance_orientation_sim)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/sensors_orientation.py \${LIB_DIR}/sensors_orientation)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/arduino_sensors.py \${LIB_DIR}/arduino_sensors)
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/arduino_sensors_sim.py \${LIB_DIR}/arduino_sensors_sim)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/test_hyperspectral_client.py \${LIB_DIR}/test_hyperspectral_client)
 ")
 
