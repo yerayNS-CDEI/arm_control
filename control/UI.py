@@ -219,14 +219,14 @@ class RobotControlUI(QMainWindow):
         # Arduino sensor node button
         self.btn_arduino_sensors = QPushButton("Launch Arduino Sensors")
         self.btn_arduino_sensors.clicked.connect(self.toggle_arduino_sensors)
-        self.btn_arduino_sensors.setToolTip("ros2 run arm_control sensors_orientation_arduino --ros-args -r __ns:=/arm")
+        self.btn_arduino_sensors.setToolTip("ros2 run arm_control arduino_sensors --ros-args -r __ns:=/arm")
         sensors_layout.addWidget(self.btn_arduino_sensors)
  
         # Sensors orientation node button
-        self.btn_sensors_orientation = QPushButton("Launch Sensors Orientation")
-        self.btn_sensors_orientation.clicked.connect(self.toggle_sensors_orientation)
-        self.btn_sensors_orientation.setToolTip("ros2 run arm_control sensors_orientation --ros-args -r __ns:=/arm")
-        sensors_layout.addWidget(self.btn_sensors_orientation)
+        self.btn_align_ee_to_wall = QPushButton("Launch Sensors Orientation")
+        self.btn_align_ee_to_wall.clicked.connect(self.toggle_align_ee_to_wall)
+        self.btn_align_ee_to_wall.setToolTip("ros2 run arm_control align_ee_to_wall --ros-args -r __ns:=/arm")
+        sensors_layout.addWidget(self.btn_align_ee_to_wall)
  
         sensors_layout.addStretch()
         boxes_layout.addWidget(sensors_box)
@@ -688,9 +688,9 @@ class RobotControlUI(QMainWindow):
         self._toggle_process('arduino_sensors', self.btn_arduino_sensors, 'Arduino Sensors',
                             'ros2', ['run', 'arm_control', 'arduino_sensors', '--ros-args', '-r', '__ns:=/arm'])
  
-    def toggle_sensors_orientation(self):
-        self._toggle_process('sensors_orientation', self.btn_sensors_orientation, 'Sensors Orientation',
-                            'ros2', ['run', 'arm_control', 'sensors_orientation', '--ros-args', '-r', '__ns:=/arm'])
+    def toggle_align_ee_to_wall(self):
+        self._toggle_process('align_ee_to_wall', self.btn_align_ee_to_wall, 'Sensors Orientation',
+                            'ros2', ['run', 'arm_control', 'align_ee_to_wall', '--ros-args', '-r', '__ns:=/arm'])
  
     def toggle_mapping(self):
         sim_mode = self.sim_mode_combo.currentText()
@@ -1518,7 +1518,7 @@ class RobotControlUI(QMainWindow):
             'planner_node',
             'end_effector_pose_node',
             'position_sender_node',
-            'sensors_orientation',
+            'align_ee_to_wall',
         ]
         for pat in patterns:
             try:
