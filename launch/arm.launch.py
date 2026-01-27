@@ -4,12 +4,13 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Text
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import PushRosNamespace, Node, SetParameter
 from launch_ros.substitutions import FindPackageShare
-
+from launch.conditions import IfCondition, UnlessCondition
 
 def generate_launch_description():
     # --- Package and child launch paths ---
     ur_pkg = FindPackageShare('arm_control')
-    ur_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_sim_control.launch.py'])
+    ur_sim_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_sim_control.launch.py'])
+    ur_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_control.launch.py'])
     publisher_launch = PathJoinSubstitution([ur_pkg, 'launch', 'test_scaled_joint_trajectory_planned.launch.py'])
 
     # --- Parent-level args (edit at CLI if needed) ---
@@ -33,11 +34,11 @@ def generate_launch_description():
     )
     
     prefix_arg = DeclareLaunchArgument(
-    'prefix',
-    default_value=TextSubstitution(text='arm_'),
-    # default_value=TextSubstitution(text=''),
-    description='The prefix to use for the TF tree',
-)
+        'prefix',
+        default_value=TextSubstitution(text='arm_'),
+        # default_value=TextSubstitution(text=''),
+        description='The prefix to use for the TF tree',
+    )
 
     # Optionally toggle RViz from the parent (usually off to avoid duplicate RViz instances)
     launch_rviz_arg = DeclareLaunchArgument(
@@ -52,6 +53,13 @@ def generate_launch_description():
         default_value=TextSubstitution(text='ur10e'),
         description='UR type for the arm robot',
     )
+    
+    # UR types (adjust as desired)
+    simulation = DeclareLaunchArgument(
+        'sim',
+        default_value=TextSubstitution(text='false'),
+        description='Whether to run in simulation mode',
+    )
 
     # ----- Sim time param (configurable desde CLI) -----
     arm_use_sim_time_arg = DeclareLaunchArgument(
@@ -61,10 +69,11 @@ def generate_launch_description():
     )
     arm_use_sim_time = LaunchConfiguration('arm_use_sim_time')
     
+    namespace_arm = LaunchConfiguration('namespace_arm', default='')
 
     # --- Namespaced groups (namespace ONLY in the parent) ---
     arm_group = GroupAction([
-        PushRosNamespace('arm'),
+        PushRosNamespace(namespace_arm),
         # SetParameter(name='use_sim_time', value=arm_use_sim_time),
         # Include the UR control stack for the arm
         IncludeLaunchDescription(
@@ -73,14 +82,29 @@ def generate_launch_description():
             # The parent namespace applies to everything inside this group.
             launch_arguments={
                 'ur_type':            LaunchConfiguration('ur_type'),
-                # 'robot_ip':           LaunchConfiguration('robot_ip'),
-                # 'use_fake_hardware':  LaunchConfiguration('use_fake_hardware'),
+                'robot_ip':           LaunchConfiguration('robot_ip'),
+                'use_fake_hardware':  LaunchConfiguration('use_fake_hardware'),
                 'tf_prefix':          LaunchConfiguration('tf_prefix'),
-                'prefix':          LaunchConfiguration('prefix'),
+                'prefix':             LaunchConfiguration('prefix'),
                 # 'launch_rviz':        LaunchConfiguration('launch_rviz'),
                 # 'controllers_file':   TextSubstitution(text='ur_controllers_namespace.yaml'),
                 # 'use_sim_time':     LaunchConfiguration('arm_use_sim_time'),
             }.items(),
+            condition=UnlessCondition(simulation)
+        ),
+        
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(ur_sim_control_launch),
+            # IMPORTANT: we DO NOT pass a 'namespace' arg to the child.
+            # The parent namespace applies to everything inside this group.
+            launch_arguments={
+                'ur_type':            LaunchConfiguration('ur_type'),
+                'tf_prefix':          LaunchConfiguration('tf_prefix'),
+                'prefix':             LaunchConfiguration('prefix'),
+                # 'launch_rviz':        LaunchConfiguration('launch_rviz'),
+                # 'controllers_file':   TextSubstitution(text='ur_controllers_namespace.yaml'),
+            }.items(),
+            condition=IfCondition(simulation)
         ),
         
         IncludeLaunchDescription(
@@ -117,6 +141,12 @@ def generate_launch_description():
         ),
         
     ])
+    
+    diff_drive_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=["diffbot_base_controller", "--controller-manager", "/controller_manager"],
+    )
 
     return LaunchDescription([
         arm_ip_arg,
@@ -127,4 +157,5 @@ def generate_launch_description():
         arm_type_arg,
         arm_use_sim_time_arg,
         arm_group,
+        diff_drive_spawner
     ])

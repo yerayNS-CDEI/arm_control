@@ -81,7 +81,7 @@ def launch_setup(context, *args, **kwargs):
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
             PathJoinSubstitution(
-                [FindPackageShare("arm_control"), "urdf", description_file]
+                [FindPackageShare("navi_wall"), "navi_wall_description/description", description_file]
             ),
             " ",
             "safety_limits:=",
@@ -181,7 +181,8 @@ def launch_setup(context, *args, **kwargs):
                    '-x', '2.458',
                    '-y', '-2.0',
                    '-z', '1.3',
-                   '-robot_namespace','arm'],
+                #    '-robot_namespace','arm'
+                   ],
         output="screen",
     )
 
@@ -282,7 +283,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "description_file",
-            default_value="ur.urdf.xacro",
+            default_value="mobile_manipulator.urdf.xacro",
             description="URDF/XACRO description file with the robot.",
         )
     )

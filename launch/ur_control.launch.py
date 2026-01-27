@@ -110,7 +110,7 @@ def launch_setup(context, *args, **kwargs):
         [
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
-            PathJoinSubstitution([FindPackageShare(initial_position_package), "urdf", description_file]),
+            PathJoinSubstitution([FindPackageShare("navi_wall"), "navi_wall_description/description", description_file]),
             " ",
             "robot_ip:=",
             robot_ip,
@@ -440,7 +440,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "controllers_file",
-            default_value="ur_controllers.yaml",
+            default_value="ur_controllers_namespace.yaml",
             description="YAML file with the controllers configuration.",
         )
     )
@@ -455,7 +455,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "description_file",
-            default_value="ur.urdf.xacro",
+            default_value="mobile_manipulator.urdf.xacro",
             description="URDF/XACRO description file with the robot.",
         )
     )

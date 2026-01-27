@@ -14,7 +14,7 @@ from planner.planner_lib.closed_form_algorithm import closed_form_algorithm
 class SensorsOrientation(Node):
 
     def __init__(self):
-        super().__init__('sensors_orientation')
+        super().__init__('align_ee_to_wall_node')
         
         # Parameters (can be overridden from CLI)
         self.declare_parameter('compute_orientation_correction', True)
