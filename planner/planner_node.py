@@ -309,6 +309,19 @@ class PlannerNode(Node):
             all_joint_values.append(q_new)
             all_joint_values_print.append(q_new)
             q_current = q_new
+        
+        # Final goal pose to ensure accuracy
+        pos = goal_pos
+        orn = interp_rot_matrices[-1]
+        T = create_pose_matrix(pos, orn)
+        
+        joint_values = closed_form_algorithm(T, q_current, type=0)
+        all_joint_values_print.append(joint_values)
+        all_joint_values.append(joint_values)
+
+        if np.any(np.isnan(joint_values)):
+            self.get_logger().error("IK solution contains NaN. Aborting.")
+            return
 
         self.get_logger().info(f"Joint values: {all_joint_values_print}")
         # joints_msg = Float64MultiArray()
