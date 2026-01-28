@@ -134,7 +134,7 @@
       <plugin filename="libgazebo_ros2_control.so" name="gazebo_ros2_control">
         <parameters>$(arg simulation_controllers)</parameters>
         <ros>
-          <namespace>/arm</namespace>
+          <!-- <namespace>/arm</namespace> -->
           <remapping>/robot_description:=/arm/robot_description</remapping>
         </ros>
       </plugin>
