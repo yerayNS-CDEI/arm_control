@@ -117,9 +117,9 @@ class RobotControlUI(QMainWindow):
  
         # Launch General button
         control_layout.addWidget(QLabel("System Control:"))
-        self.btn_general_launch = QPushButton("Launch General")
-        self.btn_general_launch.clicked.connect(self.toggle_general_launch)
-        self.btn_general_launch.setToolTip("ros2 launch arm_control general.launch.py use_fake_hardware:=false robot_ip:=192.168.1.102 initial_joint_controller:=joint_trajectory_controller")
+        self.btn_general_launch = QPushButton("Start Arm")
+        self.btn_general_launch.clicked.connect(self.toggle_arm_launch)
+        self.btn_general_launch.setToolTip("ros2 launch arm_control arm.launch.py sim:=<mode> robot_ip:=192.168.1.102 mode:=arm")
         control_layout.addWidget(self.btn_general_launch)
  
         # RQT Joint Controller button
@@ -217,15 +217,15 @@ class RobotControlUI(QMainWindow):
         sensors_box.setLayout(sensors_layout)
  
         # Arduino sensor node button
-        self.btn_arduino_sensors = QPushButton("Launch Arduino Sensors")
+        self.btn_arduino_sensors = QPushButton("Start Distance Sensors")
         self.btn_arduino_sensors.clicked.connect(self.toggle_arduino_sensors)
-        self.btn_arduino_sensors.setToolTip("ros2 run arm_control arduino_sensors --ros-args -r __ns:=/arm")
+        self.btn_arduino_sensors.setToolTip("ros2 run arm_control arduino_sensors")
         sensors_layout.addWidget(self.btn_arduino_sensors)
  
         # Sensors orientation node button
-        self.btn_align_ee_to_wall = QPushButton("Launch Sensors Orientation")
+        self.btn_align_ee_to_wall = QPushButton("Start Align EE to Wall")
         self.btn_align_ee_to_wall.clicked.connect(self.toggle_align_ee_to_wall)
-        self.btn_align_ee_to_wall.setToolTip("ros2 run arm_control align_ee_to_wall --ros-args -r __ns:=/arm")
+        self.btn_align_ee_to_wall.setToolTip("ros2 run arm_control align_ee_to_wall")
         sensors_layout.addWidget(self.btn_align_ee_to_wall)
  
         sensors_layout.addStretch()
@@ -312,13 +312,13 @@ class RobotControlUI(QMainWindow):
         mapping_loc_box.setLayout(mapping_loc_layout)
  
         # Launch Mapping button
-        self.btn_launch_mapping = QPushButton("Launch Mapping")
+        self.btn_launch_mapping = QPushButton("Start Mapping")
         self.btn_launch_mapping.clicked.connect(self.toggle_mapping)
         self.btn_launch_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:=<mode> lidar:=sick")
         mapping_loc_layout.addWidget(self.btn_launch_mapping)
  
         # Launch Localization button
-        self.btn_launch_localization = QPushButton("Launch Localization")
+        self.btn_launch_localization = QPushButton("Start Localization")
         self.btn_launch_localization.clicked.connect(self.toggle_localization)
         self.btn_launch_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode>")
         mapping_loc_layout.addWidget(self.btn_launch_localization)
@@ -360,7 +360,7 @@ class RobotControlUI(QMainWindow):
         # PS AUX button
         btn_ps_ros = QPushButton("List ROS2 Processes")
         btn_ps_ros.clicked.connect(self.run_ps_ros)
-        btn_ps_ros.setToolTip("ps aux | grep ros2")
+        btn_ps_ros.setToolTip("ps aux | grep -E 'ros2|robot'")
         troubleshooting_layout.addWidget(btn_ps_ros)
  
         # List Controllers button
@@ -370,7 +370,7 @@ class RobotControlUI(QMainWindow):
         troubleshooting_layout.addWidget(btn_list_base_controllers)
  
         # Launch RQT button
-        self.btn_launch_rqt = QPushButton("Launch RQT")
+        self.btn_launch_rqt = QPushButton("Start RQT")
         self.btn_launch_rqt.clicked.connect(self.toggle_rqt)
         self.btn_launch_rqt.setToolTip("rqt")
         troubleshooting_layout.addWidget(self.btn_launch_rqt)
@@ -599,7 +599,7 @@ class RobotControlUI(QMainWindow):
             self.btn_publish_joints.setEnabled(False)
             
             # Automatically read current joint positions to verify topic is still publishing
-            self.joint_status_text.append("<span style='color: #539bf5;'>ℹ Checking for current joint positions...</span>")
+            self.joint_status_text.insertHtml("<b style='color: #539bf5;'> Checking for current joint positions...</b>")
             self.read_joint_positions()
  
     def _ansi_to_html(self, text):
@@ -670,35 +670,40 @@ class RobotControlUI(QMainWindow):
  
         return ''.join(result)
  
-    def toggle_general_launch(self):
+    def toggle_arm_launch(self):
         sim_mode = self.arm_sim_mode_combo.currentText()
-        self._toggle_process('general_launch', self.btn_general_launch, 'General Launch',
-                            'ros2', ['launch', 'arm_control', 'general.launch.py', 
-                                    f'use_fake_hardware:={sim_mode}', f'arm_use_sim_time:={sim_mode}', 'robot_ip:=192.168.1.102',
-                                    f'launch_rviz:=false',
-                                    'initial_joint_controller:=joint_trajectory_controller'
+        self._toggle_process('general_launch', self.btn_general_launch, 'Arm',
+                            'ros2', ['launch', 'arm_control', 'arm.launch.py', 
+                                    'robot_ip:=192.168.1.102',
+                                    f'sim:={sim_mode}',
+                                    'mode:=arm',
                                     ])
  
     def toggle_rqt_controller(self):
         self._toggle_process('rqt_controller', self.btn_rqt_controller, 'RQT Joint Controller',
                             'ros2', ['run', 'rqt_joint_trajectory_controller', 'rqt_joint_trajectory_controller', 
-                                    '--force-discover', '--ros-args', '-r', '__ns:=/arm'])
+                                    '--force-discover'])
  
     def toggle_arduino_sensors(self):
-        self._toggle_process('arduino_sensors', self.btn_arduino_sensors, 'Arduino Sensors',
-                            'ros2', ['run', 'arm_control', 'arduino_sensors', '--ros-args', '-r', '__ns:=/arm'])
+        sim_mode = self.arm_sim_mode_combo.currentText()
+        if sim_mode == 'true':
+            self._toggle_process('arduino_sensors_sim', self.btn_arduino_sensors, 'Arduino Sensors (Sim Mode)',
+                                'ros2', ['run', 'arm_control', 'arduino_sensors_sim'])
+        else:
+            self._toggle_process('arduino_sensors', self.btn_arduino_sensors, 'Arduino Sensors',
+                            'ros2', ['run', 'arm_control', 'arduino_sensors'])
  
     def toggle_align_ee_to_wall(self):
-        self._toggle_process('align_ee_to_wall', self.btn_align_ee_to_wall, 'Sensors Orientation',
-                            'ros2', ['run', 'arm_control', 'align_ee_to_wall', '--ros-args', '-r', '__ns:=/arm'])
+        self._toggle_process('align_ee_to_wall', self.btn_align_ee_to_wall, 'Align EE to Wall',
+                            'ros2', ['run', 'arm_control', 'align_ee_to_wall'])
  
     def toggle_mapping(self):
         sim_mode = self.sim_mode_combo.currentText()
         # Build args based on sim mode
         if sim_mode == 'true':
-            args = ['launch', 'navi_wall', 'mapping_3d.launch.py', 'sim:=true', 'lidar:=sick']
+            args = ['launch', 'navi_wall', 'mapping_3d.launch.py', 'sim:=true', 'lidar:=sick', 'mode:=base']
         else:
-            args = ['launch', 'navi_wall', 'mapping_3d.launch.py']
+            args = ['launch', 'navi_wall', 'mapping_3d.launch.py', 'lidar:=dome', 'mode:=base']
  
         self._toggle_base_process('mapping', self.btn_launch_mapping, 'Mapping', 'ros2', args)
         # Disable/enable localization button based on mapping state
@@ -711,7 +716,7 @@ class RobotControlUI(QMainWindow):
         sim_mode = self.sim_mode_combo.currentText()
         self._toggle_base_process('localization', self.btn_launch_localization, 'Localization',
                                  'ros2', ['launch', 'navi_wall', 'move_robot.launch.py', 
-                                         f'sim:={sim_mode}'])
+                                         f'sim:={sim_mode}', 'mode:=base', f'lidar:={ "dome" if not sim_mode == "true" else "sick"}'])
         # Disable/enable mapping button based on localization state
         if 'localization' in self.process_map:
             self.btn_launch_mapping.setEnabled(False)
@@ -760,7 +765,7 @@ class RobotControlUI(QMainWindow):
         process.readyReadStandardOutput.connect(lambda: self.handle_base_output(process))
  
         # Display command in bold green
-        cmd_str = 'ps aux | grep -E ros2|ros'
+        cmd_str = 'ps aux | grep -E \'ros2|robot\' | grep -v grep'
         cursor = self.base_status_text.textCursor()
         cursor.movePosition(cursor.End)
         self.base_status_text.setTextCursor(cursor)
@@ -770,7 +775,7 @@ class RobotControlUI(QMainWindow):
         # Run the command using shell to support pipe
         process_key = 'ps_ros2'
         process.finished.connect(lambda: self._cleanup_ps_ros(process_key))
-        process.start('bash', ['-c', 'ps aux | grep ros2'])
+        process.start('bash', ['-c', 'ps aux | grep -E \'ros2|robot\' | grep -v grep'])
         self.process_map[process_key] = process
  
     def _cleanup_ps_ros(self, process_key):
@@ -837,7 +842,7 @@ class RobotControlUI(QMainWindow):
                 process.kill()
  
             del self.process_map[process_key]
-            button.setText(f"Launch {name}")
+            button.setText(f"Start {name}")
             button.setStyleSheet("")
             self.status_text.append(f"⏹ Stopped {name}")
         else:
@@ -894,7 +899,7 @@ class RobotControlUI(QMainWindow):
                 process.kill()  # SIGKILL - force kill only if still running
  
             del self.process_map[process_key]
-            button.setText(f"{name}")
+            button.setText(f"Start {name}")
             button.setStyleSheet("")
             self.base_status_text.append(f"⏹ Stopped {name}")
         else:
@@ -1139,7 +1144,7 @@ class RobotControlUI(QMainWindow):
         process.setProcessChannelMode(QProcess.MergedChannels)
         
         # Display command in bold green
-        cmd_str = 'ros2 topic echo /arm/joint_states --once'
+        cmd_str = 'ros2 topic echo /joint_states --once'
         cursor = self.joint_status_text.textCursor()
         cursor.movePosition(cursor.End)
         self.joint_status_text.setTextCursor(cursor)
@@ -1148,7 +1153,7 @@ class RobotControlUI(QMainWindow):
         
         # Store the process to retrieve output later
         process.finished.connect(lambda: self._parse_joint_states(process))
-        process.start('bash', ['-c', 'timeout 5 ros2 topic echo /arm/joint_states --once'])
+        process.start('bash', ['-c', 'timeout 5 ros2 topic echo /joint_states --once'])
     
     def _parse_joint_states(self, process):
         """Parse joint states output and populate input fields"""
@@ -1281,7 +1286,7 @@ class RobotControlUI(QMainWindow):
         positions_str = ', '.join([f'{p:.3f}' for p in positions])
         
         # Build the ros2 topic pub command
-        cmd = f"""ros2 topic pub --once /arm/planned_trajectory trajectory_msgs/msg/JointTrajectory "{{
+        cmd = f"""ros2 topic pub --once /planned_trajectory trajectory_msgs/msg/JointTrajectory "{{
   header: {{stamp: {{sec: 0, nanosec: 0}}, frame_id: ''}},
   joint_names: ['arm_shoulder_pan_joint', 'arm_shoulder_lift_joint', 'arm_elbow_joint', 'arm_wrist_1_joint', 'arm_wrist_2_joint', 'arm_wrist_3_joint'],
   points: [

@@ -280,7 +280,7 @@ def generate_launch_description():
     )
     declared_arguments.append(
         DeclareLaunchArgument(
-            "gazebo_gui", default_value="false", description="Start gazebo with GUI?"
+            "gazebo_gui", default_value="true", description="Start gazebo with GUI?"
         )
     )
     declared_arguments.append(
