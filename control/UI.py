@@ -92,7 +92,8 @@ class RobotControlUI(QMainWindow):
         # Create tab widget for Arm Control and Base Control
         tabs = QTabWidget()
         main_layout.addWidget(tabs)
- 
+
+        self.tabs = tabs
         # ===== ARM CONTROL TAB =====
         arm_tab = QWidget()
         arm_tab_layout = QVBoxLayout(arm_tab)
@@ -102,6 +103,7 @@ class RobotControlUI(QMainWindow):
         arm_sim_param_layout.addWidget(QLabel("Simulation Mode:"))
         self.arm_sim_mode_combo = QComboBox()
         self.arm_sim_mode_combo.addItems(['false', 'true'])
+        self.arm_sim_mode_combo.currentTextChanged.connect(self._update_init_box_state)
         arm_sim_param_layout.addWidget(self.arm_sim_mode_combo)
         arm_sim_param_layout.addStretch()
         arm_tab_layout.addLayout(arm_sim_param_layout)
@@ -164,7 +166,7 @@ class RobotControlUI(QMainWindow):
         init_box = QGroupBox("Initialization")
         init_layout = QVBoxLayout()
         init_box.setLayout(init_layout)
- 
+        self.init_box = init_box
         # Status Commands
         init_layout.addWidget(QLabel("Status Commands:"))
         self.status_cmd_combo = QComboBox()
@@ -181,6 +183,11 @@ class RobotControlUI(QMainWindow):
         btn_send_status = QPushButton("Send Status Command")
         btn_send_status.clicked.connect(self.send_status_command)
         init_layout.addWidget(btn_send_status)
+        
+        btn_send_all_status = QPushButton("Send All Status Commands")
+        btn_send_all_status.clicked.connect(self.send_all_status_commands)
+        btn_send_all_status.setToolTip("Send all status commands sequentially: robotmode, safetystatus, programState, running, get loaded program, is in remote control")
+        init_layout.addWidget(btn_send_all_status)
  
         # Control Commands
         init_layout.addWidget(QLabel("\nControl Commands:"))
@@ -231,7 +238,7 @@ class RobotControlUI(QMainWindow):
         sensors_layout.addStretch()
         boxes_layout.addWidget(sensors_box)
  
-# Terminal and Status for Arm Control tab (side by side)
+        # Terminal and Status for Arm Control tab (side by side)
         arm_terminal_status_layout = QHBoxLayout()
         
         # Left side: Terminal
@@ -378,7 +385,7 @@ class RobotControlUI(QMainWindow):
         troubleshooting_layout.addStretch()
         base_boxes_layout.addWidget(troubleshooting_box)
  
-# Terminal and Status for Base Control tab (side by side)
+        # Terminal and Status for Base Control tab (side by side)
         base_terminal_status_layout = QHBoxLayout()
         
         # Left side: Terminal
@@ -578,7 +585,55 @@ class RobotControlUI(QMainWindow):
         # Initial UI update for consistent visuals
         self._update_emergency_stop_button_ui()
         # QApplication.processEvents()
- 
+        # Store tab indices for easy reference
+        self.BASE_TAB_INDEX = 0
+        self.ARM_TAB_INDEX = 1
+        self.JOINT_TAB_INDEX = 2
+        self._update_init_box_state()
+        
+    def _set_tab_enabled(self, tab_index, enabled):
+        """Enable or disable a tab (make it clickable or unclickable)"""
+        self.tabs.setTabEnabled(tab_index, enabled)
+
+    def _update_tab_states_for_base(self):
+        """Update tab states based on base control processes"""
+        # Check if mapping or localization is running
+        mapping_running = 'mapping' in self.process_map
+        localization_running = 'localization' in self.process_map
+        
+        if mapping_running or localization_running:
+            # Disable arm and joint control tabs
+            self._set_tab_enabled(self.ARM_TAB_INDEX, False)
+            self._set_tab_enabled(self.JOINT_TAB_INDEX, False)
+        else:
+            # Enable arm and joint control tabs
+            self._set_tab_enabled(self.ARM_TAB_INDEX, True)
+            self._set_tab_enabled(self.JOINT_TAB_INDEX, True)
+
+    def _update_init_box_state(self):
+        """Enable/disable Initialization box based on simulation mode"""
+        sim_mode = self.arm_sim_mode_combo.currentText()
+        
+        if sim_mode == 'true':
+            # Disable in simulation mode (robot dashboard commands don't work in sim)
+            self.init_box.setEnabled(False)
+        else:
+            # Enable in real robot mode
+            self.init_box.setEnabled(True)
+
+    def _update_tab_states_for_arm(self):
+        """Update tab states based on arm control processes"""
+        # Check if arm is running
+        arm_running = 'arm_launch' in self.process_map
+        
+        if arm_running:
+            # Disable base control tab
+            self._set_tab_enabled(self.BASE_TAB_INDEX, False)
+            # Joint control tab remains enabled
+        else:
+            # Enable base control tab
+            self._set_tab_enabled(self.BASE_TAB_INDEX, True)
+
     def _spin_ros(self):
         """Safely spin ROS, checking context is valid first"""
         try:
@@ -669,16 +724,42 @@ class RobotControlUI(QMainWindow):
                             break
  
         return ''.join(result)
- 
+    
     def toggle_arm_launch(self):
         sim_mode = self.arm_sim_mode_combo.currentText()
-        self._toggle_process('general_launch', self.btn_general_launch, 'Arm',
-                            'ros2', ['launch', 'arm_control', 'arm.launch.py', 
+        self._toggle_process('arm_launch', self.btn_general_launch, 'Arm',
+                            'ros2', ['launch', 'arm_control', 'arm.launch.py',
                                     'robot_ip:=192.168.1.102',
                                     f'sim:={sim_mode}',
                                     'mode:=arm',
-                                    ])
- 
+                                ])
+        
+        # Update tab states
+        self._update_tab_states_for_arm()
+
+    def send_all_status_commands(self):
+        """Send all status commands sequentially"""
+        status_commands = [
+            'robotmode',
+            'safetystatus',
+            'programState',
+            'running',
+            'get loaded program',
+            'is in remote control'
+        ]
+        
+        self.status_text.append("=" * 50)
+        self.status_text.append("📋 Sending all status commands...")
+        self.status_text.append("=" * 50)
+        
+        for command in status_commands:
+            self._send_robot_command(command)
+            # Add a small visual separator between commands
+            self.status_text.append("-" * 50)
+        
+        self.status_text.append("✓ All status commands sent")
+        self.status_text.append("")
+
     def toggle_rqt_controller(self):
         self._toggle_process('rqt_controller', self.btn_rqt_controller, 'RQT Joint Controller',
                             'ros2', ['run', 'rqt_joint_trajectory_controller', 'rqt_joint_trajectory_controller', 
@@ -704,24 +785,34 @@ class RobotControlUI(QMainWindow):
             args = ['launch', 'navi_wall', 'mapping_3d.launch.py', 'sim:=true', 'lidar:=sick', 'mode:=base']
         else:
             args = ['launch', 'navi_wall', 'mapping_3d.launch.py', 'lidar:=dome', 'mode:=base']
- 
+        
         self._toggle_base_process('mapping', self.btn_launch_mapping, 'Mapping', 'ros2', args)
+        
         # Disable/enable localization button based on mapping state
         if 'mapping' in self.process_map:
             self.btn_launch_localization.setEnabled(False)
         else:
             self.btn_launch_localization.setEnabled(True)
+        
+        # Update tab states
+        self._update_tab_states_for_base()
+
  
     def toggle_localization(self):
         sim_mode = self.sim_mode_combo.currentText()
         self._toggle_base_process('localization', self.btn_launch_localization, 'Localization',
-                                 'ros2', ['launch', 'navi_wall', 'move_robot.launch.py', 
-                                         f'sim:={sim_mode}', 'mode:=base', f'lidar:={ "dome" if not sim_mode == "true" else "sick"}'])
+                                'ros2', ['launch', 'navi_wall', 'move_robot.launch.py',
+                                        f'sim:={sim_mode}', 'mode:=base', f'lidar:={ "dome" if not sim_mode == "true" else "sick"}'])
+        
         # Disable/enable mapping button based on localization state
         if 'localization' in self.process_map:
             self.btn_launch_mapping.setEnabled(False)
         else:
             self.btn_launch_mapping.setEnabled(True)
+        
+        # Update tab states
+        self._update_tab_states_for_base()
+
  
     def toggle_view_map(self):
         # Get package path for rtabmap.db
@@ -825,7 +916,7 @@ class RobotControlUI(QMainWindow):
                 pass
  
             # For launch processes, kill only child processes (including rviz2)
-            if process_key in ['ur_control', 'general_launch']:
+            if process_key in ['ur_control', 'arm_launch']:
                 pid = process.processId()
                 if pid:
                     try:
@@ -926,23 +1017,32 @@ class RobotControlUI(QMainWindow):
         """Handle when a process finishes unexpectedly"""
         if process_key in self.process_map:
             del self.process_map[process_key]
-            button.setText(f"Launch {name}")
+            button.setText(f"Start {name}")
             button.setStyleSheet("")
-            self.status_text.append(f"<span style='color: #c69026;'>⚠ {name} exited</span>")
+            self.status_text.append(f"⚠ {name} exited")
+            
+            # Update tab states when arm processes finish
+            if process_key == 'arm_launch':
+                self._update_tab_states_for_arm()
+
  
     def _on_base_process_finished(self, process_key, button, name):
         """Handle when a base process finishes unexpectedly"""
         if process_key in self.process_map:
             del self.process_map[process_key]
-            button.setText(f"Launch {name}")
+            button.setText(f"Start {name}")
             button.setStyleSheet("")
-            self.base_status_text.append(f"<span style='color: #c69026;'>⚠ {name} exited</span>")
- 
+            self.base_status_text.append(f"⚠ {name} exited")
+            
             # Re-enable mutually exclusive buttons
             if process_key == 'mapping':
                 self.btn_launch_localization.setEnabled(True)
             elif process_key == 'localization':
                 self.btn_launch_mapping.setEnabled(True)
+            
+            # Update tab states when base processes finish
+            self._update_tab_states_for_base()
+
  
     def handle_output(self, process):
         output = process.readAllStandardOutput().data().decode()
@@ -1138,41 +1238,44 @@ class RobotControlUI(QMainWindow):
         """Clear joint control status text"""
         self.joint_status_text.clear()
     
-    def read_joint_positions(self):
+    def read_joint_positions(self, silent=False):
         """Read current joint positions from /arm/joint_states and populate input fields"""
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
         
-        # Display command in bold green
-        cmd_str = 'ros2 topic echo /joint_states --once'
-        cursor = self.joint_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.joint_status_text.setTextCursor(cursor)
-        self.joint_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        cursor.insertText('\n')
-        
-        # Store the process to retrieve output later
-        process.finished.connect(lambda: self._parse_joint_states(process))
-        process.start('bash', ['-c', 'timeout 5 ros2 topic echo /joint_states --once'])
-    
-    def _parse_joint_states(self, process):
-        """Parse joint states output and populate input fields"""
-        output = process.readAllStandardOutput().data().decode('utf-8')
-        
-        # Display the output line by line to preserve formatting
-        lines = output.split('\n')
-        for line in lines:
-            html_line = self._ansi_to_html(line)
+        # Display command in bold green (only if not silent)
+        if not silent:
             cursor = self.joint_status_text.textCursor()
             cursor.movePosition(cursor.End)
             self.joint_status_text.setTextCursor(cursor)
-            self.joint_status_text.insertHtml(html_line)
+            self.joint_status_text.insertHtml("<b style='color: #539bf5;'>▶ ros2 topic echo /joint_states --once</b><br>")
             cursor.insertText('\n')
         
+        # Store the process to retrieve output later
+        process.finished.connect(lambda: self.parse_joint_states(process, silent))
+        process.start('bash', ['-c', 'timeout 5 ros2 topic echo /joint_states --once'])
+
+    
+    def parse_joint_states(self, process, silent=False):
+        """Parse joint states output and populate input fields"""
+        output = process.readAllStandardOutput().data().decode('utf-8')
+        
+        # Display the output line by line to preserve formatting (only if not silent)
+        if not silent:
+            lines = output.split('\n')
+            for line in lines:
+                html_line = self._ansi_to_html(line)
+                cursor = self.joint_status_text.textCursor()
+                cursor.movePosition(cursor.End)
+                self.joint_status_text.setTextCursor(cursor)
+                self.joint_status_text.insertHtml(html_line)
+                cursor.insertText('\n')
+        
         # Check if topic actually published data (not timeout or error)
-        if not output.strip() or 'ERROR' in output or output.strip().startswith('timeout:'):
-            self.joint_status_text.append("<span style='color: #f47067;'>✗ No data received - Topic may not be publishing yet</span>")
-            self.joint_status_text.append("<span style='color: #c69026;'>⚠ Controls remain disabled for safety</span>")
+        if not output.strip() or 'ERROR' in output or output.strip().startswith('timeout'):
+            self.joint_status_text.append("")
+            self.joint_status_text.insertHtml("<span style='color: #f47067;'>✗ No data received - Topic may not be publishing yet</span><br>")
+            self.joint_status_text.append("")
             return
         
         try:
@@ -1197,10 +1300,10 @@ class RobotControlUI(QMainWindow):
                     position_section = False
                     continue
                 
-                if name_section and line.strip().startswith('- '):
+                if name_section and line.strip().startswith('-'):
                     joint_name = line.strip()[2:].strip()
                     joint_names.append(joint_name)
-                elif position_section and line.strip().startswith('- '):
+                elif position_section and line.strip().startswith('-'):
                     try:
                         position = float(line.strip()[2:].strip())
                         positions.append(position)
@@ -1209,90 +1312,148 @@ class RobotControlUI(QMainWindow):
             
             # Verify we have valid data before enabling controls
             if len(joint_names) == 0 or len(positions) == 0:
-                self.joint_status_text.append("<span style='color: #f47067;'>✗ No valid joint data received</span>")
-                self.joint_status_text.append("<span style='color: #c69026;'>⚠ Controls remain disabled for safety</span>")
+                if not silent:
+                    self.joint_status_text.append("")
+                    self.joint_status_text.insertHtml("<span style='color: #f47067;'>✗ No valid joint data received</span><br>")
+                    self.joint_status_text.append("")
+                return
+            
+            if len(joint_names) != len(positions):
+                if not silent:
+                    self.joint_status_text.append("")
+                    self.joint_status_text.insertHtml("<span style='color: #f47067;'>✗ Error: Joint names and positions count mismatch</span><br>")
+                    self.joint_status_text.append("")
                 return
             
             # Create a mapping from joint name to position
-            if len(joint_names) == len(positions):
-                joint_position_map = dict(zip(joint_names, positions))
-                
-                # Expected joint order
-                expected_joints = [
-                    'arm_shoulder_pan_joint', 
-                    'arm_shoulder_lift_joint', 
-                    'arm_elbow_joint', 
-                    'arm_wrist_1_joint', 
-                    'arm_wrist_2_joint', 
-                    'arm_wrist_3_joint'
-                ]
-                
-                # Verify all expected joints are present
-                missing_joints = [j for j in expected_joints if j not in joint_position_map]
-                if missing_joints:
-                    self.joint_status_text.append(f"<span style='color: #f47067;'>✗ Missing joints: {', '.join(missing_joints)}</span>")
-                    self.joint_status_text.append("<span style='color: #c69026;'>⚠ Controls remain disabled for safety</span>")
-                    return
-                
-                # Populate input fields
-                for i, joint_name in enumerate(expected_joints):
-                    if joint_name in joint_position_map:
-                        self.joint_inputs[i].setValue(joint_position_map[joint_name])
-                
-                # Store current joint positions for safety comparison
-                self.current_joint_positions = [joint_position_map[j] for j in expected_joints]
-                
-                # Enable controls only after confirming we have valid, complete joint data
-                for input_field in self.joint_inputs:
-                    input_field.setEnabled(True)
-                for slider in self.joint_sliders:
-                    slider.setEnabled(True)
-                self.btn_publish_joints.setEnabled(True)
-                
-                self.joint_status_text.append("<span style='color: #57ab5a;'>✓ Joint positions updated - Controls enabled</span>")
+            joint_position_map = dict(zip(joint_names, positions))
+            
+            # Expected joint order (for UI display and publishing)
+            expected_joints = [
+                'arm_shoulder_pan_joint',
+                'arm_shoulder_lift_joint',
+                'arm_elbow_joint',
+                'arm_wrist_1_joint',
+                'arm_wrist_2_joint',
+                'arm_wrist_3_joint'
+            ]
+            
+            # Verify all expected joints are present
+            missing_joints = [j for j in expected_joints if j not in joint_position_map]
+            if missing_joints:
+                if not silent:
+                    self.joint_status_text.append("")
+                    self.joint_status_text.insertHtml(f"<span style='color: #f47067;'>✗ Missing joints: {', '.join(missing_joints)}</span><br>")
+                    self.joint_status_text.append("")
+                return
+            
+            # Block signals to prevent cascading updates while setting values
+            for input_field in self.joint_inputs:
+                input_field.blockSignals(True)
+            for slider in self.joint_sliders:
+                slider.blockSignals(True)
+            
+            # Populate input fields in the expected order
+            for i, joint_name in enumerate(expected_joints):
+                if joint_name in joint_position_map:
+                    self.joint_inputs[i].setValue(joint_position_map[joint_name])
+                    # Also update slider to match
+                    self.joint_sliders[i].setValue(int(joint_position_map[joint_name] * 100))
+            
+            # Unblock signals
+            for input_field in self.joint_inputs:
+                input_field.blockSignals(False)
+            for slider in self.joint_sliders:
+                slider.blockSignals(False)
+            
+            # Store current joint positions for safety comparison (as dictionary by joint name)
+            self.current_joint_positions = {joint_name: joint_position_map[joint_name] for joint_name in expected_joints}
+            
+            # Enable controls only after confirming we have valid, complete joint data
+            for input_field in self.joint_inputs:
+                input_field.setEnabled(True)
+            for slider in self.joint_sliders:
+                slider.setEnabled(True)
+            self.btn_publish_joints.setEnabled(True)
+            
+            # Success message
+            self.joint_status_text.append("")
+            if silent:
+                self.joint_status_text.insertHtml("<span style='color: #76e3ea;'>🔄 Joint positions updated</span><br>")
             else:
-                self.joint_status_text.append("<span style='color: #f47067;'>✗ Error: Joint names and positions count mismatch</span>")
-                self.joint_status_text.append("<span style='color: #c69026;'>⚠ Controls remain disabled for safety</span>")
-        
+                self.joint_status_text.insertHtml("<span style='color: #57ab5a;'>✓ Joint positions updated - Controls enabled</span><br>")
+            self.joint_status_text.append("")
+            
         except Exception as e:
-            self.joint_status_text.append(f"<span style='color: #f47067;'>✗ Error parsing joint states: {str(e)}</span>")
-            self.joint_status_text.append("<span style='color: #c69026;'>⚠ Controls remain disabled for safety</span>")
-    
+            if not silent:
+                self.joint_status_text.append("")
+                self.joint_status_text.insertHtml(f"<span style='color: #f47067;'>✗ Error parsing joint states: {str(e)}</span><br>")
+                self.joint_status_text.append("")
+
+     
     def publish_joint_trajectory(self):
         """Publish joint trajectory to /arm/planned_trajectory topic"""
-        # Get values from input fields
-        positions = [input_field.value() for input_field in self.joint_inputs]
+        # Expected joint order for publishing
+        expected_joints = [
+            'arm_shoulder_pan_joint',
+            'arm_shoulder_lift_joint',
+            'arm_elbow_joint',
+            'arm_wrist_1_joint',
+            'arm_wrist_2_joint',
+            'arm_wrist_3_joint'
+        ]
+        
+        # Get joint positions from input fields (in expected order)
+        positions = [field.value() for field in self.joint_inputs]
+        positions_str = ', '.join([f'{pos:.4f}' for pos in positions])
         
         # Safety check: ensure only one joint position is different from current
         if hasattr(self, 'current_joint_positions') and self.current_joint_positions:
             differences = []
-            for i, (current, requested) in enumerate(zip(self.current_joint_positions, positions)):
-                # Use small tolerance for floating point comparison
-                if abs(current - requested) > 0.001:
-                    differences.append(i)
+            tolerance = 0.015
+            
+            for i, (joint_name, requested) in enumerate(zip(expected_joints, positions)):
+                if joint_name in self.current_joint_positions:
+                    current = self.current_joint_positions[joint_name]
+                    if abs(current - requested) > tolerance:
+                        differences.append((i, joint_name, current, requested))
             
             if len(differences) > 1:
-                joint_names_changed = [f"Joint {i}" for i in differences]
-                self.joint_status_text.append(f"<span style='color: #c69026;'>⚠ Safety Warning: Cannot change multiple joints at once!</span>")
-                self.joint_status_text.append(f"<span style='color: #c69026;'>   Changed joints: {', '.join(joint_names_changed)}</span>")
-                self.joint_status_text.append(f"<span style='color: #c69026;'>   Requested joint positions should be only one for safety.</span>")
+                changed_joints_str = ', '.join([f"{name} (Joint {i})" for i, name, _, _ in differences])
+                self.joint_status_text.append("")
+                self.joint_status_text.insertHtml("<b style='color: #f47067;'>⚠ Safety Warning: Cannot change multiple joints at once!</b><br>")
+                self.joint_status_text.append(f"Changed joints: {changed_joints_str}")
+                self.joint_status_text.append("Requested joint positions should differ in only one joint for safety.")
+                self.joint_status_text.append("")
+                
+                # Show the differences for debugging
+                self.joint_status_text.append("Differences detected:")
+                for i, name, current, requested in differences:
+                    diff = abs(requested - current)
+                    self.joint_status_text.append(f"  {name}: Current={current:.4f}, Requested={requested:.4f}, Diff={diff:.4f} rad")
                 self.joint_status_text.append("")
                 return
+            elif len(differences) == 0:
+                self.joint_status_text.append("")
+                self.joint_status_text.insertHtml("<b style='color: #c69026;'>⚠ Warning: No joint positions changed</b><br>")
+                self.joint_status_text.append("Current and requested positions are identical (within tolerance).")
+                self.joint_status_text.append("")
+                return
+            else:
+                # Exactly one joint changed - show which one
+                i, name, current, requested = differences[0]
+                diff = abs(requested - current)
+                self.joint_status_text.append("")
+                self.joint_status_text.insertHtml(f"<b style='color: #57ab5a;'>✓ Moving single joint: {name}</b><br>")
+                self.joint_status_text.append(f"  Current: {current:.4f} rad, Requested: {requested:.4f} rad, Change: {diff:.4f} rad")
+                self.joint_status_text.append("")
         
+        # Get time from start
         time_sec = int(self.time_from_start_input.value())
         time_nanosec = int((self.time_from_start_input.value() - time_sec) * 1e9)
         
-        # Format positions for the command
-        positions_str = ', '.join([f'{p:.3f}' for p in positions])
-        
         # Build the ros2 topic pub command
-        cmd = f"""ros2 topic pub --once /planned_trajectory trajectory_msgs/msg/JointTrajectory "{{
-  header: {{stamp: {{sec: 0, nanosec: 0}}, frame_id: ''}},
-  joint_names: ['arm_shoulder_pan_joint', 'arm_shoulder_lift_joint', 'arm_elbow_joint', 'arm_wrist_1_joint', 'arm_wrist_2_joint', 'arm_wrist_3_joint'],
-  points: [
-    {{positions: [{positions_str}], velocities: [], accelerations: [], effort: [], time_from_start: {{sec: {time_sec}, nanosec: {time_nanosec}}}}}
-  ]
-}}\""""
+        cmd = f"ros2 topic pub --once /planned_trajectory trajectory_msgs/msg/JointTrajectory \"{{header: {{stamp: {{sec: 0, nanosec: 0}}, frame_id: ''}}, joint_names: ['arm_shoulder_pan_joint', 'arm_shoulder_lift_joint', 'arm_elbow_joint', 'arm_wrist_1_joint', 'arm_wrist_2_joint', 'arm_wrist_3_joint'], points: [{{positions: [{positions_str}], velocities: [], accelerations: [], effort: [], time_from_start: {{sec: {time_sec}, nanosec: {time_nanosec}}}}}]}}\""
         
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
@@ -1302,16 +1463,17 @@ class RobotControlUI(QMainWindow):
         cursor = self.joint_status_text.textCursor()
         cursor.movePosition(cursor.End)
         self.joint_status_text.setTextCursor(cursor)
-        self.joint_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ Publishing joint trajectory...</b>")
+        self.joint_status_text.insertHtml("<b style='color: #57ab5a;'>📤 Publishing joint trajectory...</b><br>")
         cursor.insertText('\n')
         
         # Show the positions being published
-        self.joint_status_text.append(f"  Positions: [{positions_str}]")
-        self.joint_status_text.append(f"  Time from start: {self.time_from_start_input.value():.1f} sec")
+        self.joint_status_text.append(f"Positions: {positions_str}")
+        self.joint_status_text.append(f"Time from start: {self.time_from_start_input.value():.1f} sec")
         
-        process.finished.connect(lambda: self._on_joint_publish_finished(process))
+        process.finished.connect(lambda: self.on_joint_publish_finished(process))
         process.start('bash', ['-c', cmd])
-    
+ 
+
     def _handle_joint_publish_output(self, process):
         """Handle output from joint trajectory publish command"""
         output = process.readAllStandardOutput().data().decode('utf-8')
@@ -1325,15 +1487,25 @@ class RobotControlUI(QMainWindow):
                 self.joint_status_text.setTextCursor(cursor)
                 self.joint_status_text.insertHtml(html_line)
                 cursor.insertText('\n')
-    
-    def _on_joint_publish_finished(self, process):
+
+    def on_joint_publish_finished(self, process):
         """Handle completion of joint trajectory publish command"""
         exit_code = process.exitCode()
+        
         if exit_code == 0:
-            self.joint_status_text.append("<span style='color: #57ab5a;'>✓ Joint trajectory published successfully</span>")
+            self.joint_status_text.append("")
+            self.joint_status_text.insertHtml("<span style='color: #57ab5a;'>✓ Joint trajectory published successfully</span><br>")
+            self.joint_status_text.append("")
+            
+            # Wait a moment for the robot to move, then re-read positions silently
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(1500, lambda: self.read_joint_positions(silent=True))
         else:
-            self.joint_status_text.append(f"<span style='color: #f47067;'>✗ Publish failed with exit code {exit_code}</span>")
-        self.joint_status_text.append("")
+            self.joint_status_text.append("")
+            self.joint_status_text.insertHtml(f"<span style='color: #f47067;'>✗ Publish failed with exit code {exit_code}</span><br>")
+            self.joint_status_text.append("")
+            
+
 
     def send_goal(self):
         if not rclpy.ok():
