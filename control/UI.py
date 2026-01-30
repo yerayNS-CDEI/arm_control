@@ -466,7 +466,16 @@ class RobotControlUI(QMainWindow):
             'arm_wrist_2_joint', 
             'arm_wrist_3_joint'
         ]
-        
+        # Define joint limits (min, max) in radians
+        joint_limits = {
+            'arm_shoulder_pan_joint': (-6.28, 6.28),
+            'arm_shoulder_lift_joint': (-3.14, 0.0),  # Custom limit
+            'arm_elbow_joint': (-6.28, 6.28),
+            'arm_wrist_1_joint': (-6.28, 6.28),
+            'arm_wrist_2_joint': (-6.28, 6.28),
+            'arm_wrist_3_joint': (-6.28, 6.28)
+        }
+
         # Create sliders and input fields for each joint
         self.joint_inputs = []
         self.joint_sliders = []
@@ -478,18 +487,21 @@ class RobotControlUI(QMainWindow):
             label.setMinimumWidth(150)
             joint_row.addWidget(label)
             
-            # Slider
+            # Get limits for this joint
+            min_limit, max_limit = joint_limits[joint_name]
+            
+            # Slider (scale by 100 to handle 2 decimal places)
             slider = QSlider()
             slider.setOrientation(1)  # Horizontal
-            slider.setRange(-628, 628)  # -6.28 to 6.28 in hundredths
+            slider.setRange(int(min_limit * 100), int(max_limit * 100))
             slider.setValue(0)
             slider.setTickPosition(QSlider.TicksBelow)
             slider.setTickInterval(100)
             joint_row.addWidget(slider)
             
-            # Input field (shorter)
+            # Input field
             input_field = QDoubleSpinBox()
-            input_field.setRange(-6.28, 6.28)  # Approximately -2π to 2π
+            input_field.setRange(min_limit, max_limit)
             input_field.setValue(0.0)
             input_field.setDecimals(3)
             input_field.setSingleStep(0.1)
@@ -507,8 +519,8 @@ class RobotControlUI(QMainWindow):
             
             self.joint_inputs.append(input_field)
             self.joint_sliders.append(slider)
+            
             joint_control_layout.addLayout(joint_row)
-        
         # Time from start input
         time_layout = QHBoxLayout()
         time_layout.addWidget(QLabel("Time from start:"))
