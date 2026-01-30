@@ -165,33 +165,35 @@ class PlannerNode(Node):
             m_axes.lifetime.sec = 0
             self.goal_marker_pub.publish(m_axes)
         
-    def publish_ee_path_markers(self, path_world, frame_id="map", current_ee_xyz=None, goal_xyz=None):
-        """Publish EE path as blue spheres + a blue line strip connecting them."""
+    def publish_ee_path_markers(self, path_world, frame_id="map", current_ee_xyz=None, goal_xyz=None,
+                                ns="ee_path", id_offset=0, rgba=(0.0, 0.0, 1.0, 1.0),
+                                z_offset=0.0, line_width=0.01, sphere_diam=0.03):
+        """Publish EE path as spheres + a line strip connecting them."""
         now = self.get_clock().now().to_msg()
 
         # --- Waypoints as SPHERE_LIST ---
         spheres = Marker()
         spheres.header.frame_id = frame_id
         spheres.header.stamp = now
-        spheres.ns = "ee_path"
-        spheres.id = 0
+        spheres.ns = ns
+        spheres.id = id_offset
         spheres.type = Marker.SPHERE_LIST
         spheres.action = Marker.ADD
 
         # Sphere diameter
-        spheres.scale.x = 0.03
-        spheres.scale.y = 0.03
-        spheres.scale.z = 0.03
+        spheres.scale.x = float(sphere_diam)
+        spheres.scale.y = float(sphere_diam)
+        spheres.scale.z = float(sphere_diam)
 
-        # Blue
-        spheres.color.r = 0.0
-        spheres.color.g = 0.0
-        spheres.color.b = 1.0
-        spheres.color.a = 1.0
-
+        # Color
+        spheres.color.r = float(rgba[0])
+        spheres.color.g = float(rgba[1])
+        spheres.color.b = float(rgba[2])
+        spheres.color.a = float(rgba[3])
+        
         spheres.points = []
         for (x, y, z) in path_world:
-            spheres.points.append(Point(x=float(x), y=float(y), z=float(z)))
+            spheres.points.append(Point(x=float(x), y=float(y), z=float(z) + float(z_offset)))
 
         spheres.lifetime.sec = 0
 
@@ -199,23 +201,23 @@ class PlannerNode(Node):
         line = Marker()
         line.header.frame_id = frame_id
         line.header.stamp = now
-        line.ns = "ee_path"
-        line.id = 1
+        line.ns = ns
+        line.id = id_offset + 1
         line.type = Marker.LINE_STRIP
         line.action = Marker.ADD
 
         # Line width
-        line.scale.x = 0.01
+        line.scale.x = float(line_width)
 
-        # Blue
-        line.color.r = 0.0
-        line.color.g = 0.0
-        line.color.b = 1.0
-        line.color.a = 1.0
-
+        # Color
+        line.color.r = float(rgba[0])
+        line.color.g = float(rgba[1])
+        line.color.b = float(rgba[2])
+        line.color.a = float(rgba[3])
+        
         line.points = []
         for (x, y, z) in path_world:
-            line.points.append(Point(x=float(x), y=float(y), z=float(z)))
+            line.points.append(Point(x=float(x), y=float(y), z=float(z) + float(z_offset)))
 
         line.lifetime.sec = 0
 
@@ -225,13 +227,13 @@ class PlannerNode(Node):
         # Current EE (green)
         if current_ee_xyz is not None:
             cx, cy, cz = current_ee_xyz
-            m_cur = self._make_sphere_marker(cx, cy, cz, frame_id, "ee_path", 2, rgb=(0.0, 1.0, 0.0), scale=0.06)
+            m_cur = self._make_sphere_marker(cx, cy, cz, frame_id, ns, id_offset + 2, rgb=(0.0, 1.0, 0.0), scale=0.06)
             self.ee_path_marker_pub.publish(m_cur)
 
         # Goal (red)
         if goal_xyz is not None:
             gx, gy, gz = goal_xyz
-            m_goal = self._make_sphere_marker(gx, gy, gz, frame_id, "ee_path", 3, rgb=(1.0, 0.0, 0.0), scale=0.06)
+            m_goal = self._make_sphere_marker(gx, gy, gz, frame_id, ns, id_offset + 3, rgb=(1.0, 0.0, 0.0), scale=0.06)
             self.ee_path_marker_pub.publish(m_goal)
         
     def _make_sphere_marker(self, x, y, z, frame_id, ns, mid, rgb, scale=0.05, quat=None):
@@ -320,6 +322,106 @@ class PlannerNode(Node):
 
         m.pose.orientation.w = 1.0
         return m
+    
+    def _prune_path_endpoints(self, path_world, current_pos, goal_pos, tol_m=0.02, log=True):
+        """
+        Single-pass endpoint pruning + allow pruning down to empty.
+
+        Rules:
+        1) Start-neighbor rule: drop w1 if cur->w2 is significantly closer than cur->w1
+        2) End-neighbor rule:   drop wn if goal->w(n-1) is significantly closer than goal->wn
+        3) Progress rule start: drop w1 if w1 is farther from goal than cur is (w1 is "behind")
+        4) Progress rule end:   drop wn if wn is farther from cur than goal is (wn is "beyond")
+        5) If 1 waypoint remains: drop it if direct cur<->goal is better than using it from both sides
+        """
+        if not path_world:
+            if log:
+                self.get_logger().info("[prune] input path empty -> return []")
+            return []
+
+        pw = [(float(x), float(y), float(z)) for (x, y, z) in path_world]
+
+        def d2(a, b):
+            dx = a[0] - b[0]
+            dy = a[1] - b[1]
+            dz = a[2] - b[2]
+            return dx*dx + dy*dy + dz*dz
+
+        tol2 = float(tol_m) * float(tol_m)
+        cur = (float(current_pos[0]), float(current_pos[1]), float(current_pos[2]))
+        goal = (float(goal_pos[0]), float(goal_pos[1]), float(goal_pos[2]))
+
+        before = len(pw)
+
+        # ---------- START pruning ----------
+        if len(pw) >= 2:
+            w1, w2 = pw[0], pw[1]
+
+            # Neighbor rule
+            if d2(cur, w2) + tol2 < d2(cur, w1):
+                if log:
+                    self.get_logger().info(
+                        "[prune] start neighbor: drop w1 | "
+                        f"cur={cur} goal={goal} w1={w1} w2={w2} | "
+                        f"d2(cur,w1)={d2(cur,w1):.4f} d2(cur,w2)={d2(cur,w2):.4f}"
+                    )
+                pw.pop(0)
+
+            # Progress rule (re-evaluate current first waypoint after possible pop)
+            if len(pw) >= 1:
+                w1 = pw[0]
+                if d2(w1, goal) > d2(cur, goal) + tol2:
+                    if log:
+                        self.get_logger().info(
+                            "[prune] start progress: drop w1 (behind) | "
+                            f"cur={cur} goal={goal} w1={w1} | "
+                            f"d2(w1,goal)={d2(w1,goal):.4f} d2(cur,goal)={d2(cur,goal):.4f}"
+                        )
+                    pw.pop(0)
+
+        # ---------- END pruning ----------
+        if len(pw) >= 2:
+            wn_1, wn = pw[-2], pw[-1]
+
+            # Neighbor rule
+            if d2(goal, wn_1) + tol2 < d2(goal, wn):
+                if log:
+                    self.get_logger().info(
+                        "[prune] end neighbor: drop wn | "
+                        f"cur={cur} goal={goal} wn_1={wn_1} wn={wn} | "
+                        f"d2(goal,wn_1)={d2(goal,wn_1):.4f} d2(goal,wn)={d2(goal,wn):.4f}"
+                    )
+                pw.pop(-1)
+
+            # Progress rule (re-evaluate current last waypoint after possible pop)
+            if len(pw) >= 1:
+                wn = pw[-1]
+                if d2(wn, cur) > d2(goal, cur) + tol2:
+                    if log:
+                        self.get_logger().info(
+                            "[prune] end progress: drop wn (beyond) | "
+                            f"cur={cur} goal={goal} wn={wn} | "
+                            f"d2(wn,cur)={d2(wn,cur):.4f} d2(goal,cur)={d2(goal,cur):.4f}"
+                        )
+                    pw.pop(-1)
+
+        # ---------- 1-point collapse to empty ----------
+        if len(pw) == 1:
+            w = pw[0]
+            if (d2(cur, w) + tol2 > d2(cur, goal)) and (d2(goal, w) + tol2 > d2(cur, goal)):
+            # if (d2(cur, goal) + tol2 < d2(cur, w)) or (d2(cur, goal) + tol2 < d2(goal, w)):
+                if log:
+                    self.get_logger().info(
+                        "[prune] single-point collapse: drop w -> empty | "
+                        f"cur={cur} goal={goal} w={w} | "
+                        f"d2(cur,goal)={d2(cur,goal):.4f} d2(cur,w)={d2(cur,w):.4f} d2(goal,w)={d2(goal,w):.4f}"
+                    )
+                pw.pop(0)
+
+        after = len(pw)
+        if log:
+            self.get_logger().info(f"[prune] result: {before} -> {after} waypoints")
+        return pw
         
     def emergency_callback(self, msg):
         self.emergency_stop = msg.data
@@ -442,8 +544,6 @@ class PlannerNode(Node):
             sphere_mask = dist_squared <= sphere_radius[i]**2
             # occupancy_grid[sphere_mask] = 1
 
-
-
         # Create mask for cilinder
         cyl_mask = (
             ((X - self.cyl_center_xy[0])**2 + (Y - self.cyl_center_xy[1])**2) <= self.cyl_radius**2
@@ -468,25 +568,57 @@ class PlannerNode(Node):
             return
 
         # Convert path to world coordinates
-        path_world = [grid_to_world(i, j, k, self.x_vals, self.y_vals, self.z_vals) for i, j, k in path]
+        path_world_raw = [grid_to_world(i, j, k, self.x_vals, self.y_vals, self.z_vals) for i, j, k in path]
         
-        # Publish EE path markers
-        self.publish_ee_path_markers(path_world, frame_id="arm_base", current_ee_xyz=start_pos, goal_xyz=goal_pos)
+        # Debug: publish raw path (pre-prune)
+        self.publish_ee_path_markers(
+            path_world_raw,
+            frame_id="arm_base",
+            current_ee_xyz=start_pos,
+            goal_xyz=goal_pos,
+            ns="ee_path_raw",
+            id_offset=100,
+            rgba=(0.0, 1.0, 1.0, 0.5),   # cyan
+            z_offset=0.002,              # 2mm above
+            line_width=0.01,             # thicker
+            sphere_diam=0.03             # bigger
+        )
+
+        # Prune path endpoints
+        path_world = self._prune_path_endpoints(path_world_raw, start_pos, goal_pos, tol_m=0.02, log=True)
+        path_len = len(path_world)
+        if path_len == 0:
+            self.get_logger().warn("Path pruned to empty. Falling back to direct goal IK.")
         
-        # Interpolate orientations along the path
-        if len(path) == 1:
-            self.get_logger().info("Single-point path: rotating in place.")
-            N = 1   # N steps to rotate
-            if N == 1:
-                interp_rots = R.from_quat([goal_orientation.as_quat()])
-            else:
-                interp_rots = Slerp([0, 1], R.from_quat([start_orientation.as_quat(), goal_orientation.as_quat()]))(np.linspace(0, 1, N))
+        # Publish pruned path
+        self.publish_ee_path_markers(
+            path_world,
+            frame_id="arm_base",
+            current_ee_xyz=start_pos,
+            goal_xyz=goal_pos,
+            ns="ee_path_pruned",
+            id_offset=200,
+            rgba=(1.0, 0.5, 0.0, 1.0),  # orange
+            z_offset=0.0,
+            line_width=0.01,
+            sphere_diam=0.02
+        )
+
+        # Interpolate orientations along the (possibly pruned) path
+        if path_len == 0:
+            # No waypoint orientations needed; we will only use the goal orientation
+            interp_rots = R.from_quat([goal_orientation.as_quat()])
             interp_rot_matrices = interp_rots.as_matrix()
-        else:        
+
+        elif path_len == 1:
+            # Single waypoint: rotate in place to goal orientation
+            interp_rots = R.from_quat([goal_orientation.as_quat()])
+            interp_rot_matrices = interp_rots.as_matrix()
+
+        else:
             key_rots = R.from_quat([start_orientation.as_quat(), goal_orientation.as_quat()])
-            key_times = [0, 1]
-            slerp = Slerp(key_times, key_rots)
-            times = np.linspace(0, 1, len(path))
+            slerp = Slerp([0, 1], key_rots)
+            times = np.linspace(0, 1, path_len)
             interp_rots = slerp(times)
             interp_rot_matrices = interp_rots.as_matrix()
 
