@@ -76,10 +76,8 @@ class PositionSenderNode(Node):
                 'pose': (-0.7725, 0.2310, 0.321, 0.17737, 0.65857, 0.727895, 0.07055)
             },
             
-            
-            
             # scanning
-              'one': {
+            'one': {
                 'joints': (),
                 'pose': (-0.6, -0.7, 0.8, 0.0, -0.70710678, 0.0, 0.70710678)
             },
@@ -105,6 +103,16 @@ class PositionSenderNode(Node):
                 'joints': (),
                 'pose': (-0.6, 0.7, 0.4, 0.0, -0.70710678, 0.0, 0.70710678)
             },
+            
+            # testing simulation
+            'p1': {
+                'joints': (),
+                'pose': (-0.6, 0.7, 0.8, 0.5, -0.5, -0.5, 0.5)
+            },
+            'initial': {
+                'joints': (),
+                'pose': (0.17468, 0.43338, 0.43395, -0.16963, 0.98548, 0.00540, 0.00323)
+            }
         }
         
         # State variables
@@ -163,42 +171,6 @@ class PositionSenderNode(Node):
             self.movement_done = True
             self.get_logger().info(f"Position '{self.current_position_name}' reached successfully!")
             self.goal_sent = False
-    
-    def publish_goal_marker(self, pose_data):
-        """Publish a marker in RViz for the goal pose."""
-        marker = Marker()
-        marker.header.frame_id = "map"
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = "goal_pose"
-        marker.id = 0
-        marker.type = Marker.SPHERE
-        marker.action = Marker.ADD
-        
-        # Set position
-        marker.pose.position.x = pose_data[0]
-        marker.pose.position.y = pose_data[1]
-        marker.pose.position.z = pose_data[2]
-        
-        # Set orientation
-        marker.pose.orientation.x = pose_data[3]
-        marker.pose.orientation.y = pose_data[4]
-        marker.pose.orientation.z = pose_data[5]
-        marker.pose.orientation.w = pose_data[6]
-        
-        # Set scale (sphere diameter)
-        marker.scale.x = 0.05
-        marker.scale.y = 0.05
-        marker.scale.z = 0.05
-        
-        # Set color (cyan/blue)
-        marker.color.r = 0.0
-        marker.color.g = 1.0
-        marker.color.b = 0.0
-        marker.color.a = 1.0
-        
-        marker.lifetime.sec = 0  # Marker persists until replaced
-        
-        self.marker_pub.publish(marker)
             
     def send_position(self, position_name):
         """Send a predefined position to the manipulator."""
@@ -225,66 +197,24 @@ class PositionSenderNode(Node):
         current_position  = np.array([self.end_effector_pose.pose.position.x, self.end_effector_pose.pose.position.y, self.end_effector_pose.pose.position.z])
         dist_diff = pose_data[0:3] - current_position
         distance = np.linalg.norm(dist_diff)
-        if distance > 0.2:
-            self.get_logger().warn(f"Large movement detected ({distance:.2f} m). Using planner.")
-            #########################
-            ## GOAL POSE PUBLISHING FOR PLANNER
             
-            # Create and publish PoseStamped message
-            msg = PoseStamped()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = 'arm_base'
-            msg.pose.position.x = pose_data[0]
-            msg.pose.position.y = pose_data[1]
-            msg.pose.position.z = pose_data[2]
-            msg.pose.orientation.x = pose_data[3]
-            msg.pose.orientation.y = pose_data[4]
-            msg.pose.orientation.z = pose_data[5]
-            msg.pose.orientation.w = pose_data[6]
-            
-            self.publisher_.publish(msg)
-            self.publish_goal_marker(pose_data)
-        else:
-            self.get_logger().warn(f"Target position '{position_name}' is very close to current position (distance: {distance:.4f} m). Using IK.")
-            ##########################
-            ## IK SOLUTION AND JOINT TRAJECTORY PUBLISHING
-            
-            # Rotation matrix and transform matrix
-            pos = pose_data[0:3]
-            orn = pose_data[3:7]
-            T = np.eye(4)
-            T[:3, :3] = R.from_quat(orn).as_matrix()
-            T[:3, 3] = pos
-            
-            q_current = np.array([self.current_joint_state.position[i] for i in self.joint_indices])
-            joint_values = closed_form_algorithm(T, q_current, type=0)
-            if np.any(np.isnan(joint_values)):
-                self.get_logger().error("IK solution contains NaN. Aborting.")
-                return
-            # if {
-            #     (joint_values[0] < -1.57 or joint_values[0] > 1.57) or 
-                # (joint_values[1] < -3.3 or joint_values[1] > 0.16)  or
-            #     (joint_values[2] < -1.57 or joint_values[2] > 1.57) or 
-            #     (joint_values[3] < -1.57 or joint_values[3] > 1.57) or 
-            #     (joint_values[4] < -1.57 or joint_values[4] > 1.57) or 
-            #     (joint_values[5] < -1.57 or joint_values[5] > 1.57)
-                # }:
-                # self.get_logger().error("Selected solution with possible collision. Joint values outside of safety margins. Aborting.")
-                # return
-            # joint_values[5] = 0.0   # NEEDS TO BE MODIFIED IN CASE ANOTHER INITIAL SENSORS POSITION IS USED!!!
-            
-            # Publish GoalPose
-            traj_msg = JointTrajectory()
-            traj_msg.joint_names = self.expected_joint_names
-            time_from_start = 0.5
-            goal_pose = JointTrajectoryPoint()
-            goal_pose.positions = joint_values.tolist()
-            # goal_pose.positions[5] += (0.7854+1.5708)
-            goal_pose.time_from_start.sec = int(time_from_start)
-            goal_pose.time_from_start.nanosec = int((time_from_start % 1.0) * 1e9)
-            traj_msg.points.append(goal_pose)
-            self.trajectory_pub.publish(traj_msg)
-            self.publish_goal_marker(pose_data)
+        ####################################
+        ## GOAL POSE PUBLISHING FOR PLANNER
+        ####################################
+        
+        # Create and publish PoseStamped message
+        msg = PoseStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'arm_base'
+        msg.pose.position.x = pose_data[0]
+        msg.pose.position.y = pose_data[1]
+        msg.pose.position.z = pose_data[2]
+        msg.pose.orientation.x = pose_data[3]
+        msg.pose.orientation.y = pose_data[4]
+        msg.pose.orientation.z = pose_data[5]
+        msg.pose.orientation.w = pose_data[6]
+        
+        self.publisher_.publish(msg)        
         
         self.goal_sent = True
         self.movement_done = False
