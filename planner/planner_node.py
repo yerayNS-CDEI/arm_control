@@ -3,9 +3,9 @@
 import rclpy
 from rclpy.node import Node
 import os
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Point
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, ColorRGBA
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from std_msgs.msg import Float64MultiArray
 from visualization_msgs.msg import Marker
@@ -25,7 +25,9 @@ class PlannerNode(Node):
         # Declare and get joint prefix parameter
         self.declare_parameter('joint_prefix', 'arm_')
         self.joint_prefix = self.get_parameter('joint_prefix').get_parameter_value().string_value
-        
+        self.declare_parameter('visualize_goal_orientation', True)
+        self.visualize_goal_orientation = self.get_parameter('visualize_goal_orientation').get_parameter_value().bool_value
+
         # --- Parameters for the grid / reachability ---
         self.robot_name = 'ur10e'
         self.filename = "reachability_map_27_fused"
@@ -44,8 +46,7 @@ class PlannerNode(Node):
         self.emergency_stop = False
         self.invalid_path = False
         self.end_effector_pose = None
-        self.i = 0
-        
+        self.i = 0  
         
         # Define cilinder parameters
         self.cyl_center_xy = (0.0, 0.0)   # (xc, yc)
@@ -87,9 +88,11 @@ class PlannerNode(Node):
         self.create_subscription(PoseStamped, "end_effector_pose", self.end_effector_pose_callback, 10)
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
-        self.marker_pub = self.create_publisher(Marker, 'obstacle_markers', 10)
-        self.marker_wall_pub = self.create_publisher(Marker, 'wall_marker', 10)
-
+        self.cyl_marker_pub = self.create_publisher(Marker, 'obstacle_markers', 10)
+        self.wall_marker_pub = self.create_publisher(Marker, 'wall_marker', 10)
+        self.goal_marker_pub = self.create_publisher(Marker, 'goal_pose_marker', 10)
+        self.ee_path_marker_pub = self.create_publisher(Marker, 'ee_path_markers', 10)
+        
         self.get_logger().info("Planner node initialized and waiting for goal poses...")
         
         #! publish simulalted wall markers
@@ -128,8 +131,195 @@ class PlannerNode(Node):
         
         marker.lifetime.sec = 0  # 0 means it persists until deleted
          
-        self.marker_wall_pub.publish(marker)
+        self.wall_marker_pub.publish(marker)
         self.get_logger().info(f"Published wall marker at (2.5, 2.0) with thickness 0.1, width 4.0, and height 4.0")
+        
+    def publish_goal_marker(self, pose_data):
+        x, y, z = pose_data[0], pose_data[1], pose_data[2]
+        quat = (pose_data[3], pose_data[4], pose_data[5], pose_data[6])
+
+        # Sphere marker at the goal position (stores orientation too if you pass quat)
+        m_sphere = self._make_sphere_marker(
+            x, y, z,
+            frame_id="arm_base",
+            ns="goal_pose",
+            mid=0,
+            rgb=(0.0, 1.0, 0.0),
+            scale=0.05,
+            quat=quat
+        )
+        m_sphere.lifetime.sec = 0
+        self.goal_marker_pub.publish(m_sphere)
+
+        # Optional axes visualization
+        if self.visualize_goal_orientation:
+            m_axes = self._make_axes_marker(
+                x, y, z,
+                quat=quat,
+                frame_id="arm_base",
+                ns="goal_pose",
+                mid=1,
+                axis_len=0.12,
+                axis_width=0.01
+            )
+            m_axes.lifetime.sec = 0
+            self.goal_marker_pub.publish(m_axes)
+        
+    def publish_ee_path_markers(self, path_world, frame_id="map", current_ee_xyz=None, goal_xyz=None):
+        """Publish EE path as blue spheres + a blue line strip connecting them."""
+        now = self.get_clock().now().to_msg()
+
+        # --- Waypoints as SPHERE_LIST ---
+        spheres = Marker()
+        spheres.header.frame_id = frame_id
+        spheres.header.stamp = now
+        spheres.ns = "ee_path"
+        spheres.id = 0
+        spheres.type = Marker.SPHERE_LIST
+        spheres.action = Marker.ADD
+
+        # Sphere diameter
+        spheres.scale.x = 0.03
+        spheres.scale.y = 0.03
+        spheres.scale.z = 0.03
+
+        # Blue
+        spheres.color.r = 0.0
+        spheres.color.g = 0.0
+        spheres.color.b = 1.0
+        spheres.color.a = 1.0
+
+        spheres.points = []
+        for (x, y, z) in path_world:
+            spheres.points.append(Point(x=float(x), y=float(y), z=float(z)))
+
+        spheres.lifetime.sec = 0
+
+        # --- Line connecting waypoints (LINE_STRIP) ---
+        line = Marker()
+        line.header.frame_id = frame_id
+        line.header.stamp = now
+        line.ns = "ee_path"
+        line.id = 1
+        line.type = Marker.LINE_STRIP
+        line.action = Marker.ADD
+
+        # Line width
+        line.scale.x = 0.01
+
+        # Blue
+        line.color.r = 0.0
+        line.color.g = 0.0
+        line.color.b = 1.0
+        line.color.a = 1.0
+
+        line.points = []
+        for (x, y, z) in path_world:
+            line.points.append(Point(x=float(x), y=float(y), z=float(z)))
+
+        line.lifetime.sec = 0
+
+        self.ee_path_marker_pub.publish(spheres)
+        self.ee_path_marker_pub.publish(line)
+        
+        # Current EE (green)
+        if current_ee_xyz is not None:
+            cx, cy, cz = current_ee_xyz
+            m_cur = self._make_sphere_marker(cx, cy, cz, frame_id, "ee_path", 2, rgb=(0.0, 1.0, 0.0), scale=0.06)
+            self.ee_path_marker_pub.publish(m_cur)
+
+        # Goal (red)
+        if goal_xyz is not None:
+            gx, gy, gz = goal_xyz
+            m_goal = self._make_sphere_marker(gx, gy, gz, frame_id, "ee_path", 3, rgb=(1.0, 0.0, 0.0), scale=0.06)
+            self.ee_path_marker_pub.publish(m_goal)
+        
+    def _make_sphere_marker(self, x, y, z, frame_id, ns, mid, rgb, scale=0.05, quat=None):
+        m = Marker()
+        m.header.frame_id = frame_id
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns = ns
+        m.id = mid
+        m.type = Marker.SPHERE
+        m.action = Marker.ADD
+
+        m.pose.position.x = float(x)
+        m.pose.position.y = float(y)
+        m.pose.position.z = float(z)
+        
+        if quat is not None:
+            m.pose.orientation.x = float(quat[0])
+            m.pose.orientation.y = float(quat[1])
+            m.pose.orientation.z = float(quat[2])
+            m.pose.orientation.w = float(quat[3])
+        else:
+            m.pose.orientation.w = 1.0
+
+        m.scale.x = scale
+        m.scale.y = scale
+        m.scale.z = scale
+
+        m.color.r = float(rgb[0])
+        m.color.g = float(rgb[1])
+        m.color.b = float(rgb[2])
+        m.color.a = 1.0
+
+        return m
+    
+    def _make_color(self, r, g, b, a=1.0):
+        c = ColorRGBA()
+        c.r = float(r)
+        c.g = float(g)
+        c.b = float(b)
+        c.a = float(a)
+        return c
+    
+    def _make_axes_marker(self, x, y, z, quat, frame_id, ns, mid, axis_len=0.12, axis_width=0.01):
+        """
+        Draw a coordinate triad at (x,y,z) using LINE_LIST:
+        X axis = red, Y axis = green, Z axis = blue
+        """
+        r = R.from_quat([quat[0], quat[1], quat[2], quat[3]])
+
+        # Unit axes in local frame, rotated to world frame
+        ex = r.apply([axis_len, 0.0, 0.0])
+        ey = r.apply([0.0, axis_len, 0.0])
+        ez = r.apply([0.0, 0.0, axis_len])
+
+        origin = Point(x=float(x), y=float(y), z=float(z))
+        px = Point(x=float(x + ex[0]), y=float(y + ex[1]), z=float(z + ex[2]))
+        py = Point(x=float(x + ey[0]), y=float(y + ey[1]), z=float(z + ey[2]))
+        pz = Point(x=float(x + ez[0]), y=float(y + ez[1]), z=float(z + ez[2]))
+
+        m = Marker()
+        m.header.frame_id = frame_id
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns = ns
+        m.id = mid
+        m.type = Marker.LINE_LIST
+        m.action = Marker.ADD
+
+        # LINE_LIST uses scale.x as line width
+        m.scale.x = float(axis_width)
+
+        # Points come in pairs (start,end) per segment
+        m.points = [
+            origin, px,  # X axis
+            origin, py,  # Y axis
+            origin, pz,  # Z axis
+        ]
+
+        # For LINE_LIST, you can specify per-vertex colors
+        m.colors = []
+        # X axis (red)
+        m.colors.append(self._make_color(1.0, 0.0, 0.0, 1.0)); m.colors.append(self._make_color(1.0, 0.0, 0.0, 1.0))
+        # Y axis (green)
+        m.colors.append(self._make_color(0.0, 1.0, 0.0, 1.0)); m.colors.append(self._make_color(0.0, 1.0, 0.0, 1.0))
+        # Z axis (blue)
+        m.colors.append(self._make_color(0.0, 0.0, 1.0, 1.0)); m.colors.append(self._make_color(0.0, 0.0, 1.0, 1.0))
+
+        m.pose.orientation.w = 1.0
+        return m
         
     def emergency_callback(self, msg):
         self.emergency_stop = msg.data
@@ -176,6 +366,16 @@ class PlannerNode(Node):
             return
         
         self.execution_complete = False
+        pose_data = (
+            msg.pose.position.x,
+            msg.pose.position.y,
+            msg.pose.position.z,
+            msg.pose.orientation.x,
+            msg.pose.orientation.y,
+            msg.pose.orientation.z,
+            msg.pose.orientation.w
+        )
+        self.publish_goal_marker(pose_data)
         self.plan_and_send_trajectory(msg)
 
     def plan_and_send_trajectory(self, msg: PoseStamped):
@@ -269,6 +469,9 @@ class PlannerNode(Node):
 
         # Convert path to world coordinates
         path_world = [grid_to_world(i, j, k, self.x_vals, self.y_vals, self.z_vals) for i, j, k in path]
+        
+        # Publish EE path markers
+        self.publish_ee_path_markers(path_world, frame_id="arm_base", current_ee_xyz=start_pos, goal_xyz=goal_pos)
         
         # Interpolate orientations along the path
         if len(path) == 1:
@@ -372,7 +575,7 @@ class PlannerNode(Node):
     def publish_cylinder_marker(self, center_xy, radius, z_min, z_max):
         """Publish a cylinder marker for RViz visualization."""
         marker = Marker()
-        marker.header.frame_id = "arm_base_link"  # Change to your robot's base frame if different
+        marker.header.frame_id = "arm_base"  # Change to your robot's base frame if different
         marker.header.stamp = self.get_clock().now().to_msg()
         marker.ns = "obstacles"
         marker.id = 0
@@ -401,7 +604,7 @@ class PlannerNode(Node):
         
         marker.lifetime.sec = 0  # 0 means it persists until deleted
         
-        self.marker_pub.publish(marker)
+        self.cyl_marker_pub.publish(marker)
         self.get_logger().info(f"Published cylinder marker at ({center_xy[0]}, {center_xy[1]}) with radius {radius} and height {z_max - z_min}")
 
 def create_pose_matrix(position, rotation_matrix):
