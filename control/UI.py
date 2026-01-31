@@ -320,13 +320,13 @@ class RobotControlUI(QMainWindow):
  
         # Launch Mapping button
         self.btn_launch_mapping = QPushButton("Start Mapping")
-        self.btn_launch_mapping.clicked.connect(self.toggle_mapping)
+        self.btn_launch_mapping.clicked.connect(lambda: self.toggle_mapping())
         self.btn_launch_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:=<mode> lidar:=sick")
         mapping_loc_layout.addWidget(self.btn_launch_mapping)
  
         # Launch Localization button
         self.btn_launch_localization = QPushButton("Start Localization")
-        self.btn_launch_localization.clicked.connect(self.toggle_localization)
+        self.btn_launch_localization.clicked.connect(lambda: self.toggle_localization())
         self.btn_launch_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode>")
         mapping_loc_layout.addWidget(self.btn_launch_localization)
  
@@ -346,14 +346,14 @@ class RobotControlUI(QMainWindow):
  
         # Launch Nav2 button
         self.btn_launch_nav2 = QPushButton("Launch Nav2")
-        self.btn_launch_nav2.clicked.connect(self.toggle_nav2)
+        self.btn_launch_nav2.clicked.connect(lambda: self.toggle_nav2())
         self.btn_launch_nav2.setToolTip("ros2 launch navi_wall navigation_launch.py use_sim_time:=<mode>")
         nav_explore_layout.addWidget(self.btn_launch_nav2)
  
         # Launch Exploration button
         self.btn_launch_exploration = QPushButton("Launch Exploration(explore_lite)")
-        self.btn_launch_exploration.clicked.connect(self.toggle_exploration)
-        self.btn_launch_exploration.setToolTip("ros2 run navi_wall explore --ros-args --params-file <pkg>/config/explore_params.yaml")
+        self.btn_launch_exploration.clicked.connect(lambda: self.toggle_exploration())
+        self.btn_launch_exploration.setToolTip("ros2 run navi_wall explore --ros-args --params-file arm_control/config/explore_params.yaml")
         nav_explore_layout.addWidget(self.btn_launch_exploration)
  
         nav_explore_layout.addStretch()
@@ -585,7 +585,148 @@ class RobotControlUI(QMainWindow):
         joint_tab_layout.addLayout(joint_terminal_status_layout)
         
         tabs.addTab(joint_tab, "Joint Control")
-        
+        # ===== FULL CONTROL TAB =====
+        full_control_tab = QWidget()
+        full_control_tab_layout = QVBoxLayout(full_control_tab)
+
+        # Simulation parameter selector (at top)
+        full_control_sim_param_layout = QHBoxLayout()
+        full_control_sim_param_layout.addWidget(QLabel("Simulation Mode:"))
+        self.full_control_sim_mode_combo = QComboBox()
+        self.full_control_sim_mode_combo.addItems(['false', 'true'])
+        self.full_control_sim_mode_combo.currentTextChanged.connect(self._update_full_control_sim_mode)
+        full_control_sim_param_layout.addWidget(self.full_control_sim_mode_combo)
+        full_control_sim_param_layout.addStretch()
+        full_control_tab_layout.addLayout(full_control_sim_param_layout)
+
+        # Horizontal layout for control boxes side by side
+        full_control_boxes_layout = QHBoxLayout()
+        full_control_tab_layout.addLayout(full_control_boxes_layout)
+
+        # Initialization Box (reuse existing components)
+        full_control_init_box = QGroupBox("Robot Initialization")
+        full_control_init_layout = QVBoxLayout()
+        full_control_init_box.setLayout(full_control_init_layout)
+
+        # Reuse status commands combo and buttons
+        full_control_init_layout.addWidget(QLabel("Status Commands:"))
+        full_control_init_layout.addWidget(self.status_cmd_combo)
+        btn_full_control_send_status = QPushButton("Send Status Command")
+        btn_full_control_send_status.clicked.connect(self.send_status_command)
+        full_control_init_layout.addWidget(btn_full_control_send_status)
+
+        btn_full_control_send_all_status = QPushButton("Send All Status Commands")
+        btn_full_control_send_all_status.clicked.connect(self.send_all_status_commands)
+        full_control_init_layout.addWidget(btn_full_control_send_all_status)
+
+        # Reuse control commands combo and button
+        full_control_init_layout.addWidget(QLabel("\nControl Commands:"))
+        full_control_init_layout.addWidget(self.control_cmd_combo)
+        btn_full_control_send_control = QPushButton("Send Control Command")
+        btn_full_control_send_control.clicked.connect(self.send_control_command)
+        full_control_init_layout.addWidget(btn_full_control_send_control)
+
+        full_control_init_layout.addStretch()
+        full_control_boxes_layout.addWidget(full_control_init_box)
+        self.full_control_init_box = full_control_init_box
+
+        # Mapping and Localization Box
+        full_control_mapping_box = QGroupBox("Mapping and Localization")
+        full_control_mapping_layout = QVBoxLayout()
+        full_control_mapping_box.setLayout(full_control_mapping_layout)
+
+        self.btn_full_control_mapping = QPushButton("Start Mapping")
+        self.btn_full_control_mapping.clicked.connect(lambda: self.toggle_mapping(mode='full', button=self.btn_full_control_mapping, sim_combo=self.full_control_sim_mode_combo))
+        self.btn_full_control_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:= lidar:=sick mode:=full")
+        full_control_mapping_layout.addWidget(self.btn_full_control_mapping)
+
+        self.btn_full_control_localization = QPushButton("Start Localization")
+        self.btn_full_control_localization.clicked.connect(lambda: self.toggle_localization(mode='full', button=self.btn_full_control_localization, sim_combo=self.full_control_sim_mode_combo))
+        self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:= mode:=full")
+        full_control_mapping_layout.addWidget(self.btn_full_control_localization)
+
+        full_control_mapping_layout.addStretch()
+        full_control_boxes_layout.addWidget(full_control_mapping_box)
+
+        # Navigation and Exploration Box
+        full_control_nav_box = QGroupBox("Navigation and Exploration")
+        full_control_nav_layout = QVBoxLayout()
+        full_control_nav_box.setLayout(full_control_nav_layout)
+
+        self.btn_full_control_nav2 = QPushButton("Launch Nav2")
+        self.btn_full_control_nav2.clicked.connect(lambda: self.toggle_nav2(mode='full', button=self.btn_full_control_nav2, sim_combo=self.full_control_sim_mode_combo))
+        self.btn_full_control_nav2.setToolTip("ros2 launch navi_wall navigation_launch.py use_sim_time:=")
+        full_control_nav_layout.addWidget(self.btn_full_control_nav2)
+
+        self.btn_full_control_exploration = QPushButton("Launch Exploration (explore_lite)")
+        self.btn_full_control_exploration.clicked.connect(lambda: self.toggle_exploration(mode='full', button=self.btn_full_control_exploration, sim_combo=self.full_control_sim_mode_combo))
+        self.btn_full_control_exploration.setToolTip("ros2 run navi_wall explore --ros-args --params-file config/explore_params.yaml")
+        full_control_nav_layout.addWidget(self.btn_full_control_exploration)
+
+        full_control_nav_layout.addStretch()
+        full_control_boxes_layout.addWidget(full_control_nav_box)
+
+        # Terminal and Status for Full Control tab (create NEW widgets)
+        full_control_terminal_status_layout = QHBoxLayout()
+
+        # Left side: NEW Terminal for Full Control
+        self.full_control_terminal = QTermWidget()
+        full_control_terminal_status_layout.addWidget(self.full_control_terminal)
+
+        # Right side: NEW Status display for Full Control
+        self.full_control_status_text = QTextEdit()
+        self.full_control_status_text.setReadOnly(True)
+        self.full_control_status_text.setAcceptRichText(True)
+        self.full_control_status_text.setStyleSheet("background-color: #22272e; color: #adbac7; border: 1px solid #444c56; font-family: 'Courier New', monospace; white-space: pre;")
+
+        # Set tab stops to 8 characters (standard terminal width)
+        from PyQt5.QtGui import QFontMetrics
+        font_metrics = QFontMetrics(self.full_control_status_text.font())
+        tab_width = font_metrics.horizontalAdvance(' ') * 8
+        self.full_control_status_text.setTabStopDistance(tab_width)
+        full_control_terminal_status_layout.addWidget(self.full_control_status_text)
+
+        # Status header with search functionality
+        full_control_status_header = QHBoxLayout()
+        full_control_status_header.addWidget(QLabel("Full Control - Terminal + Status"))
+        full_control_status_header.addStretch()
+
+        # Search bar for Full Control
+        full_control_status_header.addWidget(QLabel("Search:"))
+        self.full_control_search_input = QLineEdit()
+        self.full_control_search_input.setPlaceholderText("Enter search term...")
+        self.full_control_search_input.setMaximumWidth(150)
+        self.full_control_search_input.returnPressed.connect(lambda: self.search_full_control_status(forward=True))
+        full_control_status_header.addWidget(self.full_control_search_input)
+
+        btn_full_control_search_prev = QPushButton("◀")
+        btn_full_control_search_prev.clicked.connect(lambda: self.search_full_control_status(forward=False))
+        btn_full_control_search_prev.setMaximumWidth(40)
+        btn_full_control_search_prev.setToolTip("Find previous")
+        full_control_status_header.addWidget(btn_full_control_search_prev)
+
+        btn_full_control_search_next = QPushButton("▶")
+        btn_full_control_search_next.clicked.connect(lambda: self.search_full_control_status(forward=True))
+        btn_full_control_search_next.setMaximumWidth(40)
+        btn_full_control_search_next.setToolTip("Find next")
+        full_control_status_header.addWidget(btn_full_control_search_next)
+
+        self.btn_restore_full_control_status = QPushButton("Restore")
+        self.btn_restore_full_control_status.clicked.connect(self.restore_full_control_status)
+        self.btn_restore_full_control_status.setMaximumWidth(80)
+        self.btn_restore_full_control_status.setVisible(False)
+        full_control_status_header.addWidget(self.btn_restore_full_control_status)
+
+        btn_clear_full_control_status = QPushButton("Clear")
+        btn_clear_full_control_status.clicked.connect(self.clear_full_control_status)
+        btn_clear_full_control_status.setMaximumWidth(80)
+        full_control_status_header.addWidget(btn_clear_full_control_status)
+
+        full_control_tab_layout.addLayout(full_control_status_header)
+        full_control_tab_layout.addLayout(full_control_terminal_status_layout)
+        # Add Full Control tab after Joint Control
+        tabs.addTab(full_control_tab, "Full Control")
+
         # Connect tab change signal to check joint states when Joint Control tab is activated
         tabs.currentChanged.connect(lambda index: self._on_tab_changed(index, tabs))
         
@@ -596,31 +737,71 @@ class RobotControlUI(QMainWindow):
         
         # Initial UI update for consistent visuals
         self._update_emergency_stop_button_ui()
-        # QApplication.processEvents()
-        # Store tab indices for easy reference
         self.BASE_TAB_INDEX = 0
         self.ARM_TAB_INDEX = 1
         self.JOINT_TAB_INDEX = 2
+        self.FULL_CONTROL_TAB_INDEX = 3
         self._update_init_box_state()
         
+    def _update_full_control_sim_mode(self):
+        """Sync full control sim mode with arm and base sim modes"""
+        sim_mode = self.full_control_sim_mode_combo.currentText()
+        
+        # Block signals to prevent cascading updates
+        self.arm_sim_mode_combo.blockSignals(True)
+        self.sim_mode_combo.blockSignals(True)
+        
+        self.arm_sim_mode_combo.setCurrentText(sim_mode)
+        self.sim_mode_combo.setCurrentText(sim_mode)
+        
+        self.arm_sim_mode_combo.blockSignals(False)
+        self.sim_mode_combo.blockSignals(False)
+        
+        # Update init box state based on simulation mode
+        if sim_mode == 'true':
+            self.full_control_init_box.setEnabled(False)
+        else:
+            self.full_control_init_box.setEnabled(True)
+
     def _set_tab_enabled(self, tab_index, enabled):
         """Enable or disable a tab (make it clickable or unclickable)"""
         self.tabs.setTabEnabled(tab_index, enabled)
 
     def _update_tab_states_for_base(self):
         """Update tab states based on base control processes"""
-        # Check if mapping or localization is running
-        mapping_running = 'mapping' in self.process_map
-        localization_running = 'localization' in self.process_map
-        
-        if mapping_running or localization_running:
-            # Disable arm and joint control tabs
+        # Any base (non-full) process running?
+        base_running = any(
+            key in self.process_map
+            for key in ['mapping', 'localization', 'nav2', 'exploration']
+        )
+
+        if base_running:
+            # Disable Arm and Full Control tabs (Base stays enabled, Joint stays enabled)
             self._set_tab_enabled(self.ARM_TAB_INDEX, False)
-            self._set_tab_enabled(self.JOINT_TAB_INDEX, False)
+            self._set_tab_enabled(self.FULL_CONTROL_TAB_INDEX, False)
         else:
-            # Enable arm and joint control tabs
+            # Re‑enable when base processes stop
             self._set_tab_enabled(self.ARM_TAB_INDEX, True)
-            self._set_tab_enabled(self.JOINT_TAB_INDEX, True)
+            self._set_tab_enabled(self.FULL_CONTROL_TAB_INDEX, True)
+
+    def _update_tab_states_for_full_control(self):
+        """Update tab states based on full control processes"""
+        full_running = any(
+            key in self.process_map
+            for key in ['full_mapping', 'full_localization', 'full_nav2', 'full_exploration']
+        )
+
+        if full_running:
+            # Disable Base, Arm, and Joint tabs (Full Control stays enabled)
+            self._set_tab_enabled(self.BASE_TAB_INDEX, False)
+            self._set_tab_enabled(self.ARM_TAB_INDEX, False)
+            # self._set_tab_enabled(self.JOINT_TAB_INDEX, False)
+        else:
+            # Re‑enable them when full control processes stop
+            self._set_tab_enabled(self.BASE_TAB_INDEX, True)
+            self._set_tab_enabled(self.ARM_TAB_INDEX, True)
+            # self._set_tab_enabled(self.JOINT_TAB_INDEX, True)
+
 
     def _update_init_box_state(self):
         """Enable/disable Initialization box based on simulation mode"""
@@ -635,16 +816,16 @@ class RobotControlUI(QMainWindow):
 
     def _update_tab_states_for_arm(self):
         """Update tab states based on arm control processes"""
-        # Check if arm is running
         arm_running = 'arm_launch' in self.process_map
-        
+
         if arm_running:
-            # Disable base control tab
+            # Disable Base and Full Control tabs only
             self._set_tab_enabled(self.BASE_TAB_INDEX, False)
-            # Joint control tab remains enabled
+            self._set_tab_enabled(self.FULL_CONTROL_TAB_INDEX, False)
+            # Joint tab remains enabled
         else:
-            # Enable base control tab
             self._set_tab_enabled(self.BASE_TAB_INDEX, True)
+            self._set_tab_enabled(self.FULL_CONTROL_TAB_INDEX, True)
 
     def _spin_ros(self):
         """Safely spin ROS, checking context is valid first"""
@@ -789,41 +970,73 @@ class RobotControlUI(QMainWindow):
     def toggle_align_ee_to_wall(self):
         self._toggle_process('align_ee_to_wall', self.btn_align_ee_to_wall, 'Align EE to Wall',
                             'ros2', ['run', 'arm_control', 'align_ee_to_wall'])
- 
-    def toggle_mapping(self):
-        sim_mode = self.sim_mode_combo.currentText()
+        
+    def toggle_mapping(self, mode='base', button=None, sim_combo=None):
+        """Toggle mapping with configurable mode parameter"""
+        if button is None:
+            button = self.btn_launch_mapping
+        if sim_combo is None:
+            sim_combo = self.sim_mode_combo
+        
+        sim_mode = sim_combo.currentText()
+        
         # Build args based on sim mode
         if sim_mode == 'true':
-            args = ['launch', 'navi_wall', 'mapping_3d.launch.py', 'sim:=true', 'lidar:=sick', 'mode:=base']
+            args = ['launch', 'navi_wall', 'mapping_3d.launch.py', 'sim:=true', 'lidar:=sick', f'mode:={mode}']
         else:
-            args = ['launch', 'navi_wall', 'mapping_3d.launch.py', 'lidar:=dome', 'mode:=base']
+            args = ['launch', 'navi_wall', 'mapping_3d.launch.py', 'lidar:=dome', f'mode:={mode}']
         
-        self._toggle_base_process('mapping', self.btn_launch_mapping, 'Mapping', 'ros2', args)
+        process_key = f'{mode}_mapping' if mode != 'base' else 'mapping'
+        display_name = f'Mapping ({mode.title()})' if mode != 'base' else 'Mapping'
         
+        self._toggle_base_process(process_key, button, display_name, 'ros2', args)
+        
+        if mode == 'full':
+            self._update_tab_states_for_full_control()  
         # Disable/enable localization button based on mapping state
-        if 'mapping' in self.process_map:
-            self.btn_launch_localization.setEnabled(False)
-        else:
-            self.btn_launch_localization.setEnabled(True)
+        localization_button = self._get_localization_button_for_mode(mode)
         
-        # Update tab states
-        self._update_tab_states_for_base()
+        if localization_button:
+            if process_key in self.process_map:
+                localization_button.setEnabled(False)
+            else:
+                localization_button.setEnabled(True)
+        
+        # Update tab states only for base mode
+        if mode == 'base':
+            self._update_tab_states_for_base()
 
- 
-    def toggle_localization(self):
-        sim_mode = self.sim_mode_combo.currentText()
-        self._toggle_base_process('localization', self.btn_launch_localization, 'Localization',
+    
+    def toggle_localization(self, mode='base', button=None, sim_combo=None):
+        """Toggle localization with configurable mode parameter"""
+        if button is None:
+            button = self.btn_launch_localization
+        if sim_combo is None:
+            sim_combo = self.sim_mode_combo
+        
+        sim_mode = sim_combo.currentText()
+        lidar = 'dome' if sim_mode != 'true' else 'sick'
+        
+        process_key = f'{mode}_localization' if mode != 'base' else 'localization'
+        display_name = f'Localization ({mode.title()})' if mode != 'base' else 'Localization'
+        
+        self._toggle_base_process(process_key, button, display_name,
                                 'ros2', ['launch', 'navi_wall', 'move_robot.launch.py',
-                                        f'sim:={sim_mode}', 'mode:=base', f'lidar:={ "dome" if not sim_mode == "true" else "sick"}'])
+                                        f'sim:={sim_mode}', f'mode:={mode}', f'lidar:={lidar}'])
+        if mode == 'full':
+            self._update_tab_states_for_full_control()
         
         # Disable/enable mapping button based on localization state
-        if 'localization' in self.process_map:
-            self.btn_launch_mapping.setEnabled(False)
-        else:
-            self.btn_launch_mapping.setEnabled(True)
+        mapping_button = self._get_mapping_button_for_mode(mode)
+        if mapping_button:
+            if process_key in self.process_map:
+                mapping_button.setEnabled(False)
+            else:
+                mapping_button.setEnabled(True)
         
-        # Update tab states
-        self._update_tab_states_for_base()
+        # Update tab states only for base mode
+        if mode == 'base':
+            self._update_tab_states_for_base()
 
  
     def toggle_view_map(self):
@@ -837,26 +1050,99 @@ class RobotControlUI(QMainWindow):
         
         self._toggle_base_process('view_map', self.btn_view_map, 'View map',
                                  'rtabmap-databaseViewer', [db_path])
- 
-    def toggle_nav2(self):
-        sim_mode = self.sim_mode_combo.currentText()
-        self._toggle_base_process('nav2', self.btn_launch_nav2, 'Nav2',
-                                 'ros2', ['launch', 'navi_wall', 'navigation_launch.py', 
-                                         f'use_sim_time:={sim_mode}'])
- 
-    def toggle_exploration(self):
+    
+    def toggle_nav2(self, mode='base', button=None, sim_combo=None):
+        """Toggle Nav2 with configurable mode parameter"""
+        if button is None:
+            button = self.btn_launch_nav2
+        if sim_combo is None:
+            sim_combo = self.sim_mode_combo
+        
+        sim_mode = sim_combo.currentText()
+        process_key = f'{mode}_nav2' if mode != 'base' else 'nav2'
+        display_name = f'Nav2 ({mode.title()})' if mode != 'base' else 'Nav2'
+        
+        self._toggle_base_process(process_key, button, display_name,
+                                'ros2', ['launch', 'navi_wall', 'navigation_launch.py',
+                                        f'use_sim_time:={sim_mode}'])
+        if mode == 'full':
+            self._update_tab_states_for_full_control()
+            
+    def toggle_exploration(self, mode='base', button=None, sim_combo=None):
+        """Toggle exploration with configurable mode parameter"""
+        if button is None:
+            button = self.btn_launch_exploration
+        
         # Get package path for explore_params.yaml
         try:
             pkg_share = get_package_share_directory('navi_wall')
             params_file = os.path.join(pkg_share, 'config', 'explore_params.yaml')
         except:
-            # Fallback to source directory
             params_file = '/home/zed/ros2_ws/src/navi-wall/config/explore_params.yaml'
- 
-        self._toggle_base_process('exploration', self.btn_launch_exploration, 'Exploration',
-                                 'ros2', ['run', 'navi_wall', 'explore', 
-                                         '--ros-args', '--params-file', params_file])
- 
+        
+        process_key = f'{mode}_exploration' if mode != 'base' else 'exploration'
+        display_name = f'Exploration ({mode.title()})' if mode != 'base' else 'Exploration'
+        
+        self._toggle_base_process(process_key, button, display_name,
+                                'ros2', ['run', 'navi_wall', 'explore',
+                                        '--ros-args', '--params-file', params_file])
+        if mode == 'full':
+            self._update_tab_states_for_full_control()
+   
+    # Helper methods to get the correct buttons for each mode
+    def _get_mapping_button_for_mode(self, mode):
+        """Get the mapping button for a given mode"""
+        if mode == 'base':
+            return self.btn_launch_mapping
+        elif mode == 'full':
+            return self.btn_full_control_mapping
+        return None
+
+    def _get_localization_button_for_mode(self, mode):
+        """Get the localization button for a given mode"""
+        if mode == 'base':
+            return self.btn_launch_localization
+        elif mode == 'full':
+            return self.btn_full_control_localization
+        return None
+
+    def clear_full_control_status(self):
+        """Clear full control status text and save backup for restore"""
+        self.full_control_cleared_status_backup = self.full_control_status_text.toHtml()
+        self.full_control_status_text.clear()
+        self.btn_restore_full_control_status.setVisible(True)
+
+    def restore_full_control_status(self):
+        """Restore previously cleared full control status text"""
+        if hasattr(self, 'full_control_cleared_status_backup') and self.full_control_cleared_status_backup:
+            current_content = self.full_control_status_text.toHtml()
+            self.full_control_status_text.setHtml(self.full_control_cleared_status_backup + current_content)
+            self.full_control_cleared_status_backup = None
+            self.btn_restore_full_control_status.setVisible(False)
+
+    def search_full_control_status(self, forward=True):
+        """Search for text in full control status box"""
+        search_text = self.full_control_search_input.text()
+        if not search_text:
+            return
+        
+        from PyQt5.QtGui import QTextDocument
+        flags = QTextDocument.FindFlags()
+        if not forward:
+            flags = QTextDocument.FindBackward
+        
+        found = self.full_control_status_text.find(search_text, flags)
+        
+        if not found:
+            # Wrap around: move cursor to start/end and try again
+            cursor = self.full_control_status_text.textCursor()
+            if forward:
+                cursor.movePosition(cursor.Start)
+            else:
+                cursor.movePosition(cursor.End)
+            self.full_control_status_text.setTextCursor(cursor)
+            self.full_control_status_text.find(search_text, flags)
+
     def toggle_rqt(self):
         """Toggle RQT on/off"""
         self._toggle_base_process('rqt', self.btn_launch_rqt, 'RQT', 'rqt', [])
@@ -969,61 +1255,113 @@ class RobotControlUI(QMainWindow):
             button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
  
     def _toggle_base_process(self, process_key, button, name, program, args):
-        """Toggle a base control process on/off and update button state (outputs to base_status_text)"""
+        # Decide status widget
+        status_text = self.full_control_status_text if process_key.startswith('full') else self.base_status_text
+
         if process_key in self.process_map:
-            # Stop the process
+            # ===== STOP PROCESS =====
             process = self.process_map[process_key]
-            # Disconnect finished signal to prevent race condition
+
+            # Disconnect finished to avoid double cleanup
             try:
                 process.finished.disconnect()
-            except:
+            except Exception:
                 pass
- 
-            # For launch processes, kill child processes
-            if process_key in ['mapping', 'localization', 'nav2', 'exploration']:
-                # Add status message for mapping shutdown
-                if process_key == 'mapping':
-                    self.base_status_text.append(f"💾 Saving {name} database...")
-                
-                pid = process.processId()
-                if pid:
-                    try:
-                        # Use SIGINT (same as CTRL+C) for graceful termination
-                        subprocess.run(['pkill', '-INT', '-P', str(pid)], timeout=2, stderr=subprocess.DEVNULL)
-                        # Wait a moment for graceful shutdown
-                        time.sleep(3)
-                    except:
-                        pass
-                self._cleanup_ros_children_of_pid(pid)
 
-            process.terminate()  # SIGTERM - graceful
-            process.waitForFinished(5000)  # Wait up to 5 seconds for graceful shutdown
+            pid = process.processId()
+
+            # Try graceful SIGINT (Ctrl+C equivalent)
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGINT)
+                    # Longer wait for mapping to save rtabmap.db
+                    wait_ms = 8000 if 'mapping' in process_key else 3000
+                    if 'mapping' in process_key:
+                        status_text.append("💾 Saving mapping database... (waiting for shutdown)")
+                    process.waitForFinished(wait_ms)
+                except ProcessLookupError:
+                    # Process already gone
+                    pass
+                except Exception as e:
+                    status_text.append(f"⚠ Could not send SIGINT: {e}")
+
+            # If still running, escalate
             if process.state() == QProcess.Running:
-                process.kill()  # SIGKILL - force kill only if still running
- 
-            del self.process_map[process_key]
+                process.terminate()
+                process.waitForFinished(2000)
+            if process.state() == QProcess.Running:
+                process.kill()
+                process.waitForFinished(2000)
+
+            # Final cleanup
+            if process_key in self.process_map:
+                del self.process_map[process_key]
+
             button.setText(f"Start {name}")
             button.setStyleSheet("")
-            self.base_status_text.append(f"⏹ Stopped {name}")
+            status_text.append(f"⏹ Stopped {name}")
+
+            # Re‑enable mutually exclusive buttons
+            if 'mapping' in process_key:
+                mode = 'full' if process_key.startswith('full') else 'base'
+                btn = self._get_localization_button_for_mode(mode)
+                if btn:
+                    btn.setEnabled(True)
+            elif 'localization' in process_key:
+                mode = 'full' if process_key.startswith('full') else 'base'
+                btn = self._get_mapping_button_for_mode(mode)
+                if btn:
+                    btn.setEnabled(True)
+
+            # Only base mode affects tab states
+            if not process_key.startswith('full') and process_key in ['mapping', 'localization']:
+                self._update_tab_states_for_base()
+
         else:
-            # Start the process
+            # ===== START PROCESS (unchanged) =====
             process = QProcess(self)
             process.setProcessChannelMode(QProcess.MergedChannels)
-            process.readyReadStandardOutput.connect(lambda: self.handle_base_output(process))
+
+            if process_key.startswith('full'):
+                process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
+            else:
+                process.readyReadStandardOutput.connect(lambda: self.handle_base_output(process))
+
             process.finished.connect(lambda: self._on_base_process_finished(process_key, button, name))
- 
-            # Display command in bold green
+
             cmd_str = program + ' ' + ' '.join(args)
-            cursor = self.base_status_text.textCursor()
+            cursor = status_text.textCursor()
             cursor.movePosition(cursor.End)
-            self.base_status_text.setTextCursor(cursor)
-            self.base_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-            cursor.insertText('\n')  # Ensure newline after command
- 
+            status_text.setTextCursor(cursor)
+            status_text.insertHtml(f"<b style='color:#57ab5a;'>▶ {cmd_str}</b>")
+            cursor.insertText('\n')
+
             process.start(program, args)
             self.process_map[process_key] = process
             button.setText(f"Stop {name}")
-            button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+            button.setStyleSheet("background-color:#4CAF50; color:white; font-weight:bold;")
+
+
+            
+    def handle_full_control_output(self, process):
+        """Handle output for full control processes (outputs to full_control_status_text)"""
+        output = process.readAllStandardOutput().data().decode()
+        if output:
+            lines = output.split('\n')
+            for line in lines:
+                # Skip expected shutdown messages
+                if 'process has died' in line and 'exit code -9' in line:
+                    continue
+                
+                # Convert ANSI color codes to HTML
+                html_line = self._ansi_to_html(line)
+                
+                # Use insertHtml to properly render HTML entities
+                cursor = self.full_control_status_text.textCursor()
+                cursor.movePosition(cursor.End)
+                self.full_control_status_text.setTextCursor(cursor)
+                self.full_control_status_text.insertHtml(html_line)
+                cursor.insertText('\n')
  
     def _on_process_finished(self, process_key, button, name):
         """Handle when a process finishes unexpectedly"""
@@ -1044,17 +1382,35 @@ class RobotControlUI(QMainWindow):
             del self.process_map[process_key]
             button.setText(f"Start {name}")
             button.setStyleSheet("")
-            self.base_status_text.append(f"⚠ {name} exited")
+            
+            # Determine which status text to use
+            if process_key.startswith('full'):
+                status_text = self.full_control_status_text
+            else:
+                status_text = self.base_status_text
+            
+            status_text.append(f"{name} exited")
             
             # Re-enable mutually exclusive buttons
-            if process_key == 'mapping':
-                self.btn_launch_localization.setEnabled(True)
-            elif process_key == 'localization':
-                self.btn_launch_mapping.setEnabled(True)
+            if 'mapping' in process_key:
+                mode = 'full' if process_key.startswith('full') else 'base'
+                localization_button = self._get_localization_button_for_mode(mode)
+                if localization_button:
+                    localization_button.setEnabled(True)
+            elif 'localization' in process_key:
+                mode = 'full' if process_key.startswith('full') else 'base'
+                mapping_button = self._get_mapping_button_for_mode(mode)
+                if mapping_button:
+                    mapping_button.setEnabled(True)
             
             # Update tab states when base processes finish
-            self._update_tab_states_for_base()
+            if not process_key.startswith('full') and process_key in ['mapping', 'localization']:
+                self._update_tab_states_for_base()
 
+            elif process_key.startswith('full') and any(
+                p in process_key for p in ['mapping', 'localization', 'nav2', 'exploration']
+            ):
+                self._update_tab_states_for_full_control()
  
     def handle_output(self, process):
         output = process.readAllStandardOutput().data().decode()
@@ -1708,6 +2064,7 @@ class RobotControlUI(QMainWindow):
             'end_effector_pose_node',
             'position_sender_node',
             'align_ee_to_wall',
+            'robot_state_publisher',
         ]
         for pat in patterns:
             try:
