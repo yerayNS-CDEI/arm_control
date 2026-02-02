@@ -612,26 +612,32 @@ class RobotControlUI(QMainWindow):
         full_control_init_layout.addWidget(QLabel("Status Commands:"))
         full_control_init_layout.addWidget(self.status_cmd_combo)
         btn_full_control_send_status = QPushButton("Send Status Command")
-        btn_full_control_send_status.clicked.connect(self.send_status_command)
+        btn_full_control_send_status.clicked.connect(
+            lambda: self.send_status_command(self.full_control_status_text)
+        )
         full_control_init_layout.addWidget(btn_full_control_send_status)
 
         btn_full_control_send_all_status = QPushButton("Send All Status Commands")
-        btn_full_control_send_all_status.clicked.connect(self.send_all_status_commands)
+        btn_full_control_send_all_status.clicked.connect(
+            lambda: self.send_all_status_commands(self.full_control_status_text)
+        )
         full_control_init_layout.addWidget(btn_full_control_send_all_status)
 
         # Reuse control commands combo and button
         full_control_init_layout.addWidget(QLabel("\nControl Commands:"))
         full_control_init_layout.addWidget(self.control_cmd_combo)
         btn_full_control_send_control = QPushButton("Send Control Command")
-        btn_full_control_send_control.clicked.connect(self.send_control_command)
+        btn_full_control_send_control.clicked.connect(
+            lambda: self.send_control_command(self.full_control_status_text)
+        )
         full_control_init_layout.addWidget(btn_full_control_send_control)
 
         full_control_init_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_init_box)
         self.full_control_init_box = full_control_init_box
 
-        # Mapping and Localization Box
-        full_control_mapping_box = QGroupBox("Mapping and Localization")
+        # Mapping, Localization, Navigation, Exploration Box
+        full_control_mapping_box = QGroupBox("Mapping, Localization, Navigation, Exploration")
         full_control_mapping_layout = QVBoxLayout()
         full_control_mapping_box.setLayout(full_control_mapping_layout)
 
@@ -645,26 +651,45 @@ class RobotControlUI(QMainWindow):
         self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:= mode:=full")
         full_control_mapping_layout.addWidget(self.btn_full_control_localization)
 
-        full_control_mapping_layout.addStretch()
-        full_control_boxes_layout.addWidget(full_control_mapping_box)
-
-        # Navigation and Exploration Box
-        full_control_nav_box = QGroupBox("Navigation and Exploration")
-        full_control_nav_layout = QVBoxLayout()
-        full_control_nav_box.setLayout(full_control_nav_layout)
-
         self.btn_full_control_nav2 = QPushButton("Launch Nav2")
         self.btn_full_control_nav2.clicked.connect(lambda: self.toggle_nav2(mode='full', button=self.btn_full_control_nav2, sim_combo=self.full_control_sim_mode_combo))
         self.btn_full_control_nav2.setToolTip("ros2 launch navi_wall navigation_launch.py use_sim_time:=")
-        full_control_nav_layout.addWidget(self.btn_full_control_nav2)
+        full_control_mapping_layout.addWidget(self.btn_full_control_nav2)
 
         self.btn_full_control_exploration = QPushButton("Launch Exploration (explore_lite)")
         self.btn_full_control_exploration.clicked.connect(lambda: self.toggle_exploration(mode='full', button=self.btn_full_control_exploration, sim_combo=self.full_control_sim_mode_combo))
         self.btn_full_control_exploration.setToolTip("ros2 run navi_wall explore --ros-args --params-file config/explore_params.yaml")
-        full_control_nav_layout.addWidget(self.btn_full_control_exploration)
+        full_control_mapping_layout.addWidget(self.btn_full_control_exploration)
 
-        full_control_nav_layout.addStretch()
-        full_control_boxes_layout.addWidget(full_control_nav_box)
+        full_control_mapping_layout.addStretch()
+        full_control_boxes_layout.addWidget(full_control_mapping_box)
+
+        # Troubleshooting Box (Full Control)
+        full_control_troubleshooting_box = QGroupBox("Troubleshooting")
+        full_control_troubleshooting_layout = QVBoxLayout()
+        full_control_troubleshooting_box.setLayout(full_control_troubleshooting_layout)
+
+        self.btn_full_control_view_map = QPushButton("View map")
+        self.btn_full_control_view_map.clicked.connect(
+            lambda: self.toggle_view_map(mode='full', button=self.btn_full_control_view_map)
+        )
+        self.btn_full_control_view_map.setToolTip("rtabmap-databaseViewer rtabmap.db")
+        full_control_troubleshooting_layout.addWidget(self.btn_full_control_view_map)
+
+        self.btn_full_control_list_controllers = QPushButton("List Controllers")
+        self.btn_full_control_list_controllers.clicked.connect(self.run_list_full_controllers)
+        self.btn_full_control_list_controllers.setToolTip("ros2 control list_controllers")
+        full_control_troubleshooting_layout.addWidget(self.btn_full_control_list_controllers)
+
+        self.btn_full_control_rqt = QPushButton("Start RQT")
+        self.btn_full_control_rqt.clicked.connect(
+            lambda: self.toggle_rqt(mode='full', button=self.btn_full_control_rqt)
+        )
+        self.btn_full_control_rqt.setToolTip("rqt")
+        full_control_troubleshooting_layout.addWidget(self.btn_full_control_rqt)
+
+        full_control_troubleshooting_layout.addStretch()
+        full_control_boxes_layout.addWidget(full_control_troubleshooting_box)
 
         # Terminal and Status for Full Control tab (create NEW widgets)
         full_control_terminal_status_layout = QHBoxLayout()
@@ -930,8 +955,10 @@ class RobotControlUI(QMainWindow):
         # Update tab states
         self._update_tab_states_for_arm()
 
-    def send_all_status_commands(self):
+    def send_all_status_commands(self, status_text=None):
         """Send all status commands sequentially"""
+        if status_text is None:
+            status_text = self.status_text
         status_commands = [
             'robotmode',
             'safetystatus',
@@ -941,17 +968,27 @@ class RobotControlUI(QMainWindow):
             'is in remote control'
         ]
         
-        self.status_text.append("=" * 50)
-        self.status_text.append("📋 Sending all status commands...")
-        self.status_text.append("=" * 50)
+        status_text.append("=" * 50)
+        status_text.append("📋 Sending all status commands...")
+        status_text.append("=" * 50)
         
+        success_count = 0
         for command in status_commands:
-            self._send_robot_command(command)
+            response = self._send_robot_command(command, status_text=status_text)
+            if response is not None:
+                success_count += 1
             # Add a small visual separator between commands
-            self.status_text.append("-" * 50)
-        
-        self.status_text.append("✓ All status commands sent")
-        self.status_text.append("")
+            status_text.append("-" * 50)
+
+        if success_count == len(status_commands):
+            status_text.append("✓ All status commands sent")
+        elif success_count == 0:
+            status_text.append("✗ All status commands failed")
+        else:
+            status_text.append(
+                f"⚠ {success_count}/{len(status_commands)} status commands succeeded"
+            )
+        status_text.append("")
 
     def toggle_rqt_controller(self):
         self._toggle_process('rqt_controller', self.btn_rqt_controller, 'RQT Joint Controller',
@@ -987,7 +1024,7 @@ class RobotControlUI(QMainWindow):
             args = ['launch', 'navi_wall', 'mapping_3d.launch.py', 'lidar:=dome', f'mode:={mode}']
         
         process_key = f'{mode}_mapping' if mode != 'base' else 'mapping'
-        display_name = f'Mapping ({mode.title()})' if mode != 'base' else 'Mapping'
+        display_name = 'Mapping'
         
         self._toggle_base_process(process_key, button, display_name, 'ros2', args)
         
@@ -1018,7 +1055,7 @@ class RobotControlUI(QMainWindow):
         lidar = 'dome' if sim_mode != 'true' else 'sick'
         
         process_key = f'{mode}_localization' if mode != 'base' else 'localization'
-        display_name = f'Localization ({mode.title()})' if mode != 'base' else 'Localization'
+        display_name = 'Localization'
         
         self._toggle_base_process(process_key, button, display_name,
                                 'ros2', ['launch', 'navi_wall', 'move_robot.launch.py',
@@ -1028,27 +1065,39 @@ class RobotControlUI(QMainWindow):
         
         # Disable/enable mapping button based on localization state
         mapping_button = self._get_mapping_button_for_mode(mode)
+        disable_buttons = self._get_buttons_to_disable_for_localization(mode)
         if mapping_button:
             if process_key in self.process_map:
                 mapping_button.setEnabled(False)
+                # Also disable other buttons that conflict with localization
+                for btn in disable_buttons:
+                    btn.setEnabled(False)
             else:
                 mapping_button.setEnabled(True)
+                # Re-enable other buttons when localization stops
+                for btn in disable_buttons:
+                    btn.setEnabled(True)
         
         # Update tab states only for base mode
         if mode == 'base':
             self._update_tab_states_for_base()
 
  
-    def toggle_view_map(self):
+    def toggle_view_map(self, mode='base', button=None):
+        if button is None:
+            button = self.btn_view_map
+
         # Get package path for rtabmap.db
         try:
             pkg_share = get_package_share_directory('navi_wall')
             db_path = os.path.join(pkg_share, 'maps', 'rtabmap.db')
         except Exception as e:
-            self.base_status_text.append(f"Error: Could not find navi_wall package: {e}")
+            status_text = self.full_control_status_text if mode == 'full' else self.base_status_text
+            status_text.append(f"Error: Could not find navi_wall package: {e}")
             return
         
-        self._toggle_base_process('view_map', self.btn_view_map, 'View map',
+        process_key = 'full_view_map' if mode == 'full' else 'view_map'
+        self._toggle_base_process(process_key, button, 'View map',
                                  'rtabmap-databaseViewer', [db_path])
     
     def toggle_nav2(self, mode='base', button=None, sim_combo=None):
@@ -1060,7 +1109,7 @@ class RobotControlUI(QMainWindow):
         
         sim_mode = sim_combo.currentText()
         process_key = f'{mode}_nav2' if mode != 'base' else 'nav2'
-        display_name = f'Nav2 ({mode.title()})' if mode != 'base' else 'Nav2'
+        display_name = 'Nav2'
         
         self._toggle_base_process(process_key, button, display_name,
                                 'ros2', ['launch', 'navi_wall', 'navigation_launch.py',
@@ -1081,7 +1130,7 @@ class RobotControlUI(QMainWindow):
             params_file = '/home/zed/ros2_ws/src/navi-wall/config/explore_params.yaml'
         
         process_key = f'{mode}_exploration' if mode != 'base' else 'exploration'
-        display_name = f'Exploration ({mode.title()})' if mode != 'base' else 'Exploration'
+        display_name = 'Exploration'
         
         self._toggle_base_process(process_key, button, display_name,
                                 'ros2', ['run', 'navi_wall', 'explore',
@@ -1097,7 +1146,13 @@ class RobotControlUI(QMainWindow):
         elif mode == 'full':
             return self.btn_full_control_mapping
         return None
-
+    def _get_buttons_to_disable_for_localization(self, mode):
+        if mode == 'base':
+            return [self.btn_launch_mapping, self.btn_launch_exploration, self.btn_launch_nav2]
+        elif mode == 'full':
+            return [self.btn_full_control_mapping, self.btn_full_control_exploration, self.btn_full_control_nav2]
+        return []
+    
     def _get_localization_button_for_mode(self, mode):
         """Get the localization button for a given mode"""
         if mode == 'base':
@@ -1143,9 +1198,12 @@ class RobotControlUI(QMainWindow):
             self.full_control_status_text.setTextCursor(cursor)
             self.full_control_status_text.find(search_text, flags)
 
-    def toggle_rqt(self):
+    def toggle_rqt(self, mode='base', button=None):
         """Toggle RQT on/off"""
-        self._toggle_base_process('rqt', self.btn_launch_rqt, 'RQT', 'rqt', [])
+        if button is None:
+            button = self.btn_launch_rqt
+        process_key = 'full_rqt' if mode == 'full' else 'rqt'
+        self._toggle_base_process(process_key, button, 'RQT', 'rqt', [])
  
     def run_ps_ros(self):
         """Run ps aux | grep ros2 command"""
@@ -1201,6 +1259,38 @@ class RobotControlUI(QMainWindow):
                 self.base_status_text.append(f"<span style='color: #c69026;'>⚠ List controllers command finished with exit code {exit_code}</span>")
             else:
                 self.base_status_text.append("✓ List controllers command completed")
+
+    def run_list_full_controllers(self):
+        """List ROS2 controllers using ros2 control CLI (Full Control tab)"""
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
+
+        # Display command in bold green
+        cmd_str = 'timeout 10 ros2 control list_controllers'
+        cursor = self.full_control_status_text.textCursor()
+        cursor.movePosition(cursor.End)
+        self.full_control_status_text.setTextCursor(cursor)
+        self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+        cursor.insertText('\n')  # Ensure newline after command
+
+        # Run the command with timeout (10 seconds)
+        process_key = 'full_list_base_controllers'
+        process.finished.connect(lambda: self._cleanup_list_full_controllers(process_key))
+        process.start('timeout', ['10', 'ros2', 'control', 'list_controllers'])
+        self.process_map[process_key] = process
+
+    def _cleanup_list_full_controllers(self, process_key):
+        """Clean up finished list controllers process (Full Control tab)"""
+        if process_key in self.process_map:
+            exit_code = self.process_map[process_key].exitCode()
+            del self.process_map[process_key]
+            if exit_code != 0:
+                self.full_control_status_text.append(
+                    f"<span style='color: #c69026;'>⚠ List controllers command finished with exit code {exit_code}</span>"
+                )
+            else:
+                self.full_control_status_text.append("✓ List controllers command completed")
  
     def _toggle_process(self, process_key, button, name, program, args):
         """Toggle a process on/off and update button state"""
@@ -1275,7 +1365,7 @@ class RobotControlUI(QMainWindow):
                 try:
                     os.kill(pid, signal.SIGINT)
                     # Longer wait for mapping to save rtabmap.db
-                    wait_ms = 8000 if 'mapping' in process_key else 3000
+                    wait_ms = 5000 if 'mapping' in process_key else 3000
                     if 'mapping' in process_key:
                         status_text.append("💾 Saving mapping database... (waiting for shutdown)")
                     process.waitForFinished(wait_ms)
@@ -1402,6 +1492,9 @@ class RobotControlUI(QMainWindow):
                 mapping_button = self._get_mapping_button_for_mode(mode)
                 if mapping_button:
                     mapping_button.setEnabled(True)
+                # Re-enable other buttons disabled during localization
+                for btn in self._get_buttons_to_disable_for_localization(mode):
+                    btn.setEnabled(True)
             
             # Update tab states when base processes finish
             if not process_key.startswith('full') and process_key in ['mapping', 'localization']:
@@ -1453,8 +1546,10 @@ class RobotControlUI(QMainWindow):
                 self.base_status_text.insertHtml(html_line)
                 cursor.insertText('\n')  # Use plain text newline to preserve formatting
  
-    def _connect_robot_socket(self):
+    def _connect_robot_socket(self, status_text=None):
         """Connect to robot dashboard if not already connected"""
+        if status_text is None:
+            status_text = self.status_text
         if self.robot_socket is None:
             try:
                 self.robot_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1463,45 +1558,47 @@ class RobotControlUI(QMainWindow):
                 # Read initial connection message
                 data = self.robot_socket.recv(1024)
                 response = data.decode('utf-8').strip()
-                self.status_text.append(f"✓ Connected to robot: {response}")
+                status_text.append(f"✓ Connected to robot: {response}")
                 return True
             except Exception as e:
-                self.status_text.append(f"<span style='color: #f47067;'>✗ Failed to connect to robot: {e}</span>")
+                status_text.append(f"<span style='color: #f47067;'>✗ Failed to connect to robot: {e}</span>")
                 self.robot_socket = None
                 return False
         return True
  
-    def _send_robot_command(self, command):
+    def _send_robot_command(self, command, status_text=None):
         """Send command to robot dashboard and return response"""
-        if not self._connect_robot_socket():
+        if status_text is None:
+            status_text = self.status_text
+        if not self._connect_robot_socket(status_text=status_text):
             return None
  
         try:
             self.robot_socket.send(str.encode(command + '\n'))
-            self.status_text.append(f"<b style='color: #57ab5a;'>→ SENT: {command}</b>")
-            self.status_text.append("")  # Add newline after command
+            status_text.append(f"<b style='color: #57ab5a;'>→ SENT: {command}</b>")
+            status_text.append("")  # Add newline after command
  
             data = self.robot_socket.recv(1024)
             response = data.decode('utf-8').strip()
-            self.status_text.append(f"← RECV: {response}")
+            status_text.append(f"← RECV: {response}")
             return response
         except Exception as e:
-            self.status_text.append(f"<span style='color: #f47067;'>✗ Command failed: {e}</span>")
+            status_text.append(f"<span style='color: #f47067;'>✗ Command failed: {e}</span>")
             # Close socket on error so it reconnects next time
             if self.robot_socket:
                 self.robot_socket.close()
                 self.robot_socket = None
             return None
  
-    def send_status_command(self):
+    def send_status_command(self, status_text=None):
         """Send selected status command to robot"""
         command = self.status_cmd_combo.currentText()
-        self._send_robot_command(command)
+        self._send_robot_command(command, status_text=status_text)
  
-    def send_control_command(self):
+    def send_control_command(self, status_text=None):
         """Send selected control command to robot"""
         command = self.control_cmd_combo.currentText()
-        self._send_robot_command(command)
+        self._send_robot_command(command, status_text=status_text)
  
     def list_controllers(self):
         """List ROS2 controllers using ros2 control CLI"""
