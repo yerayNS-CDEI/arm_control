@@ -2,8 +2,8 @@ import os
 import sys
 import time
 import numpy as np
-from exp_utils import robot_types
-from rm4d.robots import Simulator
+from rm4d_lib.exp_utils import robot_types
+from rm4d_lib.robots import Simulator
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 

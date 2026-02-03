@@ -83,6 +83,7 @@ install(CODE "
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/planner/planner_node.py \${LIB_DIR}/planner_node)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/planner/visualize_wall_discretization_client.py \${LIB_DIR}/visualize_wall_discretization_client)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/planner/wall_discretization_node.py \${LIB_DIR}/wall_discretization_node)
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/planner/optimal_base_service.py \${LIB_DIR}/optimal_base_service)
   
   # Sensor nodes
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/hyperspectral_node.py \${LIB_DIR}/hyperspectral_node)

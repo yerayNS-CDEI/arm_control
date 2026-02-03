@@ -41,6 +41,7 @@ setup(
             'planner_node = planner.planner_node:main',
             'visualize_wall_discretization_client = planner.visualize_wall_discretization_client:main',
             'wall_discretization_node = planner.wall_discretization_node:main',
+            'optimal_base_service = planner.optimal_base_service:main',
             
             # Sensor nodes
             'hyperspectral_node = sensors.hyperspectral_node:main',
