@@ -603,32 +603,58 @@ class RobotControlUI(QMainWindow):
         full_control_boxes_layout = QHBoxLayout()
         full_control_tab_layout.addLayout(full_control_boxes_layout)
 
-        # Initialization Box (reuse existing components)
+        # Initialization Box (create new comboboxes for Full Control)
         full_control_init_box = QGroupBox("Robot Initialization")
         full_control_init_layout = QVBoxLayout()
         full_control_init_box.setLayout(full_control_init_layout)
 
-        # Reuse status commands combo and buttons
+        # Create separate comboboxes for Full Control tab
         full_control_init_layout.addWidget(QLabel("Status Commands:"))
-        full_control_init_layout.addWidget(self.status_cmd_combo)
+        self.full_control_status_cmd_combo = QComboBox()
+        self.full_control_status_cmd_combo.addItems([
+            'robotmode',
+            'safetystatus',
+            'programState',
+            'running',
+            'get loaded program',
+            'is in remote control'
+        ])
+        full_control_init_layout.addWidget(self.full_control_status_cmd_combo)
+        
         btn_full_control_send_status = QPushButton("Send Status Command")
         btn_full_control_send_status.clicked.connect(
-            lambda: self.send_status_command(self.full_control_status_text)
+            lambda: self.send_full_control_status_command()
         )
         full_control_init_layout.addWidget(btn_full_control_send_status)
 
         btn_full_control_send_all_status = QPushButton("Send All Status Commands")
         btn_full_control_send_all_status.clicked.connect(
-            lambda: self.send_all_status_commands(self.full_control_status_text)
+            lambda: self.send_all_full_control_status_commands()
         )
         full_control_init_layout.addWidget(btn_full_control_send_all_status)
 
-        # Reuse control commands combo and button
+        # Control commands
         full_control_init_layout.addWidget(QLabel("\nControl Commands:"))
-        full_control_init_layout.addWidget(self.control_cmd_combo)
+        self.full_control_control_cmd_combo = QComboBox()
+        self.full_control_control_cmd_combo.addItems([
+            'power on',
+            'power off',
+            'brake release',
+            'play',
+            'pause',
+            'shutdown',
+            'stop',
+            'close popup',
+            'restart safety',
+            'load Test_external_control.urp',
+            'close safety popup',
+            'unlock protective stop'
+        ])
+        full_control_init_layout.addWidget(self.full_control_control_cmd_combo)
+        
         btn_full_control_send_control = QPushButton("Send Control Command")
         btn_full_control_send_control.clicked.connect(
-            lambda: self.send_control_command(self.full_control_status_text)
+            lambda: self.send_full_control_control_command()
         )
         full_control_init_layout.addWidget(btn_full_control_send_control)
 
@@ -643,7 +669,7 @@ class RobotControlUI(QMainWindow):
 
         self.btn_full_control_mapping = QPushButton("Start Mapping")
         self.btn_full_control_mapping.clicked.connect(lambda: self.toggle_mapping(mode='full', button=self.btn_full_control_mapping, sim_combo=self.full_control_sim_mode_combo))
-        self.btn_full_control_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:= lidar:=sick mode:=full")
+        self.btn_full_control_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:= <mode> lidar:=sick mode:=full")
         full_control_mapping_layout.addWidget(self.btn_full_control_mapping)
 
         self.btn_full_control_localization = QPushButton("Start Localization")
@@ -663,6 +689,21 @@ class RobotControlUI(QMainWindow):
 
         full_control_mapping_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_mapping_box)
+
+        # Sensors Box (Full Control)
+        full_control_sensors_box = QGroupBox("Sensors")
+        full_control_sensors_layout = QVBoxLayout()
+        full_control_sensors_box.setLayout(full_control_sensors_layout)
+
+        self.btn_full_control_align_ee = QPushButton("Start Align EE to Wall")
+        self.btn_full_control_align_ee.clicked.connect(
+            lambda: self.toggle_full_control_align_ee()
+        )
+        self.btn_full_control_align_ee.setToolTip("ros2 run arm_control align_ee_to_wall")
+        full_control_sensors_layout.addWidget(self.btn_full_control_align_ee)
+
+        full_control_sensors_layout.addStretch()
+        full_control_boxes_layout.addWidget(full_control_sensors_box)
 
         # Troubleshooting Box (Full Control)
         full_control_troubleshooting_box = QGroupBox("Troubleshooting")
@@ -687,6 +728,57 @@ class RobotControlUI(QMainWindow):
         )
         self.btn_full_control_rqt.setToolTip("rqt")
         full_control_troubleshooting_layout.addWidget(self.btn_full_control_rqt)
+
+        # List ROS2 Processes button
+        btn_full_control_ps_ros = QPushButton("List ROS2 Processes")
+        btn_full_control_ps_ros.clicked.connect(self.run_full_control_ps_ros)
+        btn_full_control_ps_ros.setToolTip("ps aux | grep -E 'ros2|robot'")
+        full_control_troubleshooting_layout.addWidget(btn_full_control_ps_ros)
+
+        # ROS2 Topics Section
+        full_control_troubleshooting_layout.addWidget(QLabel("\nROS2 Topics:"))
+        
+        # Topic selector with refresh button
+        topic_selector_layout = QHBoxLayout()
+        self.topics_combo = QComboBox()
+        self.topics_combo.setEditable(True)  # Enable search/filtering
+        self.topics_combo.setMinimumWidth(200)
+        topic_selector_layout.addWidget(self.topics_combo)
+        
+        btn_refresh_topics = QPushButton("Refresh")
+        btn_refresh_topics.clicked.connect(self.refresh_topics_list)
+        btn_refresh_topics.setToolTip("Refresh available ROS2 topics")
+        btn_refresh_topics.setMaximumWidth(80)
+        topic_selector_layout.addWidget(btn_refresh_topics)
+        full_control_troubleshooting_layout.addLayout(topic_selector_layout)
+        
+        # Topic action buttons
+        topic_actions_layout = QHBoxLayout()
+        
+        btn_topic_bw = QPushButton("Bandwidth")
+        btn_topic_bw.clicked.connect(self.check_topic_bandwidth)
+        btn_topic_bw.setToolTip("Check topic bandwidth (ros2 topic bw)")
+        topic_actions_layout.addWidget(btn_topic_bw)
+        
+        btn_topic_hz = QPushButton("Frequency")
+        btn_topic_hz.clicked.connect(self.check_topic_frequency)
+        btn_topic_hz.setToolTip("Check topic frequency (ros2 topic hz)")
+        topic_actions_layout.addWidget(btn_topic_hz)
+        
+        btn_topic_echo = QPushButton("Echo Once")
+        btn_topic_echo.clicked.connect(self.echo_topic_once)
+        btn_topic_echo.setToolTip("Echo topic once (ros2 topic echo --once)")
+        topic_actions_layout.addWidget(btn_topic_echo)
+        
+        full_control_troubleshooting_layout.addLayout(topic_actions_layout)
+        
+        # Topic info display area
+        self.topic_info_display = QTextEdit()
+        self.topic_info_display.setReadOnly(True)
+        self.topic_info_display.setMaximumHeight(60)
+        self.topic_info_display.setPlaceholderText("Topic bandwidth and frequency info will appear here...")
+        self.topic_info_display.setStyleSheet("background-color: #f6f8fa; color: #1f2328; border: 1px solid #d0d7de; font-family: 'Courier New', monospace; padding: 4px;")
+        full_control_troubleshooting_layout.addWidget(self.topic_info_display)
 
         full_control_troubleshooting_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_troubleshooting_box)
@@ -767,6 +859,9 @@ class RobotControlUI(QMainWindow):
         self.JOINT_TAB_INDEX = 2
         self.FULL_CONTROL_TAB_INDEX = 3
         self._update_init_box_state()
+        
+        # Initial topics list refresh
+        QTimer.singleShot(1000, self.refresh_topics_list)  # Delay 1s to ensure ROS is ready
         
     def _update_full_control_sim_mode(self):
         """Sync full control sim mode with arm and base sim modes"""
@@ -1292,6 +1387,230 @@ class RobotControlUI(QMainWindow):
             else:
                 self.full_control_status_text.append("✓ List controllers command completed")
  
+    def refresh_topics_list(self):
+        """Refresh the list of available ROS2 topics"""
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        
+        # Display command in status
+        cmd_str = 'ros2 topic list'
+        cursor = self.full_control_status_text.textCursor()
+        cursor.movePosition(cursor.End)
+        self.full_control_status_text.setTextCursor(cursor)
+        self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+        cursor.insertText('\n')
+        
+        # Start process and capture output
+        process.finished.connect(lambda: self._on_topics_list_finished(process))
+        process.start('ros2', ['topic', 'list'])
+        
+    def _on_topics_list_finished(self, process):
+        """Process the output of ros2 topic list command"""
+        output = process.readAllStandardOutput().data().decode('utf-8')
+        
+        # Clear and populate the combobox
+        self.topics_combo.clear()
+        topics = [line.strip() for line in output.split('\n') if line.strip()]
+        
+        if topics:
+            self.topics_combo.addItems(topics)
+            self.full_control_status_text.append(f"✓ Found {len(topics)} topics")
+        else:
+            self.full_control_status_text.append("<span style='color: #c69026;'>⚠ No topics found</span>")
+    
+    def check_topic_bandwidth(self):
+        """Check bandwidth of selected topic"""
+        topic = self.topics_combo.currentText()
+        if not topic:
+            self.topic_info_display.setPlainText("⚠ No topic selected")
+            return
+        
+        self.topic_info_display.setPlainText("Measuring bandwidth...")
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        
+        # Store flags and buffers for this process
+        self._bw_output_buffer = ""
+        self._bw_result_found = False
+        process.readyReadStandardOutput.connect(lambda: self._accumulate_bw_output(process))
+        
+        # Start process with timeout
+        process_key = 'topic_bw'
+        process.finished.connect(lambda: self._on_bandwidth_finished(process))
+        process.start('timeout', ['4', 'ros2', 'topic', 'bw', topic])
+        self.process_map[process_key] = process
+    
+    def _accumulate_bw_output(self, process):
+        """Accumulate bandwidth output as it arrives and parse first result"""
+        output = process.readAllStandardOutput().data().decode('utf-8')
+        self._bw_output_buffer += output
+        
+        # If we haven't found a result yet, try to parse it now
+        if not self._bw_result_found:
+            lines = self._bw_output_buffer.split('\n')
+            for line in lines:
+                if 'Message size mean:' in line:
+                    try:
+                        parts = line.split('Message size mean:')
+                        if len(parts) > 1:
+                            mean_part = parts[1].strip().split()[0:2]  # Get "0.07 MB"
+                            msg_size_mean = ' '.join(mean_part)
+                            self.topic_info_display.setPlainText(f"Message size mean: {msg_size_mean}")
+                            self._bw_result_found = True
+                            # Kill the process since we got what we need
+                            if 'topic_bw' in self.process_map:
+                                self.process_map['topic_bw'].kill()
+                            break
+                    except:
+                        pass
+    
+    def check_topic_frequency(self):
+        """Check frequency of selected topic"""
+        topic = self.topics_combo.currentText()
+        if not topic:
+            self.topic_info_display.setPlainText("⚠ No topic selected")
+            return
+        
+        self.topic_info_display.setPlainText("Measuring frequency...")
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        
+        # Store flags and buffers for this process
+        self._hz_output_buffer = ""
+        self._hz_result_found = False
+        process.readyReadStandardOutput.connect(lambda: self._accumulate_hz_output(process))
+        
+        # Start process with timeout
+        process_key = 'topic_hz'
+        process.finished.connect(lambda: self._on_frequency_finished(process))
+        process.start('timeout', ['4', 'ros2', 'topic', 'hz', topic])
+        self.process_map[process_key] = process
+    
+    def _accumulate_hz_output(self, process):
+        """Accumulate frequency output as it arrives and parse first result"""
+        output = process.readAllStandardOutput().data().decode('utf-8')
+        self._hz_output_buffer += output
+        
+        # If we haven't found a result yet, try to parse it now
+        if not self._hz_result_found:
+            lines = self._hz_output_buffer.split('\n')
+            for line in lines:
+                if 'average rate:' in line:
+                    try:
+                        parts = line.split('average rate:')
+                        if len(parts) > 1:
+                            avg_rate = parts[1].strip().split()[0]
+                            self.topic_info_display.setPlainText(f"Average rate: {avg_rate} Hz")
+                            self._hz_result_found = True
+                            # Kill the process since we got what we need
+                            if 'topic_hz' in self.process_map:
+                                self.process_map['topic_hz'].kill()
+                            break
+                    except:
+                        pass
+    
+    def echo_topic_once(self):
+        """Echo selected topic once"""
+        topic = self.topics_combo.currentText()
+        if not topic:
+            self.full_control_status_text.append("<span style='color: #c69026;'>⚠ No topic selected</span>")
+            return
+        
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
+        
+        # Display command
+        cmd_str = f'timeout 10 ros2 topic echo --once {topic}'
+        cursor = self.full_control_status_text.textCursor()
+        cursor.movePosition(cursor.End)
+        self.full_control_status_text.setTextCursor(cursor)
+        self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+        cursor.insertText('\n')
+        
+        # Start process with timeout
+        process_key = f'topic_echo_{topic}'
+        process.finished.connect(lambda: self._cleanup_topic_command(process_key))
+        process.start('timeout', ['10', 'ros2', 'topic', 'echo', '--once', topic])
+        self.process_map[process_key] = process
+    
+    def _on_bandwidth_finished(self, process):
+        """Handle bandwidth process completion"""
+        if 'topic_bw' in self.process_map:
+            del self.process_map['topic_bw']
+        
+        # If we didn't get a result during execution, try one more time
+        if not self._bw_result_found:
+            final_output = process.readAllStandardOutput().data().decode('utf-8')
+            output = self._bw_output_buffer + final_output
+            
+            if not output.strip():
+                self.topic_info_display.setPlainText("⚠ No data received")
+                return
+            
+            # Try to find the result in the complete output
+            lines = output.split('\n')
+            for line in lines:
+                if 'Message size mean:' in line:
+                    try:
+                        parts = line.split('Message size mean:')
+                        if len(parts) > 1:
+                            mean_part = parts[1].strip().split()[0:2]
+                            msg_size_mean = ' '.join(mean_part)
+                            self.topic_info_display.setPlainText(f"Message size mean: {msg_size_mean}")
+                            return
+                    except:
+                        pass
+            
+            self.topic_info_display.setPlainText("⚠ Could not parse bandwidth data")
+        
+        # Clear buffer
+        self._bw_output_buffer = ""
+    
+    def _on_frequency_finished(self, process):
+        """Handle frequency process completion"""
+        if 'topic_hz' in self.process_map:
+            del self.process_map['topic_hz']
+        
+        # If we didn't get a result during execution, try one more time
+        if not self._hz_result_found:
+            final_output = process.readAllStandardOutput().data().decode('utf-8')
+            output = self._hz_output_buffer + final_output
+            
+            if not output.strip():
+                self.topic_info_display.setPlainText("⚠ No data received")
+                return
+            
+            # Try to find the result in the complete output
+            lines = output.split('\n')
+            for line in lines:
+                if 'average rate:' in line:
+                    try:
+                        parts = line.split('average rate:')
+                        if len(parts) > 1:
+                            avg_rate = parts[1].strip().split()[0]
+                            self.topic_info_display.setPlainText(f"Average rate: {avg_rate} Hz")
+                            return
+                    except:
+                        pass
+            
+            self.topic_info_display.setPlainText("⚠ Could not parse frequency data")
+        
+        # Clear buffer
+        self._hz_output_buffer = ""
+    
+    def _cleanup_topic_command(self, process_key):
+        """Clean up finished topic command process"""
+        if process_key in self.process_map:
+            exit_code = self.process_map[process_key].exitCode()
+            del self.process_map[process_key]
+            if exit_code == 124:  # timeout exit code
+                self.full_control_status_text.append("<span style='color: #c69026;'>⚠ Command timed out</span>")
+            elif exit_code != 0:
+                self.full_control_status_text.append(f"<span style='color: #c69026;'>⚠ Command finished with exit code {exit_code}</span>")
+            else:
+                self.full_control_status_text.append("✓ Command completed")
+
     def _toggle_process(self, process_key, button, name, program, args):
         """Toggle a process on/off and update button state"""
         if process_key in self.process_map:
@@ -1600,6 +1919,127 @@ class RobotControlUI(QMainWindow):
         command = self.control_cmd_combo.currentText()
         self._send_robot_command(command, status_text=status_text)
  
+    def send_full_control_status_command(self):
+        """Send selected status command to robot (Full Control tab)"""
+        command = self.full_control_status_cmd_combo.currentText()
+        self._send_robot_command(command, status_text=self.full_control_status_text)
+    
+    def send_all_full_control_status_commands(self):
+        """Send all status commands sequentially (Full Control tab)"""
+        status_commands = [
+            'robotmode',
+            'safetystatus',
+            'programState',
+            'running',
+            'get loaded program',
+            'is in remote control'
+        ]
+        
+        self.full_control_status_text.append("=" * 50)
+        self.full_control_status_text.append("📋 Sending all status commands...")
+        self.full_control_status_text.append("=" * 50)
+        
+        success_count = 0
+        for command in status_commands:
+            response = self._send_robot_command(command, status_text=self.full_control_status_text)
+            if response is not None:
+                success_count += 1
+            # Add a small visual separator between commands
+            self.full_control_status_text.append("-" * 50)
+
+        if success_count == len(status_commands):
+            self.full_control_status_text.append("✓ All status commands sent")
+        elif success_count == 0:
+            self.full_control_status_text.append("✗ All status commands failed")
+        else:
+            self.full_control_status_text.append(
+                f"⚠ {success_count}/{len(status_commands)} status commands succeeded"
+            )
+        self.full_control_status_text.append("")
+    
+    def send_full_control_control_command(self):
+        """Send selected control command to robot (Full Control tab)"""
+        command = self.full_control_control_cmd_combo.currentText()
+        self._send_robot_command(command, status_text=self.full_control_status_text)
+    
+    def run_full_control_ps_ros(self):
+        """Run ps aux | grep ros2 command (Full Control tab)"""
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
+ 
+        # Display command in bold green
+        cmd_str = 'ps aux | grep -E \'ros2|robot\' | grep -v grep'
+        cursor = self.full_control_status_text.textCursor()
+        cursor.movePosition(cursor.End)
+        self.full_control_status_text.setTextCursor(cursor)
+        self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+        cursor.insertText('\n')  # Ensure newline after command
+ 
+        # Run the command using shell to support pipe
+        process_key = 'full_ps_ros2'
+        process.finished.connect(lambda: self._cleanup_full_ps_ros(process_key))
+        process.start('bash', ['-c', 'ps aux | grep -E \'ros2|robot\' | grep -v grep'])
+        self.process_map[process_key] = process
+ 
+    def _cleanup_full_ps_ros(self, process_key):
+        """Clean up finished ps aux process (Full Control tab)"""
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+    
+    def toggle_full_control_align_ee(self):
+        """Toggle Align EE to Wall (Full Control tab)"""
+        self._toggle_full_control_process('full_align_ee_to_wall', self.btn_full_control_align_ee, 
+                                         'Align EE to Wall', 'ros2', 
+                                         ['run', 'arm_control', 'align_ee_to_wall'])
+    
+    def _toggle_full_control_process(self, process_key, button, name, program, args):
+        """Toggle a process on/off for Full Control tab"""
+        if process_key in self.process_map:
+            # Stop the process
+            process = self.process_map[process_key]
+            try:
+                process.finished.disconnect()
+            except:
+                pass
+ 
+            process.terminate()
+            process.waitForFinished(3000)
+            if process.state() == QProcess.Running:
+                process.kill()
+ 
+            del self.process_map[process_key]
+            button.setText(f"Start {name}")
+            button.setStyleSheet("")
+            self.full_control_status_text.append(f"⏹ Stopped {name}")
+        else:
+            # Start the process
+            process = QProcess(self)
+            process.setProcessChannelMode(QProcess.MergedChannels)
+            process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
+            process.finished.connect(lambda: self._on_full_control_process_finished(process_key, button, name))
+ 
+            # Display command in bold green
+            cmd_str = program + ' ' + ' '.join(args)
+            cursor = self.full_control_status_text.textCursor()
+            cursor.movePosition(cursor.End)
+            self.full_control_status_text.setTextCursor(cursor)
+            self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+            cursor.insertText('\n')  # Ensure newline after command
+ 
+            process.start(program, args)
+            self.process_map[process_key] = process
+            button.setText(f"Stop {name}")
+            button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+    
+    def _on_full_control_process_finished(self, process_key, button, name):
+        """Handle when a Full Control process finishes unexpectedly"""
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+            button.setText(f"Start {name}")
+            button.setStyleSheet("")
+            self.full_control_status_text.append(f"⚠ {name} exited")
+
     def list_controllers(self):
         """List ROS2 controllers using ros2 control CLI"""
         process = QProcess(self)
