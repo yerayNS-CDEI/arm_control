@@ -8,7 +8,7 @@ from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from scipy.spatial.transform import Rotation as R
 
-from robotic_arm_planner_interfaces.srv import OptimalBase
+from arm_control.srv import OptimalBase
 from planner.rm4d_lib.reachability_map import ReachabilityMap4D
 from planner.rm4d_lib.base_pos_grid import BasePosGrid
 from planner.rm4d_lib.robots import Simulator, UR10E
@@ -224,7 +224,7 @@ class OptimalBaseService(Node):
             return res
 
         except Exception as e:
-            self.get_logger().error("Computation failed.")
+            self.get_logger().error(f"Computation failed.  Error: {e}")
             res.success = False
             res.message = f"Computation failed. Error: {e}"
             return res

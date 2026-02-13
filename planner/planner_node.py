@@ -460,6 +460,7 @@ class PlannerNode(Node):
     def goal_callback(self, msg: PoseStamped):
         if self.emergency_stop:
             self.get_logger().warn("Emergency stop is active, aborting trajectory planning. Ignoring goal.")
+            self.execution_complete = True  # Ensure we can accept new goals after emergency is cleared
             return  # Aborting if emergency state is active
         
         if not self.execution_complete:
@@ -565,6 +566,7 @@ class PlannerNode(Node):
         self.get_logger().info(f"Found path with length {len(path)}")
         if not path:
             self.get_logger().warn("No path found!")
+            self.execution_complete = True  # Mark execution as complete to allow new goals
             return
 
         # Convert path to world coordinates
@@ -656,6 +658,7 @@ class PlannerNode(Node):
 
         if np.any(np.isnan(joint_values)):
             self.get_logger().error("IK solution contains NaN. Aborting.")
+            self.execution_complete = True  # Mark execution as complete to allow new goals
             return
 
         self.get_logger().info(f"Joint values: {all_joint_values_print}")
@@ -684,6 +687,7 @@ class PlannerNode(Node):
         if self.invalid_path:  # Verifies if invalid IK in path
             self.get_logger().warn("Invalid path detected. Halting trajectory.")
             self.invalid_path = False
+            self.execution_complete = True  # Mark execution as complete to allow new goals
             return
         
         # Publish trajectory
