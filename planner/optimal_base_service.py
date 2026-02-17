@@ -7,6 +7,10 @@ import rclpy
 from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from scipy.spatial.transform import Rotation as R
+from nav_msgs.msg import OccupancyGrid
+from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import ColorRGBA
+from geometry_msgs.msg import Point
 
 from arm_control.srv import OptimalBase
 from planner.rm4d_lib.reachability_map import ReachabilityMap4D
@@ -39,10 +43,230 @@ class OptimalBaseService(Node):
         self.srv = self.create_service(OptimalBase, 'compute_optimal_base', self.handle_request)
         self.get_logger().info("Service already running.")
 
+        # Costmap subscription for automatic obstacle detection
+        self.declare_parameter('costmap_topic', '/global_costmap/costmap')
+        self.declare_parameter('costmap_obstacle_threshold', 50)  # occupancy > 50 is obstacle
+        
+        costmap_topic = self.get_parameter('costmap_topic').value
+        self.costmap = None
+        self.costmap_sub = self.create_subscription(
+            OccupancyGrid,
+            costmap_topic,
+            self.costmap_callback,
+            10
+        )
+        self.get_logger().info(f"Subscribed to costmap: {costmap_topic}")
+
+        # Marker publisher for grid visualization
+        self.grid_marker_pub = self.create_publisher(MarkerArray, 'optimal_base/grid_markers', 10)
+        self.get_logger().info("Grid marker publisher created: /optimal_base/grid_markers")
+
         # Sim opcional como atributo para mantener la ventana viva si se pide
         self.sim = None
 
     # Helpers
+    def costmap_callback(self, msg):
+        """Store the latest costmap"""
+        self.costmap = msg
+        self.get_logger().debug(f"Costmap updated: {msg.info.width}x{msg.info.height}, resolution={msg.info.resolution}")
+    
+    def _apply_costmap_to_grid(self, grid, x_limits, y_limits, goal_positions_xy):
+        """Directly apply costmap occupancy to the reachability grid
+        
+        Args:
+            grid: The reachability grid to modify (sets occupied cells to 0)
+            x_limits: [min_x, max_x] bounds
+            y_limits: [min_y, max_y] bounds
+            goal_positions_xy: Nx2 array of goal XY positions for computing ROI
+        """
+        if self.costmap is None:
+            self.get_logger().warn("No costmap available")
+            return
+        
+        threshold = self.get_parameter('costmap_obstacle_threshold').value
+        info = self.costmap.info
+        costmap_width = info.width
+        costmap_height = info.height
+        costmap_resolution = info.resolution
+        costmap_origin_x = info.origin.position.x
+        costmap_origin_y = info.origin.position.y
+        
+        # Compute costmap world bounds
+        costmap_min_x = costmap_origin_x
+        costmap_max_x = costmap_origin_x + costmap_width * costmap_resolution
+        costmap_min_y = costmap_origin_y
+        costmap_max_y = costmap_origin_y + costmap_height * costmap_resolution
+        
+        # Compute ROI around goals
+        goals_min_x = np.min(goal_positions_xy[:, 0])
+        goals_max_x = np.max(goal_positions_xy[:, 0])
+        goals_min_y = np.min(goal_positions_xy[:, 1])
+        goals_max_y = np.max(goal_positions_xy[:, 1])
+        
+        margin_x = (x_limits[1] - x_limits[0]) * 0.5
+        margin_y = (y_limits[1] - y_limits[0]) * 0.5
+        
+        roi_min_x = max(x_limits[0], goals_min_x - margin_x)
+        roi_max_x = min(x_limits[1], goals_max_x + margin_x)
+        roi_min_y = max(y_limits[0], goals_min_y - margin_y)
+        roi_max_y = min(y_limits[1], goals_max_y + margin_y)
+        
+        # Reshape costmap data
+        costmap_data = np.array(self.costmap.data).reshape((costmap_height, costmap_width))
+        
+        # Grid parameters
+        n_bins_x, n_bins_y = grid.shape
+        grid_res_x = (x_limits[1] - x_limits[0]) / n_bins_x
+        grid_res_y = (y_limits[1] - y_limits[0]) / n_bins_y
+        
+        # Iterate through reachability grid cells
+        obstacle_count = 0
+        outside_costmap_count = 0
+        unknown_count = 0
+        
+        for i in range(n_bins_x):
+            for j in range(n_bins_y):
+                # Get world coordinates of this grid cell center
+                x = x_limits[0] + (i + 0.5) * grid_res_x
+                y = y_limits[0] + (j + 0.5) * grid_res_y
+                
+                # Skip if outside ROI (but don't mark as obstacle)
+                if x < roi_min_x or x > roi_max_x or y < roi_min_y or y > roi_max_y:
+                    continue
+                
+                # Check if cell is outside costmap bounds - mark as invalid
+                if x < costmap_min_x or x > costmap_max_x or y < costmap_min_y or y > costmap_max_y:
+                    grid[i, j] = 0
+                    outside_costmap_count += 1
+                    continue
+                
+                # Convert to costmap indices
+                costmap_i = int((x - costmap_origin_x) / costmap_resolution)
+                costmap_j = int((y - costmap_origin_y) / costmap_resolution)
+                
+                # Check bounds (should always be in bounds now, but keep for safety)
+                if 0 <= costmap_i < costmap_width and 0 <= costmap_j < costmap_height:
+                    costmap_value = costmap_data[costmap_j, costmap_i]
+                    
+                    # Mark unknown space (-1) as invalid
+                    if costmap_value < 0:
+                        grid[i, j] = 0
+                        unknown_count += 1
+                    # Mark occupied cells as obstacles
+                    elif costmap_value > threshold:
+                        grid[i, j] = 0
+                        obstacle_count += 1
+                else:
+                    # Outside bounds - mark as invalid
+                    grid[i, j] = 0
+                    outside_costmap_count += 1
+        
+        self.get_logger().info(
+            f"Applied costmap: {obstacle_count} obstacles, {unknown_count} unknown cells, "
+            f"{outside_costmap_count} outside costmap bounds in ROI [{roi_min_x:.2f}, {roi_max_x:.2f}] x [{roi_min_y:.2f}, {roi_max_y:.2f}]. "
+            f"Costmap bounds: [{costmap_min_x:.2f}, {costmap_max_x:.2f}] x [{costmap_min_y:.2f}, {costmap_max_y:.2f}]"
+        )
+    
+    def _publish_grid_markers(self, grid, x_limits, y_limits, selected_pos=None):
+        """Publish grid visualization as RViz markers
+        
+        Args:
+            grid: The reachability grid to visualize
+            x_limits: [min_x, max_x] bounds
+            y_limits: [min_y, max_y] bounds
+            selected_pos: Optional [x, y] of selected base position to highlight
+        """
+        marker_array = MarkerArray()
+        
+        n_bins_x, n_bins_y = grid.shape
+        grid_res_x = (x_limits[1] - x_limits[0]) / n_bins_x
+        grid_res_y = (y_limits[1] - y_limits[0]) / n_bins_y
+        cell_size = min(grid_res_x, grid_res_y) * 0.9  # Slightly smaller for gaps
+        
+        # Normalize grid values for color mapping
+        max_val = np.max(grid)
+        if max_val < 1e-9:
+            max_val = 1.0
+        
+        marker_id = 0
+        for i in range(n_bins_x):
+            for j in range(n_bins_y):
+                value = grid[i, j]
+                
+                # Skip cells with zero or very low values for cleaner visualization
+                if value < 0.01:
+                    continue
+                
+                # Create marker for this cell
+                marker = Marker()
+                marker.header.frame_id = "map"
+                marker.header.stamp = self.get_clock().now().to_msg()
+                marker.ns = "reachability_grid"
+                marker.id = marker_id
+                marker.type = Marker.CUBE
+                marker.action = Marker.ADD
+                
+                # Position
+                x = x_limits[0] + (i + 0.5) * grid_res_x
+                y = y_limits[0] + (j + 0.5) * grid_res_y
+                marker.pose.position.x = x
+                marker.pose.position.y = y
+                marker.pose.position.z = 0.01  # Slightly above ground
+                marker.pose.orientation.w = 1.0
+                
+                # Size
+                marker.scale.x = cell_size
+                marker.scale.y = cell_size
+                marker.scale.z = 0.02
+                
+                # Color based on value (blue to green to red for increasing values)
+                normalized_value = value / max_val
+                marker.color = ColorRGBA()
+                
+                if normalized_value < 0.5:
+                    # Blue to cyan to green (0.0 to 0.5)
+                    ratio = normalized_value * 2.0
+                    marker.color.r = 0.0
+                    marker.color.g = ratio
+                    marker.color.b = 1.0 - ratio * 0.5
+                else:
+                    # Green to yellow to red (0.5 to 1.0)
+                    ratio = (normalized_value - 0.5) * 2.0
+                    marker.color.r = ratio
+                    marker.color.g = 1.0 - ratio * 0.5
+                    marker.color.b = 0.0
+                
+                marker.color.a = 0.8  # Semi-transparent
+                
+                marker_array.markers.append(marker)
+                marker_id += 1
+        
+        # Add marker for selected position
+        if selected_pos is not None:
+            marker = Marker()
+            marker.header.frame_id = "map"
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.ns = "selected_base"
+            marker.id = marker_id
+            marker.type = Marker.CYLINDER
+            marker.action = Marker.ADD
+            
+            marker.pose.position.x = selected_pos[0]
+            marker.pose.position.y = selected_pos[1]
+            marker.pose.position.z = 0.05
+            marker.pose.orientation.w = 1.0
+            
+            marker.scale.x = 0.3
+            marker.scale.y = 0.3
+            marker.scale.z = 0.1
+            
+            marker.color = ColorRGBA(r=1.0, g=0.0, b=1.0, a=1.0)  # Magenta
+            
+            marker_array.markers.append(marker)
+        
+        self.grid_marker_pub.publish(marker_array)
+        self.get_logger().info(f"Published {len(marker_array.markers)} grid markers to RViz")
+    
     def _poses_from_flat(self, arr):
         if len(arr) == 0:
             # default de 4 poses de tu ejemplo
@@ -131,20 +355,34 @@ class OptimalBaseService(Node):
             dec = int(req.round_decimals)
             gi[0].grid = np.round(gi[0].grid, dec)
 
-            # 5) Obstáculos (rects + circles)
+            # 5) Obstáculos: costmap directo + mensaje
             rects = []
+            circles = []
+            
+            # Extract goal positions for ROI computation
+            goal_positions_xy = np.column_stack([poses_ee[:, 0, 3], poses_ee[:, 1, 3]])
+            
+            # Apply costmap directly to grid if available
+            if self.costmap is not None:
+                self.get_logger().info("Applying global_costmap directly to grid")
+                self._apply_costmap_to_grid(gi[0].grid, x_limits, y_limits, goal_positions_xy)
+            else:
+                self.get_logger().info("No costmap available")
+            
+            # Add obstacles from service request
             if len(req.obstacle_rects) % 4 != 0:
                 raise ValueError("obstacle_rects debe ser múltiplo de 4.")
             for k in range(0, len(req.obstacle_rects), 4):
                 if k+3 < len(req.obstacle_rects):
                     rects.append(list(req.obstacle_rects[k:k+4]))
 
-            circles = []
             if len(req.obstacle_circles) % 3 != 0:
                 raise ValueError("obstacle_circles debe ser múltiplo de 3.")
             for k in range(0, len(req.obstacle_circles), 3):
                 if k+2 < len(req.obstacle_circles):
                     circles.append(list(req.obstacle_circles[k:k+3]))
+            
+            self.get_logger().info(f"Service request obstacles: {len(rects)} rects, {len(circles)} circles")
 
             self._apply_rect_obstacles(gi[0].grid, rects, x_limits, y_limits)
             self._apply_circle_obstacles(gi[0].grid, circles, x_limits, y_limits)
@@ -270,6 +508,9 @@ class OptimalBaseService(Node):
                 # Fallback: use centroid-based selection
                 x_sel, y_sel = min(cands_xy, key=lambda xy: np.hypot(xy[0]-cx, xy[1]-cy))
                 self.get_logger().info("No valid orientation vectors, using centroid-based selection")
+
+            # Publish grid visualization for RViz
+            self._publish_grid_markers(gi[0].grid, x_limits, y_limits, selected_pos=[x_sel, y_sel])
 
             # 7) (Opcional) Visualización si se pide en la request
             if req.enable_simulator:
