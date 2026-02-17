@@ -154,7 +154,7 @@ class OptimalBaseService(Node):
                 res.message = "No hay posiciones válidas tras aplicar obstáculos."
                 return res
 
-            # 6) Selección: óptimos → min_dist → más centrado
+            # 6) Selección: óptimos → min_dist → detrás de goals según orientación
             G = gi[0].grid
             max_val = float(np.max(G))
             max_idx = np.argwhere(G == max_val)
@@ -164,14 +164,112 @@ class OptimalBaseService(Node):
             cx, cy = float(np.mean(xs)), float(np.mean(ys))
             min_dist = float(req.min_dist)
 
+            # Fit a plane through the goal positions (XY projection)
+            # We'll use PCA to find the plane's normal direction
+            goal_points_xy = np.column_stack([xs, ys])  # Nx2 array
+            centroid_2d = np.array([cx, cy])
+            
+            # Center the points
+            centered_points = goal_points_xy - centroid_2d
+            
+            # Compute covariance and find principal components
+            if len(centered_points) > 1:
+                cov = np.cov(centered_points.T)
+                eigenvalues, eigenvectors = np.linalg.eig(cov)
+                # The normal to the plane is the eigenvector with smallest eigenvalue
+                # But for 2D, we can also use the perpendicular to the main direction
+                min_eig_idx = np.argmin(eigenvalues)
+                plane_normal = eigenvectors[:, min_eig_idx]
+                # Ensure it's normalized
+                plane_normal = plane_normal / (np.linalg.norm(plane_normal) + 1e-9)
+            else:
+                # Single goal or all goals at same position - no plane, use default
+                plane_normal = None
+
+            def get_perpendicular_dist_to_plane(x, y):
+                """Returns perpendicular distance from (x,y) to the plane of goals"""
+                if plane_normal is None:
+                    # Fallback to point distance
+                    return np.min(np.hypot(x - xs, y - ys))
+                # Vector from centroid to candidate
+                vec = np.array([x - cx, y - cy])
+                # Perpendicular distance is the projection onto the plane normal
+                perp_dist = abs(np.dot(vec, plane_normal))
+                return perp_dist
+
             def ok_min_dist(x, y):
-                return np.min(np.hypot(x - xs, y - ys)) >= min_dist
+                return get_perpendicular_dist_to_plane(x, y) >= min_dist
 
+            # Filter candidates that meet minimum perpendicular distance requirement
             cands_xy = [(x, y) for (x, y) in cands_xy_all if ok_min_dist(x, y)]
+            
             if not cands_xy:
-                cands_xy = cands_xy_all
+                self.get_logger().warn(f"No candidates meet min_dist={min_dist}m perpendicular to goals plane. Using closest available candidates.")
+                # Fallback: use candidates closest to meeting the requirement
+                cands_with_dist = [(xy, get_perpendicular_dist_to_plane(xy[0], xy[1])) for xy in cands_xy_all]
+                cands_with_dist.sort(key=lambda x: -x[1])  # Sort by distance descending
+                cands_xy = [xy for xy, _ in cands_with_dist[:min(20, len(cands_with_dist))]]
+            
+            self.get_logger().info(f"Plane normal: {plane_normal}, centroid: ({cx:.2f}, {cy:.2f})")
 
-            x_sel, y_sel = min(cands_xy, key=lambda xy: np.hypot(xy[0]-cx, xy[1]-cy))
+            # Compute "behind" direction based on goal orientations
+            # Extract forward direction (Z-axis) from each pose's rotation matrix
+            forward_vectors = []
+            for pose in poses_ee:
+                # Z-axis (forward direction) is the 3rd column of rotation matrix
+                forward_z = pose[:3, 2]
+                # Project to XY plane and normalize
+                forward_xy = np.array([forward_z[0], forward_z[1]])
+                if np.linalg.norm(forward_xy) > 1e-6:
+                    forward_xy = forward_xy / np.linalg.norm(forward_xy)
+                    forward_vectors.append(forward_xy)
+            
+            # Compute average "behind" direction (opposite of forward)
+            if forward_vectors:
+                avg_forward = np.mean(forward_vectors, axis=0)
+                avg_forward = avg_forward / (np.linalg.norm(avg_forward) + 1e-9)
+                behind_direction = -avg_forward  # Behind is opposite of forward
+                
+                # Score each candidate: balance "behind" alignment with proximity to goals
+                def combined_score(x, y):
+                    # Vector from centroid to candidate
+                    vec_to_cand = np.array([x - cx, y - cy])
+                    dist_to_centroid = np.linalg.norm(vec_to_cand)
+                    
+                    # Alignment score: prefer positions "behind" the goals
+                    alignment = 0.0
+                    if dist_to_centroid > 1e-6:
+                        vec_to_cand_norm = vec_to_cand / dist_to_centroid
+                        # Dot product: positive when candidate is in "behind" direction
+                        alignment = np.dot(vec_to_cand_norm, behind_direction)
+                        # Only consider candidates with positive alignment (actually behind)
+                        alignment = max(0.0, alignment)
+                    
+                    # Distance score: prefer positions closer to centroid but respect min_dist
+                    # Use perpendicular distance to the goals plane for safety
+                    perp_dist = get_perpendicular_dist_to_plane(x, y)
+                    # Penalize positions too close to min_dist, prefer slightly farther
+                    safety_margin = 0.2  # prefer at least 0.2m beyond min_dist
+                    distance_score = 1.0 / (dist_to_centroid + 0.3)  # Closer to centroid is better
+                    
+                    # Combined score: balance alignment and proximity
+                    # Higher weight on distance to keep base closer
+                    score = alignment * 0.3 + distance_score * 0.7
+                    
+                    # Apply penalty if too close to min_dist perpendicular to plane (safety margin violation)
+                    if perp_dist < min_dist + safety_margin:
+                        penalty = (min_dist + safety_margin - perp_dist) / safety_margin
+                        score *= (1.0 - 0.5 * penalty)  # Up to 50% penalty
+                    
+                    return score
+                
+                # Select candidate with best combined score
+                x_sel, y_sel = max(cands_xy, key=lambda xy: combined_score(xy[0], xy[1]))
+                self.get_logger().info(f"Base positioned behind goals with proximity: forward={avg_forward}, behind={behind_direction}")
+            else:
+                # Fallback: use centroid-based selection
+                x_sel, y_sel = min(cands_xy, key=lambda xy: np.hypot(xy[0]-cx, xy[1]-cy))
+                self.get_logger().info("No valid orientation vectors, using centroid-based selection")
 
             # 7) (Opcional) Visualización si se pide en la request
             if req.enable_simulator:
