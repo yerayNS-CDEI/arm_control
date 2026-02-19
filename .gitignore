@@ -2,3 +2,5 @@ arm_control/
 **/__pycache__/
 control/robot_communication.log
 **/resource/voxels_data_0.05_step_20_orientations.pkl
+**/resource/**.csv
+**/resource/**.csv#
