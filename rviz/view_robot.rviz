@@ -11,7 +11,7 @@ Panels:
         - /TF1/Frames1
         - /Marker1
       Splitter Ratio: 0.48235294222831726
-    Tree Height: 784
+    Tree Height: 354
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -56,7 +56,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /arm/robot_description
+        Value: /robot_description
       Enabled: true
       Links:
         All Links Enabled: true
@@ -64,42 +64,62 @@ Visualization Manager:
         Expand Link Details: false
         Expand Tree: false
         Link Tree Style: Links in Alphabetic Order
-        base:
+        arm_base:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        base_link:
+        arm_base_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        base_link_inertia:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        flange:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        forearm_link:
+        arm_base_link_inertia:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        ft_frame:
+        arm_flange:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        shoulder_link:
+        arm_forearm_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        tool0:
+        arm_ft_frame:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        upper_arm_link:
+        arm_shoulder_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_tool0:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        arm_upper_arm_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_wrist_1_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_wrist_2_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_wrist_3_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        ground_plane:
           Alpha: 1
           Show Axes: false
           Show Trail: false
@@ -108,26 +128,11 @@ Visualization Manager:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        wrist_1_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wrist_2_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wrist_3_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
       Mass Properties:
         Inertia: false
         Mass: false
       Name: RobotModel
-      TF Prefix: arm
+      TF Prefix: ""
       Update Interval: 0
       Value: true
       Visual Enabled: true
@@ -148,49 +153,35 @@ Visualization Manager:
       Frame Timeout: 15
       Frames:
         All Enabled: false
-        arm/base:
+        arm_base:
           Value: true
-        arm/base_link:
+        arm_base_link:
           Value: false
-        arm/base_link_inertia:
+        arm_base_link_inertia:
           Value: false
-        arm/flange:
+        arm_flange:
           Value: false
-        arm/forearm_link:
+        arm_forearm_link:
           Value: false
-        arm/ft_frame:
+        arm_ft_frame:
           Value: false
-        arm/shoulder_link:
+        arm_shoulder_link:
           Value: false
-        arm/tool0:
+        arm_tool0:
           Value: true
-        arm/upper_arm_link:
+        arm_upper_arm_link:
           Value: false
-        arm/world:
+        arm_wrist_1_link:
           Value: false
-        arm/wrist_1_link:
+        arm_wrist_2_link:
           Value: false
-        arm/wrist_2_link:
+        arm_wrist_3_link:
           Value: false
-        arm/wrist_3_link:
+        column_link:
           Value: false
-        base:
-          Value: false
-        base_link:
-          Value: false
-        base_link_inertia:
-          Value: false
-        flange:
-          Value: false
-        ft_frame:
-          Value: false
-        tool0:
-          Value: false
-        tool0_controller:
+        ground_plane:
           Value: false
         world:
-          Value: false
-        wrist_3_link:
           Value: false
       Marker Scale: 1
       Name: TF
@@ -198,22 +189,24 @@ Visualization Manager:
       Show Axes: true
       Show Names: false
       Tree:
-        arm/world:
-          arm/base_link:
-            arm/base:
+        world:
+          arm_base_link:
+            arm_base:
               {}
-            arm/base_link_inertia:
-              arm/shoulder_link:
-                arm/upper_arm_link:
-                  arm/forearm_link:
-                    arm/wrist_1_link:
-                      arm/wrist_2_link:
-                        arm/wrist_3_link:
-                          arm/flange:
-                            arm/tool0:
+            arm_base_link_inertia:
+              arm_shoulder_link:
+                arm_upper_arm_link:
+                  arm_forearm_link:
+                    arm_wrist_1_link:
+                      arm_wrist_2_link:
+                        arm_wrist_3_link:
+                          arm_flange:
+                            arm_tool0:
                               {}
-                          arm/ft_frame:
+                          arm_ft_frame:
                             {}
+          ground_plane:
+            {}
       Update Interval: 0
       Value: true
     - Class: rviz_default_plugins/Marker
@@ -232,7 +225,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: arm/base
+    Fixed Frame: arm_base
     Frame Rate: 30
   Name: root
   Tools:
@@ -275,25 +268,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 2.484722137451172
+      Distance: 4.192470550537109
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.05827032029628754
-        Y: 0.055752597749233246
-        Z: 0.4264746606349945
+        X: -0.061846040189266205
+        Y: -0.15752223134040833
+        Z: 0.6858258843421936
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: -0.15520301461219788
+      Pitch: 0.2147969752550125
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 2.8904082775115967
+      Yaw: 2.395406484603882
     Saved: ~
 Window Geometry:
   Displays:
@@ -301,7 +294,7 @@ Window Geometry:
   Height: 1016
   Hide Left Dock: true
   Hide Right Dock: true
-  QMainWindow State: 000000ff00000000fd000000040000000000000156000003a2fc0200000008fb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073000000003b000003a2000000c700fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c0000026100000001000001100000039efc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000003d0000039e000000a000fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000004420000003efc0100000002fb0000000800540069006d00650100000000000004420000000000000000fb0000000800540069006d00650100000000000004500000000000000000000003c0000003a200000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000400000000000001560000039efc0200000008fb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073000000003d0000039e000000c900fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c0000026100000001000001100000039efc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000003d0000039e000000a400fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000004420000003efc0100000002fb0000000800540069006d00650100000000000004420000000000000000fb0000000800540069006d00650100000000000004500000000000000000000003c00000039e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Tool Properties:
