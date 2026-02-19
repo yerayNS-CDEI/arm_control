@@ -7,8 +7,8 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
-from navi_wall_interfaces.srv import HyperspectralCommand, HyperspectralConfig
-from .sensors_lib.lenz_client import LenzClient
+from arm_control.srv import HyperspectralCommand, HyperspectralConfig
+from sensors_lib.lenz_client import LenzClient
 import threading
 import time
 import matplotlib
@@ -18,6 +18,7 @@ import csv
 import os
 from datetime import datetime
 from ament_index_python.packages import get_package_share_directory
+import numpy as np
 
 
 class HyperspectralNode(Node):
@@ -241,7 +242,7 @@ class HyperspectralNode(Node):
                     self.vis.connect()
                     self.nir.connect()
                     time.sleep(3)
-                    
+
                     # Reconfigure
                     self._configure_sensors(
                         self.vis_mtr, self.vis_mti,
@@ -312,8 +313,15 @@ class HyperspectralNode(Node):
 
         # Set response message
         if response.vis_ok and response.nir_ok:
-            response.message = f"OK: {cmd} completed successfully"
+            vis_max_idx = np.argmax(response.vis_spectrum)
+            nir_max_idx = np.argmax(response.nir_spectrum)
+            vis_max_wl = self.vis_wavelengths[vis_max_idx]
+            nir_max_wl = self.nir_wavelengths[nir_max_idx]
+            
+            # Formatar el missatge de resposta
+            response.message = f"OK: {cmd} completat. Pic VIS: {vis_max_wl:.1f} nm | Pic NIR: {nir_max_wl:.1f} nm"
             self.get_logger().info(response.message)
+
         else:
             response.message = f"PARTIAL: VIS={response.vis_ok}, NIR={response.nir_ok}"
             self.get_logger().warning(response.message)
