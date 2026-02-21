@@ -138,7 +138,7 @@ class PublisherJointTrajectoryActionClient(Node):
         goal_msg = FollowJointTrajectory.Goal()
 
         trajectory = deepcopy(self.planned_trajectory)
-        duration_between_points = 1.0
+        duration_between_points = 0.5
 
         for i, point in enumerate(trajectory.points):
             total_sec = duration_between_points * (i + 1)

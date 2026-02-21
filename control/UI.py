@@ -1633,6 +1633,9 @@ class RobotControlUI(QMainWindow):
                         pass
                 # Extra cleanup for child ROS processes spawned by launch files
                 self._cleanup_ros_children_of_pid(pid)
+                # Kill Gazebo processes when stopping Arm launch
+                if process_key == 'arm_launch':
+                    self._kill_gazebo_processes()
  
             process.terminate()
             process.waitForFinished(3000)
@@ -1701,6 +1704,10 @@ class RobotControlUI(QMainWindow):
             if process.state() == QProcess.Running:
                 process.kill()
                 process.waitForFinished(2000)
+
+            # Kill Gazebo processes when stopping mapping or localization
+            if 'mapping' in process_key or 'localization' in process_key:
+                self._kill_gazebo_processes()
 
             # Final cleanup
             if process_key in self.process_map:
@@ -2631,6 +2638,23 @@ class RobotControlUI(QMainWindow):
                         pass
         except:
             pass
+
+    def _kill_gazebo_processes(self):
+        """Kill newer Gazebo (Ignition/gz) processes."""
+        # List of Gazebo/Ignition process patterns to kill
+        gz_patterns = [
+            'gz sim',
+            'ign gazebo',
+            'ruby.*gz',
+            'gzserver',
+            'gz-sim',
+        ]
+        
+        for pattern in gz_patterns:
+            try:
+                subprocess.run(['pkill', '-9', '-f', pattern], timeout=2, stderr=subprocess.DEVNULL)
+            except:
+                pass
  
 if __name__ == '__main__':
     app = QApplication(sys.argv)

@@ -4,6 +4,7 @@ from launch.actions import (
     IncludeLaunchDescription,
     OpaqueFunction,
     RegisterEventHandler,
+    AppendEnvironmentVariable,
 )
 from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit
@@ -11,6 +12,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+import os
 
 def launch_setup(context, *args, **kwargs):
 
@@ -34,6 +36,9 @@ def launch_setup(context, *args, **kwargs):
     initial_joint_controllers = PathJoinSubstitution(
         [FindPackageShare("navi_wall"), "config", controllers_file]
     )
+
+    # Get package share directory for resource path
+    pkg_share = FindPackageShare("arm_control").find("arm_control")
 
     initial_positions_file_abs = PathJoinSubstitution(
         [FindPackageShare("arm_control"), "config", initial_positions_file]
@@ -83,7 +88,9 @@ def launch_setup(context, *args, **kwargs):
             "tf_prefix:=",
             tf_prefix,
             " ",
-            "sim_gazebo:=true",
+            "sim_gazebo:=false",
+            " ",
+            "sim_ignition:=true",
             " ",
             "simulation_controllers:=",
             initial_joint_controllers,
@@ -142,21 +149,22 @@ def launch_setup(context, *args, **kwargs):
     # Gazebo nodes
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            [FindPackageShare("gazebo_ros"), "/launch", "/gazebo.launch.py"]
+            [FindPackageShare("ros_gz_sim"), "/launch", "/gz_sim.launch.py"]
         ),
         launch_arguments={
+            'gz_args': ['-r -v4 '],
             "gui": gazebo_gui,
+             'on_exit_shutdown': 'true'
         }.items(),
         condition=IfCondition(PythonExpression(["'", mode, "' == 'arm'"])),
     )
 
     # Spawn robot
     gazebo_spawn_robot = Node(
-        package="gazebo_ros",
-        executable="spawn_entity.py",
+        package="ros_gz_sim",
+        executable="create",
         name="spawn_ur",
-        arguments=["-entity", "ur",
-                   "-topic", "robot_description", 
+        arguments=[ "-topic", "robot_description", 
                    '-x', '2.5',
                    '-y', '-2.0',
                    '-z', '0.15',
@@ -164,14 +172,44 @@ def launch_setup(context, *args, **kwargs):
                    ],
         output="screen",
     )
+    
+    # Bridge
+    bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=['/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist',
+            '/odom@nav_msgs/msg/Odometry@gz.msgs.Odometry',
+            '/camera/image_raw@sensor_msgs/msg/Image@gz.msgs.Image',
+            '/camera/camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo',
+            '/scan@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan',
+            '/joint_states@sensor_msgs/msg/JointState@gz.msgs.Model',
+            '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'],
+        output='screen',
+        condition=IfCondition(PythonExpression(["'", mode, "' == 'arm'"])),
+    )
+
+    # Set GZ_SIM_RESOURCE_PATH so Gazebo can find package:// URIs for meshes
+    set_gz_resource_path = AppendEnvironmentVariable(
+        name='GZ_SIM_RESOURCE_PATH',
+        value=os.path.dirname(pkg_share),
+    )
+
+    # Also set IGN_GAZEBO_RESOURCE_PATH for backwards compatibility
+    set_ign_resource_path = AppendEnvironmentVariable(
+        name='IGN_GAZEBO_RESOURCE_PATH',
+        value=os.path.dirname(pkg_share),
+    )
 
     nodes_to_start = [
+        set_gz_resource_path,
+        set_ign_resource_path,
         robot_state_publisher_node,
         joint_state_broadcaster_spawner,
         delay_rviz_after_joint_state_broadcaster_spawner,
         initial_joint_controller_spawner_stopped,
         initial_joint_controller_spawner_started,
         gazebo,
+        bridge,
         gazebo_spawn_robot,
     ]
 
