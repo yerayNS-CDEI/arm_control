@@ -1,4 +1,5 @@
 from launch import LaunchDescription
+from ament_index_python.packages import get_package_share_directory
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
@@ -146,13 +147,16 @@ def launch_setup(context, *args, **kwargs):
         condition=UnlessCondition(start_joint_controller),
     )
 
+    world = LaunchConfiguration('world_file')
+
+
     # Gazebo nodes
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             [FindPackageShare("ros_gz_sim"), "/launch", "/gz_sim.launch.py"]
         ),
         launch_arguments={
-            'gz_args': ['-r -v4 '],
+            'gz_args': ['-r -v4 ', world],
             "gui": gazebo_gui,
              'on_exit_shutdown': 'true'
         }.items(),
@@ -324,6 +328,21 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "mode", default_value="full", description="Launch mode full|arm", choices=['full', 'arm'],
+        )
+        
+    )
+
+    default_world = os.path.join(
+        get_package_share_directory("navi_wall"),
+        'worlds', 'empty_world',
+        'empty_world.world'
+        )
+      
+    declared_arguments.append(
+        DeclareLaunchArgument(
+        'world_file',
+        default_value=default_world,
+        description='World to load'
         )
     )
 
