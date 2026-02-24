@@ -153,11 +153,15 @@ def launch_setup(context, *args, **kwargs):
     # Gazebo nodes
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            [FindPackageShare("ros_gz_sim"), "/launch", "/gz_sim.launch.py"]
+            PathJoinSubstitution([
+                FindPackageShare('ros_gz_sim'),
+                'launch',
+                'gz_sim.launch.py'
+            ])
         ),
         launch_arguments={
-            'gz_args': ['-r -v4 ', world],
-            "gui": gazebo_gui,
+            'gz_args': ['-r ', world],
+            # "gui": gazebo_gui,
              'on_exit_shutdown': 'true'
         }.items(),
         condition=IfCondition(PythonExpression(["'", mode, "' == 'arm'"])),
@@ -181,12 +185,7 @@ def launch_setup(context, *args, **kwargs):
     bridge = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
-        arguments=['/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist',
-            '/odom@nav_msgs/msg/Odometry@gz.msgs.Odometry',
-            '/camera/image_raw@sensor_msgs/msg/Image@gz.msgs.Image',
-            '/camera/camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo',
-            '/scan@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan',
-            '/joint_states@sensor_msgs/msg/JointState@gz.msgs.Model',
+        arguments=[
             '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'],
         output='screen',
         condition=IfCondition(PythonExpression(["'", mode, "' == 'arm'"])),
