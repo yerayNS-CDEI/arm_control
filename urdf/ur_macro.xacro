@@ -58,8 +58,8 @@
 
 
     <xacro:if value="${generate_ros2_control_tag}">
-      <!-- ros2 control include -->
-      <xacro:include filename="$(find ur_description)/urdf/ur.ros2_control.xacro" />
+      <!-- ros2 control include (using local override for Gazebo Ignition) -->
+      <xacro:include filename="$(find arm_control)/urdf/ur.ros2_control.xacro" />
       <!-- ros2 control instance -->
       <xacro:ur_ros2_control
         name="${name}"

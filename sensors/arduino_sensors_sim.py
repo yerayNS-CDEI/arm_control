@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Range
+from sensor_msgs.msg import LaserScan, Range
 from std_msgs.msg import Header, Float32MultiArray
 import math
 import threading
@@ -17,7 +17,7 @@ class SimulatedSensorNode(Node):
         # Declare parameters
         self.declare_parameter('batch_size', 5)
         self.declare_parameter('calc_type', 0)  # 0: median, 1: average
-        self.declare_parameter('publish_rate', 0.5)  # Hz
+        self.declare_parameter('publish_rate', 1.0)  # Hz
         
         # Get parameters
         self.batch_size = self.get_parameter('batch_size').value
@@ -32,13 +32,13 @@ class SimulatedSensorNode(Node):
         
         # Subscribe to simulated ultrasonic sensors (A, B, C)
         self.create_subscription(
-            Range, '/distance_sensors/A', 
+            LaserScan, '/distance_sensors/A', 
             lambda msg: self.sensor_callback(msg, 1), sensor_qos)
         self.create_subscription(
-            Range, '/distance_sensors/B', 
+            LaserScan, '/distance_sensors/B', 
             lambda msg: self.sensor_callback(msg, 2), sensor_qos)
         self.create_subscription(
-            Range, '/distance_sensors/C', 
+            LaserScan, '/distance_sensors/C', 
             lambda msg: self.sensor_callback(msg, 0), sensor_qos)
         
           # Publishers (matching Arduino node)
@@ -94,20 +94,20 @@ class SimulatedSensorNode(Node):
                 pass
     
     def sensor_callback(self, msg, sensor_idx):
-        """Store incoming Range messages from Gazebo sensors A, B, C"""
+        """Store incoming LaserScan messages from Gazebo sensors A, B, C"""
         try:
             # Validate range
-            if not math.isfinite(msg.range):
+            if not math.isfinite(msg.ranges[0]):
                 self.get_logger().warn(f'Sensor {sensor_idx}: Invalid range (inf/nan), skipping')
                 return
             
-            if msg.range < msg.min_range or msg.range > msg.max_range:
+            if msg.ranges[0] < msg.range_min or msg.ranges[0] > msg.range_max:
                 # Out of range - use max as fallback
-                self.buffer_ultra[sensor_idx].append(msg.max_range * 100.0) 
-                self.get_logger().debug(f'Sensor {sensor_idx}: Out of range, using max={msg.max_range}')
+                self.buffer_ultra[sensor_idx].append(msg.range_max * 100.0) 
+                self.get_logger().debug(f'Sensor {sensor_idx}: Out of range, using max={msg.range_max:.2f}m')
             else:
                 # Valid range - convert to cm for buffer (like Arduino)
-                self.buffer_ultra[sensor_idx].append(msg.range * 100.0)
+                self.buffer_ultra[sensor_idx].append(msg.ranges[0] * 100.0)
                 
         except Exception as e:
             self.get_logger().error(f'Sensor {sensor_idx} callback error: {e}')

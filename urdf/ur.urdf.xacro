@@ -129,14 +129,14 @@
    </xacro:ur_robot>
 
    <xacro:if value="$(arg sim_gazebo)">
-    <!-- Gazebo plugins -->
+    <!-- Gazebo Ignition/Gazebo Sim plugins (sim_gazebo now uses Gazebo Ignition, not Classic) -->
     <gazebo reference="world">
     </gazebo>
     <gazebo>
-      <plugin filename="libgazebo_ros2_control.so" name="gazebo_ros2_control">
+      <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
         <parameters>$(arg simulation_controllers)</parameters>
+        <controller_manager_node_name>$(arg tf_prefix)controller_manager</controller_manager_node_name>
         <ros>
-          <!-- <namespace>/arm</namespace> -->
           <remapping>/robot_description:=/arm/robot_description</remapping>
         </ros>
       </plugin>
@@ -144,13 +144,16 @@
   </xacro:if>
 
   <xacro:if value="$(arg sim_ignition)">
-    <!-- Gazebo plugins -->
+    <!-- Gazebo Ignition/Gazebo Sim plugins (explicit sim_ignition flag) -->
     <gazebo reference="world">
     </gazebo>
     <gazebo>
-      <plugin filename="libign_ros2_control-system.so" name="ign_ros2_control::IgnitionROS2ControlPlugin">
+      <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
         <parameters>$(arg simulation_controllers)</parameters>
         <controller_manager_node_name>$(arg tf_prefix)controller_manager</controller_manager_node_name>
+        <ros>
+          <remapping>/robot_description:=/arm/robot_description</remapping>
+        </ros>
       </plugin>
     </gazebo>
   </xacro:if>
