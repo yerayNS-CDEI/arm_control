@@ -332,7 +332,9 @@ class PlannerNode(Node):
         2) End-neighbor rule:   drop wn if goal->w(n-1) is significantly closer than goal->wn
         3) Progress rule start: drop w1 if w1 is farther from goal than cur is (w1 is "behind")
         4) Progress rule end:   drop wn if wn is farther from cur than goal is (wn is "beyond")
-        5) If 1 waypoint remains: drop it if direct cur<->goal is better than using it from both sides
+        5) Start-detour rule: drop w1 if cur->w2 is shorter than (cur->w1 + w1->w2)
+        6) End-detour rule: drop wn if w(n-1)->goal is shorter than (w(n-1)->wn + wn->goal)
+        7) If 1 waypoint remains: drop it if direct cur<->goal is better than using it from both sides
         """
         if not path_world:
             if log:
@@ -346,6 +348,11 @@ class PlannerNode(Node):
             dy = a[1] - b[1]
             dz = a[2] - b[2]
             return dx*dx + dy*dy + dz*dz
+        
+        def d(a, b):
+            # Actual distance (not squared)
+            import math
+            return math.sqrt(d2(a, b))
 
         tol2 = float(tol_m) * float(tol_m)
         cur = (float(current_pos[0]), float(current_pos[1]), float(current_pos[2]))
@@ -366,6 +373,20 @@ class PlannerNode(Node):
                         f"d2(cur,w1)={d2(cur,w1):.4f} d2(cur,w2)={d2(cur,w2):.4f}"
                     )
                 pw.pop(0)
+
+            # Detour rule (re-evaluate after possible pop)
+            if len(pw) >= 2:
+                w1, w2 = pw[0], pw[1]
+                d_direct = d(cur, w2)
+                d_detour = d(cur, w1) + d(w1, w2)
+                if d_direct + tol_m < d_detour:
+                    if log:
+                        self.get_logger().info(
+                            "[prune] start detour: drop w1 (detour longer than direct) | "
+                            f"cur={cur} w1={w1} w2={w2} | "
+                            f"d(cur,w2)={d_direct:.4f} d(cur,w1)+d(w1,w2)={d_detour:.4f}"
+                        )
+                    pw.pop(0)
 
             # Progress rule (re-evaluate current first waypoint after possible pop)
             if len(pw) >= 1:
@@ -392,6 +413,20 @@ class PlannerNode(Node):
                         f"d2(goal,wn_1)={d2(goal,wn_1):.4f} d2(goal,wn)={d2(goal,wn):.4f}"
                     )
                 pw.pop(-1)
+
+            # Detour rule (re-evaluate after possible pop)
+            if len(pw) >= 2:
+                wn_1, wn = pw[-2], pw[-1]
+                d_direct = d(wn_1, goal)
+                d_detour = d(wn_1, wn) + d(wn, goal)
+                if d_direct + tol_m < d_detour:
+                    if log:
+                        self.get_logger().info(
+                            "[prune] end detour: drop wn (detour longer than direct) | "
+                            f"goal={goal} wn_1={wn_1} wn={wn} | "
+                            f"d(wn_1,goal)={d_direct:.4f} d(wn_1,wn)+d(wn,goal)={d_detour:.4f}"
+                        )
+                    pw.pop(-1)
 
             # Progress rule (re-evaluate current last waypoint after possible pop)
             if len(pw) >= 1:
@@ -571,6 +606,7 @@ class PlannerNode(Node):
 
         # Convert path to world coordinates
         path_world_raw = [grid_to_world(i, j, k, self.x_vals, self.y_vals, self.z_vals) for i, j, k in path]
+        self.get_logger().error(f"Raw path waypoints (pre-prune): {path_world_raw}")
         
         # Debug: publish raw path (pre-prune)
         self.publish_ee_path_markers(
