@@ -103,7 +103,7 @@ class PlannerNode(Node):
         """Publish a wall marker for RViz visualization."""
         marker = Marker()
         marker.header.frame_id = "map"  # Change to your robot's base frame if different
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = rclpy.time.Time().to_msg()
         marker.ns = "obstacles"
         marker.id = 1
         marker.type = Marker.CUBE
@@ -169,7 +169,7 @@ class PlannerNode(Node):
                                 ns="ee_path", id_offset=0, rgba=(0.0, 0.0, 1.0, 1.0),
                                 z_offset=0.0, line_width=0.01, sphere_diam=0.03):
         """Publish EE path as spheres + a line strip connecting them."""
-        now = self.get_clock().now().to_msg()
+        now = rclpy.time.Time().to_msg()
 
         # --- Waypoints as SPHERE_LIST ---
         spheres = Marker()
@@ -239,7 +239,7 @@ class PlannerNode(Node):
     def _make_sphere_marker(self, x, y, z, frame_id, ns, mid, rgb, scale=0.05, quat=None):
         m = Marker()
         m.header.frame_id = frame_id
-        m.header.stamp = self.get_clock().now().to_msg()
+        m.header.stamp = rclpy.time.Time().to_msg()
         m.ns = ns
         m.id = mid
         m.type = Marker.SPHERE
@@ -295,7 +295,7 @@ class PlannerNode(Node):
 
         m = Marker()
         m.header.frame_id = frame_id
-        m.header.stamp = self.get_clock().now().to_msg()
+        m.header.stamp = rclpy.time.Time().to_msg()
         m.ns = ns
         m.id = mid
         m.type = Marker.LINE_LIST
@@ -712,7 +712,7 @@ class PlannerNode(Node):
         """Publish a cylinder marker for RViz visualization."""
         marker = Marker()
         marker.header.frame_id = "arm_base"  # Change to your robot's base frame if different
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = rclpy.time.Time().to_msg()
         marker.ns = "obstacles"
         marker.id = 0
         marker.type = Marker.CYLINDER
