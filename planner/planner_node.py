@@ -98,6 +98,22 @@ class PlannerNode(Node):
         #! publish simulalted wall markers
         self.publish_wall()    
         self.publish_cylinder_marker(self.cyl_center_xy, self.cyl_radius, self.z_min, self.z_max)
+
+    def clear_goal_and_path_markers(self):
+        """Clear stale goal/path markers before planning a new goal."""
+        now = self.get_clock().now().to_msg()
+
+        clear_goal = Marker()
+        clear_goal.header.frame_id = "arm_base"
+        clear_goal.header.stamp = now
+        clear_goal.action = Marker.DELETEALL
+        self.goal_marker_pub.publish(clear_goal)
+
+        clear_path = Marker()
+        clear_path.header.frame_id = "arm_base"
+        clear_path.header.stamp = now
+        clear_path.action = Marker.DELETEALL
+        self.ee_path_marker_pub.publish(clear_path)
         
     def publish_wall(self):
         """Publish a wall marker for RViz visualization."""
@@ -504,6 +520,7 @@ class PlannerNode(Node):
             return
         
         self.execution_complete = False
+        self.clear_goal_and_path_markers()
         pose_data = (
             msg.pose.position.x,
             msg.pose.position.y,
@@ -707,7 +724,7 @@ class PlannerNode(Node):
         # Maximum allowed angular change per joint between consecutive trajectory steps.
         # UR10e joint limits are [-2π, 2π]; a step larger than π/2 (90°) is considered
         # a dangerous jump and the trajectory is aborted.
-        JUMP_THRESHOLD = np.pi  # radians
+        JUMP_THRESHOLD = 2 * np.pi  # radians
         jump_detected = False
         for step_i in range(1, len(all_joint_values_print)):
             delta = np.abs(np.array(all_joint_values_print[step_i], dtype=float)
@@ -831,4 +848,3 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-

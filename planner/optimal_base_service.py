@@ -177,6 +177,14 @@ class OptimalBaseService(Node):
             selected_pos: Optional [x, y] of selected base position to highlight
         """
         marker_array = MarkerArray()
+        now = self.get_clock().now().to_msg()
+
+        # Clear previous grid/selected markers so stale IDs from older requests do not persist.
+        clear_marker = Marker()
+        clear_marker.header.frame_id = "map"
+        clear_marker.header.stamp = now
+        clear_marker.action = Marker.DELETEALL
+        marker_array.markers.append(clear_marker)
         
         n_bins_x, n_bins_y = grid.shape
         grid_res_x = (x_limits[1] - x_limits[0]) / n_bins_x
@@ -200,7 +208,7 @@ class OptimalBaseService(Node):
                 # Create marker for this cell
                 marker = Marker()
                 marker.header.frame_id = "map"
-                marker.header.stamp = self.get_clock().now().to_msg()
+                marker.header.stamp = now
                 marker.ns = "reachability_grid"
                 marker.id = marker_id
                 marker.type = Marker.CUBE
@@ -245,10 +253,10 @@ class OptimalBaseService(Node):
         if selected_pos is not None:
             marker = Marker()
             marker.header.frame_id = "map"
-            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.header.stamp = now
             marker.ns = "selected_base"
             marker.id = marker_id
-            marker.type = Marker.CYLINDER
+            marker.type = Marker.ARROW
             marker.action = Marker.ADD
             
             marker.pose.position.x = selected_pos[0]
@@ -257,7 +265,7 @@ class OptimalBaseService(Node):
             marker.pose.orientation.w = 1.0
             
             marker.scale.x = 0.3
-            marker.scale.y = 0.3
+            marker.scale.y = 0.1
             marker.scale.z = 0.1
             
             marker.color = ColorRGBA(r=1.0, g=0.0, b=1.0, a=1.0)  # Magenta
