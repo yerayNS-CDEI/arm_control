@@ -138,28 +138,56 @@ class PublisherJointTrajectoryActionClient(Node):
         goal_msg = FollowJointTrajectory.Goal()
 
         trajectory = deepcopy(self.planned_trajectory)
-        duration_between_points = 1.0
 
+        # Each waypoint gets zero velocities.  The joint_trajectory_controller then
+        # uses cubic Hermite interpolation and generates a smooth bell-shaped velocity
+        # profile (accelerate from 0 → decelerate to 0) for every segment.  This is
+        # the only reliable way to avoid PATH_TOLERANCE_VIOLATED in Gazebo:
+        # finite-difference velocities at intermediate points cause the cubic spline
+        # to overshoot and push the actual joint position outside the tolerance window.
+        #
+        # Timing: each segment is sized so that the peak joint velocity during the
+        # cubic segment stays at or below max_joint_speed.  For a zero-velocity
+        # cubic, peak velocity ≈ 1.5 * (delta / T), so T = 1.5 * delta / max_joint_speed.
+        max_joint_speed  = 0.5   # rad/s — intentionally slow for smooth, safe motion
+        min_segment_time = 0.5   # seconds — floor for very small moves
+
+        n = len(trajectory.points)
+
+        # --- Pass 1: compute per-segment durations ---
+        segment_durations = []
         for i, point in enumerate(trajectory.points):
-            total_sec = duration_between_points * (i + 1)
-            secs = int(total_sec)
-            nsecs = int((total_sec - secs) * 1e9)
-            point.time_from_start = Duration(sec=secs, nanosec=nsecs)
-            # if not point.velocities or len(point.velocities) != len(point.positions):
-            #     point.velocities = [0.0] * len(point.positions)
-            if i > 0:
-                prev = trajectory.points[i - 1]
-                dt = duration_between_points
-                point.velocities = [
-                    (p2 - p1) / dt for p1, p2 in zip(prev.positions, point.positions)
-                ]
+            if i == 0:
+                segment_durations.append(min_segment_time)
             else:
-                point.velocities = [0.0] * len(point.positions)
+                prev = trajectory.points[i - 1]
+                max_delta = max(
+                    abs(p2 - p1) for p1, p2 in zip(prev.positions, point.positions)
+                )
+                # Factor of 1.5: peak velocity of a zero-velocity cubic spline
+                seg_time = max(min_segment_time, 1.5 * max_delta / max_joint_speed)
+                segment_durations.append(seg_time)
+
+        self.get_logger().info(
+            f"Trajectory: {n} waypoints, segment times: "
+            f"{[f'{t:.2f}' for t in segment_durations]} s, "
+            f"total: {sum(segment_durations):.2f} s"
+        )
+
+        # --- Pass 2: assign timestamps; zero velocity at every waypoint ---
+        accumulated_time = 0.0
+        for i, point in enumerate(trajectory.points):
+            accumulated_time += segment_durations[i]
+            secs = int(accumulated_time)
+            nsecs = int((accumulated_time - secs) * 1e9)
+            point.time_from_start = Duration(sec=secs, nanosec=nsecs)
+            point.velocities = [0.0] * len(point.positions)
+            point.accelerations = [0.0] * len(point.positions)
 
         goal_msg.trajectory = trajectory
-        goal_msg.goal_time_tolerance = Duration(sec=0, nanosec=200_000_000)
+        goal_msg.goal_time_tolerance = Duration(sec=2, nanosec=0)
         goal_msg.goal_tolerance = [
-            JointTolerance(position=0.01, velocity=0.01, name=name) for name in self.joints
+            JointTolerance(position=0.01, velocity=0.05, name=name) for name in self.joints
         ]
 
         self.get_logger().info("Sending trajectory goal with added times and velocities...")
