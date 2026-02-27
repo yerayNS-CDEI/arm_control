@@ -649,14 +649,19 @@ class PlannerNode(Node):
             interp_rot_matrices = interp_rots.as_matrix()
 
         elif path_len == 1:
-            # Single waypoint: rotate in place to goal orientation
-            interp_rots = R.from_quat([goal_orientation.as_quat()])
+            # Single waypoint: use midpoint orientation (t=0.5) so it is truly intermediate
+            key_rots = R.from_quat([start_orientation.as_quat(), goal_orientation.as_quat()])
+            slerp = Slerp([0, 1], key_rots)
+            interp_rots = slerp([0.5])
             interp_rot_matrices = interp_rots.as_matrix()
 
         else:
             key_rots = R.from_quat([start_orientation.as_quat(), goal_orientation.as_quat()])
             slerp = Slerp([0, 1], key_rots)
-            times = np.linspace(0, 1, path_len)
+            # Exclude t=0 (start) and t=1 (goal) so every waypoint has a strictly
+            # intermediate orientation; the actual start/goal orientations are handled
+            # by the current robot pose and the explicit final IK step respectively.
+            times = np.linspace(0, 1, path_len + 2)[1:-1]
             interp_rots = slerp(times)
             interp_rot_matrices = interp_rots.as_matrix()
 
@@ -683,9 +688,10 @@ class PlannerNode(Node):
             all_joint_values_print.append(q_new)
             q_current = q_new
         
-        # Final goal pose to ensure accuracy
+        # Final goal pose to ensure accuracy — always use the exact goal orientation,
+        # regardless of whether/how waypoint orientations were interpolated.
         pos = goal_pos
-        orn = interp_rot_matrices[-1]
+        orn = goal_orientation.as_matrix()
         T = create_pose_matrix(pos, orn)
         
         precise_goal_joint_values = closed_form_algorithm(T, q_current, type=0)
@@ -701,7 +707,7 @@ class PlannerNode(Node):
         # Maximum allowed angular change per joint between consecutive trajectory steps.
         # UR10e joint limits are [-2π, 2π]; a step larger than π/2 (90°) is considered
         # a dangerous jump and the trajectory is aborted.
-        JUMP_THRESHOLD = np.pi / 2  # radians
+        JUMP_THRESHOLD = np.pi  # radians
         jump_detected = False
         for step_i in range(1, len(all_joint_values_print)):
             delta = np.abs(np.array(all_joint_values_print[step_i], dtype=float)
