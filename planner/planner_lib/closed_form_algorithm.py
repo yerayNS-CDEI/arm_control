@@ -172,18 +172,28 @@ def closed_form_algorithm(goal_matrix, q_current, type):
             return (angle + 2*np.pi) % (4 * np.pi) - 2 * np.pi
         
         def unwrap_angles(q_new, q_ref):
+            """Return the equivalent of q_new (modulo 2π) that is closest to q_ref.
+            Handles arbitrary multi-rotation offsets by reducing the delta to [-π, π]."""
             q_new = np.asarray(q_new).flatten()
             q_ref = np.asarray(q_ref).flatten()
             q_unwrapped = np.zeros_like(q_new)
             for i in range(len(q_new)):
                 delta = q_new[i] - q_ref[i]
-                if delta > np.pi:
-                    q_unwrapped[i] = q_new[i] - 2 * np.pi
-                elif delta < -np.pi:
-                    q_unwrapped[i] = q_new[i] + 2 * np.pi
-                else:
-                    q_unwrapped[i] = q_new[i]
+                # Reduce delta to [-π, π] to find the closest equivalent angle
+                delta_normalized = (delta + np.pi) % (2 * np.pi) - np.pi
+                q_unwrapped[i] = q_ref[i] + delta_normalized
             return q_unwrapped
+
+        def clamp_to_joint_limits(angles, lo=-2 * np.pi, hi=2 * np.pi):
+            """Shift any joint outside [lo, hi] by ±2π to bring it back within limits.
+            Prevents accumulation of drift beyond the UR joint range [-2π, 2π]."""
+            result = np.array(angles, dtype=float)
+            for i in range(len(result)):
+                if result[i] > hi:
+                    result[i] -= 2 * np.pi
+                elif result[i] < lo:
+                    result[i] += 2 * np.pi
+            return result
 
         # print('All solutions: ',sol)
         valid_rows = ~np.isnan(sol).any(axis=1)  # Valid row if there is no nan value
@@ -195,8 +205,11 @@ def closed_form_algorithm(goal_matrix, q_current, type):
             idx_valid = np.where(valid_rows)[0]
             idx = idx_valid[np.argmin(diffs)]
             best_sol = sol[idx]
+            # Unwrap to the equivalent angles closest to q_current.
             best_sol = unwrap_angles(best_sol, q_current)
-            best_sol = np.array([normalize_angle_2pi(angle) for angle in best_sol])
+            # Clamp any joint that drifted outside [-2π, 2π] back within UR limits.
+            # A single ±2π shift preserves the equivalent pose while satisfying the controller.
+            best_sol = clamp_to_joint_limits(best_sol)
             # print('Best solution: ',best_sol)
             return best_sol
         else:

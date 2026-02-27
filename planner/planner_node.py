@@ -688,13 +688,40 @@ class PlannerNode(Node):
         orn = interp_rot_matrices[-1]
         T = create_pose_matrix(pos, orn)
         
-        joint_values = closed_form_algorithm(T, q_current, type=0)
-        all_joint_values_print.append(joint_values)
-        all_joint_values.append(joint_values)
+        precise_goal_joint_values = closed_form_algorithm(T, q_current, type=0)
+        all_joint_values_print.append(precise_goal_joint_values)
+        all_joint_values.append(precise_goal_joint_values)
 
-        if np.any(np.isnan(joint_values)):
+        if np.any(np.isnan(precise_goal_joint_values)):
             self.get_logger().error("IK solution contains NaN. Aborting.")
             self.execution_complete = True  # Mark execution as complete to allow new goals
+            return
+
+        # --- Jump detection ---
+        # Maximum allowed angular change per joint between consecutive trajectory steps.
+        # UR10e joint limits are [-2π, 2π]; a step larger than π/2 (90°) is considered
+        # a dangerous jump and the trajectory is aborted.
+        JUMP_THRESHOLD = np.pi / 2  # radians
+        jump_detected = False
+        for step_i in range(1, len(all_joint_values_print)):
+            delta = np.abs(np.array(all_joint_values_print[step_i], dtype=float)
+                           - np.array(all_joint_values_print[step_i - 1], dtype=float))
+            bad_joints = np.where(delta > JUMP_THRESHOLD)[0]
+            if bad_joints.size > 0:
+                self.get_logger().error(
+                    f"[JUMP DETECTED] Step {step_i - 1} -> {step_i}: "
+                    f"joint(s) {bad_joints.tolist()} exceeded threshold "
+                    f"({JUMP_THRESHOLD:.3f} rad). "
+                    f"Deltas: {np.round(delta, 3).tolist()}. "
+                    f"Prev: {np.round(all_joint_values_print[step_i - 1], 3).tolist()} "
+                    f"Next: {np.round(all_joint_values_print[step_i], 3).tolist()}. "
+                    f"Aborting trajectory."
+                )
+                jump_detected = True
+                break
+
+        if jump_detected:
+            self.execution_complete = True
             return
 
         self.get_logger().info(f"Joint values: {all_joint_values_print}")
