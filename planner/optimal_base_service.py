@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import math
 import numpy as np
 import time
 import rclpy
@@ -168,7 +169,7 @@ class OptimalBaseService(Node):
             f"Costmap bounds: [{costmap_min_x:.2f}, {costmap_max_x:.2f}] x [{costmap_min_y:.2f}, {costmap_max_y:.2f}]"
         )
     
-    def _publish_grid_markers(self, grid, x_limits, y_limits, selected_pos=None):
+    def _publish_grid_markers(self, grid, x_limits, y_limits, selected_pos=None, selected_yaw=None):
         """Publish grid visualization as RViz markers
         
         Args:
@@ -263,7 +264,13 @@ class OptimalBaseService(Node):
             marker.pose.position.x = selected_pos[0]
             marker.pose.position.y = selected_pos[1]
             marker.pose.position.z = 0.05
-            marker.pose.orientation.w = 1.0
+            if selected_yaw is not None:
+                marker.pose.orientation.x = 0.0
+                marker.pose.orientation.y = 0.0
+                marker.pose.orientation.z = math.sin(selected_yaw / 2.0)
+                marker.pose.orientation.w = math.cos(selected_yaw / 2.0)
+            else:
+                marker.pose.orientation.w = 1.0
             
             marker.scale.x = 0.3
             marker.scale.y = 0.1
@@ -568,8 +575,17 @@ class OptimalBaseService(Node):
                 x_sel, y_sel = min(cands_xy, key=lambda xy: np.hypot(xy[0]-cx, xy[1]-cy))
                 self.get_logger().info("No valid orientation vectors, using centroid-based selection")
 
+            # Orientation: X-axis pointing toward goals centroid
+            dx = cx - x_sel
+            dy = cy - y_sel
+            base_yaw = math.atan2(dy, dx)
+            base_qx = 0.0
+            base_qy = 0.0
+            base_qz = math.sin(base_yaw / 2.0)
+            base_qw = math.cos(base_yaw / 2.0)
+
             # Publish grid visualization for RViz
-            self._publish_grid_markers(gi[0].grid, x_limits, y_limits, selected_pos=[x_sel, y_sel])
+            self._publish_grid_markers(gi[0].grid, x_limits, y_limits, selected_pos=[x_sel, y_sel], selected_yaw=base_yaw)
 
             # 7) (Opcional) Visualización si se pide en la request
             if req.enable_simulator:
@@ -605,12 +621,21 @@ class OptimalBaseService(Node):
                     self.get_logger().warn(f"Visualization failed (continuing without viz): {e}")
 
 
-            self.get_logger().info("Optimal base computed succesfully.")
+            self.get_logger().info(
+                f"Optimal base computed succesfully. "
+                f"pos=({x_sel:.3f}, {y_sel:.3f}), "
+                f"yaw={math.degrees(base_yaw):.1f}° → q=({base_qx:.4f}, {base_qy:.4f}, {base_qz:.4f}, {base_qw:.4f})"
+            )
             # 8) Rellenar respuesta
             res.success = True
             res.message = "Optimal base computed succesfully"
             res.base_x = float(x_sel)
             res.base_y = float(y_sel)
+            res.base_yaw = float(base_yaw)
+            res.base_qx = float(base_qx)
+            res.base_qy = float(base_qy)
+            res.base_qz = float(base_qz)
+            res.base_qw = float(base_qw)
             res.centroid_x = cx
             res.centroid_y = cy
             res.max_grid_value = max_val

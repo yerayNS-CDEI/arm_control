@@ -29,6 +29,11 @@ string  message
 # Base seleccionada
 float64 base_x
 float64 base_y
+float64 base_yaw    # yaw (rad) so X-axis points toward goals centroid
+float64 base_qx    # orientation quaternion x (always 0 for planar rotation)
+float64 base_qy    # orientation quaternion y (always 0 for planar rotation)
+float64 base_qz    # orientation quaternion z = sin(yaw/2)
+float64 base_qw    # orientation quaternion w = cos(yaw/2)
 
 # Info útil
 float64 centroid_x
