@@ -7,6 +7,7 @@ import rclpy
 from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from scipy.spatial.transform import Rotation as R
+from scipy.ndimage import distance_transform_edt
 from nav_msgs.msg import OccupancyGrid
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
@@ -45,7 +46,7 @@ class OptimalBaseService(Node):
 
         # Costmap subscription for automatic obstacle detection
         self.declare_parameter('costmap_topic', '/global_costmap/costmap')
-        self.declare_parameter('costmap_obstacle_threshold', 50)  # occupancy > 50 is obstacle
+        self.declare_parameter('costmap_obstacle_threshold', 30)  # occupancy > 50 is obstacle
         
         costmap_topic = self.get_parameter('costmap_topic').value
         self.costmap = None
@@ -400,6 +401,24 @@ class OptimalBaseService(Node):
                 res.message = "No hay posiciones válidas tras aplicar obstáculos."
                 return res
 
+            # Compute distance transform from obstacles
+            obstacle_mask = (gi[0].grid == 0)
+            # Distance in grid cells
+            distance_from_obstacles_cells = distance_transform_edt(~obstacle_mask)
+            # Convert to meters
+            grid_res_x = (x_limits[1] - x_limits[0]) / n_bins_x
+            grid_res_y = (y_limits[1] - y_limits[0]) / n_bins_y
+            grid_res_avg = (grid_res_x + grid_res_y) / 2.0
+            distance_from_obstacles_m = distance_from_obstacles_cells * grid_res_avg
+            
+            # Minimum distance to obstacles (configurable)
+            min_obstacle_dist = 0.8  # meters
+            
+            def get_obstacle_distance(x, y):
+                """Returns distance to nearest obstacle in meters"""
+                i, j = self._world_to_idx(x, y, x_limits, y_limits, n_bins_x, n_bins_y)
+                return float(distance_from_obstacles_m[i, j])
+
             # 6) Selección: óptimos → min_dist → detrás de goals según orientación
             G = gi[0].grid
             max_val = float(np.max(G))
@@ -445,6 +464,9 @@ class OptimalBaseService(Node):
 
             def ok_min_dist(x, y):
                 return get_perpendicular_dist_to_plane(x, y) >= min_dist
+            
+            def ok_obstacle_dist(x, y):
+                return get_obstacle_distance(x, y) >= min_obstacle_dist
 
             # Filter candidates that meet minimum perpendicular distance requirement
             cands_xy = [(x, y) for (x, y) in cands_xy_all if ok_min_dist(x, y)]
@@ -456,7 +478,23 @@ class OptimalBaseService(Node):
                 cands_with_dist.sort(key=lambda x: -x[1])  # Sort by distance descending
                 cands_xy = [xy for xy, _ in cands_with_dist[:min(20, len(cands_with_dist))]]
             
+            # Filter candidates by minimum obstacle distance
+            cands_before_obstacle_filter = len(cands_xy)
+            cands_xy = [(x, y) for (x, y) in cands_xy if ok_obstacle_dist(x, y)]
+            
+            if not cands_xy:
+                self.get_logger().warn(f"No candidates meet min_obstacle_dist={min_obstacle_dist}m. Using candidates with maximum obstacle distance.")
+                # Fallback: use candidates with maximum obstacle distance
+                cands_with_obs_dist = [(xy, get_obstacle_distance(xy[0], xy[1])) for xy in [(x, y) for (x, y) in cands_xy_all if ok_min_dist(x, y)]]
+                if cands_with_obs_dist:
+                    cands_with_obs_dist.sort(key=lambda x: -x[1])  # Sort by obstacle distance descending
+                    cands_xy = [xy for xy, _ in cands_with_obs_dist[:min(20, len(cands_with_obs_dist))]]
+                else:
+                    # Last resort: use any candidates meeting min_dist
+                    cands_xy = [(x, y) for (x, y) in cands_xy_all if ok_min_dist(x, y)][:20]
+            
             self.get_logger().info(f"Plane normal: {plane_normal}, centroid: ({cx:.2f}, {cy:.2f})")
+            self.get_logger().info(f"Obstacle filtering: {cands_before_obstacle_filter} -> {len(cands_xy)} candidates (min_obstacle_dist={min_obstacle_dist}m)")
 
             # Compute "behind" direction based on goal orientations
             # Extract forward direction (Z-axis) from each pose's rotation matrix
@@ -470,26 +508,34 @@ class OptimalBaseService(Node):
                     forward_xy = forward_xy / np.linalg.norm(forward_xy)
                     forward_vectors.append(forward_xy)
             
-            # Compute average "behind" direction (opposite of forward)
+            # Compute average forward direction from goals
             if forward_vectors:
                 avg_forward = np.mean(forward_vectors, axis=0)
                 avg_forward = avg_forward / (np.linalg.norm(avg_forward) + 1e-9)
-                behind_direction = -avg_forward  # Behind is opposite of forward
                 
-                # Score each candidate: balance "behind" alignment with proximity to goals
+                # Score each candidate: balance perpendicular alignment with proximity to goals
                 def combined_score(x, y):
                     # Vector from centroid to candidate
                     vec_to_cand = np.array([x - cx, y - cy])
                     dist_to_centroid = np.linalg.norm(vec_to_cand)
                     
-                    # Alignment score: prefer positions "behind" the goals
+                    # Alignment score: prefer positions perpendicular (90°) to goals' forward direction
+                    # Scoring: 90° (perpendicular) = 1.0, 45°/135° = 0.3, 180° (behind) = 0.3, 0° (front) = 0.0
                     alignment = 0.0
                     if dist_to_centroid > 1e-6:
                         vec_to_cand_norm = vec_to_cand / dist_to_centroid
-                        # Dot product: positive when candidate is in "behind" direction
-                        alignment = np.dot(vec_to_cand_norm, behind_direction)
-                        # Only consider candidates with positive alignment (actually behind)
-                        alignment = max(0.0, alignment)
+                        dot_forward = np.dot(vec_to_cand_norm, avg_forward)
+                        
+                        # Piecewise scoring based on angle
+                        if abs(dot_forward) <= 0.707:  # Between 45° and 135° (closer to perpendicular)
+                            # Scale from abs(dot)=0.707 (45°/135°) → 0.3, to abs(dot)=0 (90°) → 1.0
+                            alignment = 0.3 + 0.7 * (0.707 - abs(dot_forward)) / 0.707
+                        else:  # Beyond 45° from perpendicular
+                            if dot_forward > 0.707:  # In front (0° to 45°)
+                                # Scale from 0.3 at 45° to 0.0 at 0°
+                                alignment = 0.3 * (1.0 - dot_forward) / (1.0 - 0.707)
+                            else:  # Behind (135° to 180°)
+                                alignment = 0.3  # Keep at 0.3 for all behind positions
                     
                     # Distance score: prefer positions closer to centroid but respect min_dist
                     # Use perpendicular distance to the goals plane for safety
@@ -498,9 +544,14 @@ class OptimalBaseService(Node):
                     safety_margin = 0.2  # prefer at least 0.2m beyond min_dist
                     distance_score = 1.0 / (dist_to_centroid + 0.3)  # Closer to centroid is better
                     
-                    # Combined score: balance alignment and proximity
-                    # Higher weight on distance to keep base closer
-                    score = alignment * 0.3 + distance_score * 0.7
+                    # Obstacle distance score: reward positions farther from obstacles
+                    obs_dist = get_obstacle_distance(x, y)
+                    # Normalize: 0.5m -> 0.0, 1.0m+ -> 1.0
+                    obs_score = min(1.0, max(0.0, (obs_dist - min_obstacle_dist) / 0.5))
+                    
+                    # Combined score: balance alignment, proximity, and obstacle clearance
+                    # Weights: 30% alignment, 40% proximity, 30% obstacle clearance
+                    score = alignment * 0.30 + distance_score * 0.40 + obs_score * 0.30
                     
                     # Apply penalty if too close to min_dist perpendicular to plane (safety margin violation)
                     if perp_dist < min_dist + safety_margin:
@@ -511,7 +562,7 @@ class OptimalBaseService(Node):
                 
                 # Select candidate with best combined score
                 x_sel, y_sel = max(cands_xy, key=lambda xy: combined_score(xy[0], xy[1]))
-                self.get_logger().info(f"Base positioned behind goals with proximity: forward={avg_forward}, behind={behind_direction}")
+                self.get_logger().info(f"Base positioned perpendicular to goals with proximity: forward={avg_forward}")
             else:
                 # Fallback: use centroid-based selection
                 x_sel, y_sel = min(cands_xy, key=lambda xy: np.hypot(xy[0]-cx, xy[1]-cy))
