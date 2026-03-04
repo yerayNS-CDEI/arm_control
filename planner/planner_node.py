@@ -30,9 +30,10 @@ class PlannerNode(Node):
 
         # --- Parameters for the grid / reachability ---
         self.robot_name = 'ur10e'
-        self.filename = "reachability_map_27_fused"
+        self.filename = "reachability_map_0.05_step_20_orientations"
         fn_npy = f"{self.filename}.npy"
-        self.grid_size = int(self.filename.split('_')[2])
+        self.cart_step = float(self.filename.split('_')[2])
+        self.cart_min, self.cart_max = -1.6, 1.6
         self.base_path = os.path.join(get_package_share_directory('arm_control'), 'resource')
         self.reachability_map_fn=os.path.join(self.base_path, fn_npy)
 
@@ -51,7 +52,17 @@ class PlannerNode(Node):
         # Define cilinder parameters
         self.cyl_center_xy = (0.0, 0.0)   # (xc, yc)
         self.cyl_radius    = 0.3
-        self.z_min, self.z_max  = 0.0, 1.3
+        self.z_min, self.z_max  = -1.112, 1.3
+
+        # Define mobile manipulator base footprint obstacle (XY corners in arm_base frame)
+        self.base_footprint_xy = [
+            (-0.2747,  0.7544),
+            (0.3478,  0.1323),
+            (-0.1328, -0.3487),
+            (-0.7553,  0.2733),
+        ]
+        self.base_z_min = -1.112
+        self.base_z_max =-0.1
         
         # Expected joint names in desired order
         self.expected_joint_names = [
@@ -65,10 +76,10 @@ class PlannerNode(Node):
         self.joint_indices = None
 
         # Create grid space
-        self.resolution = 2*self.radius / self.grid_size
-        self.x_vals = np.linspace(-self.radius + (self.resolution / 2), self.radius - (self.resolution / 2), self.grid_size)
+        self.x_vals = np.arange(self.cart_min + self.cart_step / 2, self.cart_max, self.cart_step)
         self.y_vals = self.x_vals
         self.z_levels = sorted(self.reachability_map.keys())
+        self.grid_size = len(self.x_vals)
         self.grid_shape = (self.grid_size, self.grid_size, len(self.z_levels))
         z_min = min(self.z_levels)
         z_max = max(self.z_levels)
@@ -94,10 +105,6 @@ class PlannerNode(Node):
         self.ee_path_marker_pub = self.create_publisher(Marker, 'ee_path_markers', 10)
         
         self.get_logger().info("Planner node initialized and waiting for goal poses...")
-        
-        #! publish simulalted wall markers
-        self.publish_wall()    
-        self.publish_cylinder_marker(self.cyl_center_xy, self.cyl_radius, self.z_min, self.z_max)
 
     def clear_goal_and_path_markers(self):
         """Clear stale goal/path markers before planning a new goal."""
@@ -534,6 +541,8 @@ class PlannerNode(Node):
         self.plan_and_send_trajectory(msg)
 
     def plan_and_send_trajectory(self, msg: PoseStamped):
+        self.invalid_path = False  # Reset invalid path flag at start of planning
+
         if self.current_joint_state is None:
             self.get_logger().error("No current joint state received yet. Cannot calculate trajectory.")
             return
@@ -602,13 +611,21 @@ class PlannerNode(Node):
             ((X - self.cyl_center_xy[0])**2 + (Y - self.cyl_center_xy[1])**2) <= self.cyl_radius**2
         ) & (Z >= self.z_min) & (Z <= self.z_max)
         occupancy_grid[cyl_mask] = 1
-        
-        # Publish cylinder marker for visualization
+
+        # Create mask for mobile manipulator base
+        base_footprint_mask = (
+            self._point_in_polygon_mask(X[:, :, 0], Y[:, :, 0], self.base_footprint_xy)[:, :, np.newaxis]
+            & (Z >= self.base_z_min) & (Z <= self.base_z_max)
+        )
+        occupancy_grid[base_footprint_mask] = 1
+
+        # Publish obstacle markers for visualization
         self.publish_cylinder_marker(self.cyl_center_xy, self.cyl_radius, self.z_min, self.z_max)
+        self.publish_base_footprint_marker(self.base_footprint_xy, self.base_z_min, self.base_z_max)
         self.publish_wall()
 
         # Define the dilation distance (in meters)
-        dilation_distance = 0.001  # Enlarge obstacles by 0.X meters in all directions
+        dilation_distance = 0.010  # Enlarge obstacles by 0.X meters in all directions
 
         # Apply dilation
         occupancy_grid_dilated = dilate_obstacles(occupancy_grid, dilation_distance, self.x_vals)
@@ -828,6 +845,78 @@ class PlannerNode(Node):
         
         self.cyl_marker_pub.publish(marker)
         self.get_logger().info(f"Published cylinder marker at ({center_xy[0]}, {center_xy[1]}) with radius {radius} and height {z_max - z_min}")
+
+    @staticmethod
+    def _point_in_polygon_mask(X, Y, polygon_xy):
+        """
+        Vectorised ray-casting point-in-polygon test.
+        X, Y : 2-D numpy arrays of the same shape (the XY slice of the meshgrid).
+        polygon_xy : list of (x, y) tuples defining the polygon vertices (in order).
+        Returns a boolean array of the same shape as X.
+        """
+        n = len(polygon_xy)
+        inside = np.zeros(X.shape, dtype=bool)
+        px = np.array([v[0] for v in polygon_xy])
+        py = np.array([v[1] for v in polygon_xy])
+        j = n - 1
+        for i in range(n):
+            xi, yi = px[i], py[i]
+            xj, yj = px[j], py[j]
+            cond1 = (yi > Y) != (yj > Y)
+            # avoid division by zero with a tiny epsilon
+            x_intersect = (xj - xi) * (Y - yi) / (yj - yi + 1e-12) + xi
+            cond2 = X < x_intersect
+            inside ^= cond1 & cond2
+            j = i
+        return inside
+
+    def publish_base_footprint_marker(self, footprint_xy, z_min, z_max):
+        """
+        Publish the mobile-manipulator base footprint as a 3-D prism wireframe
+        (LINE_LIST) on the same 'obstacle_markers' topic as the cylinder.
+        """
+        now = rclpy.time.Time().to_msg()
+        n = len(footprint_xy)
+
+        marker = Marker()
+        marker.header.frame_id = "arm_base"
+        marker.header.stamp = now
+        marker.ns = "obstacles"
+        marker.id = 2  # distinct id from the cylinder (id=0) and wall (id=1)
+        marker.type = Marker.LINE_LIST
+        marker.action = Marker.ADD
+        marker.scale.x = 0.015  # line width in metres
+
+        # Colour: semi-transparent orange
+        marker.color.r = 1.0
+        marker.color.g = 0.5
+        marker.color.b = 0.0
+        marker.color.a = 0.8
+
+        pts = marker.points
+        # Bottom perimeter + top perimeter + vertical edges
+        for i in range(n):
+            j = (i + 1) % n
+            x0, y0 = float(footprint_xy[i][0]), float(footprint_xy[i][1])
+            x1, y1 = float(footprint_xy[j][0]), float(footprint_xy[j][1])
+
+            # bottom edge
+            pts.append(Point(x=x0, y=y0, z=float(z_min)))
+            pts.append(Point(x=x1, y=y1, z=float(z_min)))
+            # top edge
+            pts.append(Point(x=x0, y=y0, z=float(z_max)))
+            pts.append(Point(x=x1, y=y1, z=float(z_max)))
+            # vertical edge at vertex i
+            pts.append(Point(x=x0, y=y0, z=float(z_min)))
+            pts.append(Point(x=x0, y=y0, z=float(z_max)))
+
+        marker.lifetime.sec = 0  # persist until deleted
+
+        self.cyl_marker_pub.publish(marker)
+        self.get_logger().info(
+            f"Published base footprint marker with {n} vertices, "
+            f"z=[{z_min}, {z_max}]"
+        )
 
 def create_pose_matrix(position, rotation_matrix):
     """Helper to create 4x4 transformation matrix from position and rotation matrix."""

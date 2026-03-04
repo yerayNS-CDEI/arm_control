@@ -175,7 +175,7 @@ def launch_setup(context, *args, **kwargs):
         arguments=[ "-topic", "robot_description", 
                    '-x', '2.5',
                    '-y', '-2.0',
-                   '-z', '0.15',
+                   '-z', '2.0',
                 #    '-robot_namespace','arm'
                    ],
         output="screen",
