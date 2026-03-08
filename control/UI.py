@@ -10,8 +10,8 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from PyQt5.QtWidgets import *
-from PyQt5.QtCore import QTimer, QProcess
-from PyQt5.QtGui import QIcon
+from PyQt5.QtCore import QTimer, QProcess, Qt
+from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
@@ -702,6 +702,25 @@ class RobotControlUI(QMainWindow):
         full_control_sensors_box = QGroupBox("Sensors")
         full_control_sensors_layout = QVBoxLayout()
         full_control_sensors_box.setLayout(full_control_sensors_layout)
+
+        # Set background image for sensors box using a label
+        try:
+            pkg_share = get_package_share_directory('arm_control')
+            bg_image_path = os.path.join(pkg_share, 'resource', 'oliwall.png')
+        except Exception:
+            # Fallback to source directory if package not found
+            bg_image_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'resource', 'oliwall.png')
+        
+        if os.path.exists(bg_image_path):
+            # Create a label to hold the background image
+            self.full_control_sensors_bg_label = QLabel(full_control_sensors_box)
+            pixmap = QPixmap(bg_image_path)
+            # Scale pixmap to fit within a reasonable size while maintaining aspect ratio
+            scaled_pixmap = pixmap.scaled(250, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.full_control_sensors_bg_label.setPixmap(scaled_pixmap)
+            self.full_control_sensors_bg_label.setAlignment(Qt.AlignCenter)
+            self.full_control_sensors_bg_label.setScaledContents(False)
+            full_control_sensors_layout.addWidget(self.full_control_sensors_bg_label)
 
         self.btn_full_control_align_ee = QPushButton("Start Align EE to Wall")
         self.btn_full_control_align_ee.clicked.connect(
