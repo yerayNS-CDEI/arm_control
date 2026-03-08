@@ -1065,6 +1065,38 @@ class RobotControlUI(QMainWindow):
  
         return ''.join(result)
     
+    def _append_to_text_widget(self, text_widget, html_content, add_newline=True):
+        """
+        Append content to a text widget with smart scrolling.
+        Only auto-scrolls if the user is already viewing the bottom.
+        
+        Args:
+            text_widget: QTextEdit widget to append to
+            html_content: HTML content to append
+            add_newline: Whether to add a newline after the content
+        """
+        # Check if scrollbar is at the bottom before appending
+        scrollbar = text_widget.verticalScrollBar()
+        was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 10  # Small tolerance for rounding
+        
+        # Save the current scroll position
+        old_scroll_value = scrollbar.value()
+        
+        # Append the content
+        cursor = text_widget.textCursor()
+        cursor.movePosition(cursor.End)
+        cursor.insertHtml(html_content)
+        if add_newline:
+            cursor.insertText('\n')
+        
+        # Restore scroll position or scroll to bottom as appropriate
+        if was_at_bottom:
+            # User was at bottom, scroll to new bottom
+            scrollbar.setValue(scrollbar.maximum())
+        else:
+            # User was scrolled up, maintain their position
+            scrollbar.setValue(old_scroll_value)
+    
     def toggle_arm_launch(self):
         sim_mode = self.arm_sim_mode_combo.currentText()
         self._toggle_process('arm_launch', self.btn_general_launch, 'Arm',
@@ -1144,9 +1176,7 @@ class RobotControlUI(QMainWindow):
         
         # Build args based on sim mode
         if sim_mode == 'true':
-            args = ['launch', 'navi_wall', 'mapping_3d.launch.py',  f'mode:={mode}', f'controller_type:={controller_type}']
-        else:
-            args = ['launch', 'navi_wall', 'mapping_3d.launch.py',  f'mode:={mode}', f'controller_type:={controller_type}']
+            args = ['launch', 'navi_wall', 'mapping_3d.launch.py', f'sim:={sim_mode}', f'mode:={mode}', f'controller_type:={controller_type}']
         
         process_key = f'{mode}_mapping' if mode != 'base' else 'mapping'
         display_name = 'Mapping'
@@ -1343,11 +1373,7 @@ class RobotControlUI(QMainWindow):
  
         # Display command in bold green
         cmd_str = 'ps aux | grep -E \'ros2|robot\' | grep -v grep'
-        cursor = self.base_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.base_status_text.setTextCursor(cursor)
-        self.base_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        cursor.insertText('\n')  # Ensure newline after command
+        self._append_to_text_widget(self.base_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
  
         # Run the command using shell to support pipe
         process_key = 'ps_ros2'
@@ -1368,11 +1394,7 @@ class RobotControlUI(QMainWindow):
  
         # Display command in bold green
         cmd_str = 'timeout 10 ros2 control list_controllers'
-        cursor = self.base_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.base_status_text.setTextCursor(cursor)
-        self.base_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        cursor.insertText('\n')  # Ensure newline after command
+        self._append_to_text_widget(self.base_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
  
         # Run the command with timeout (10 seconds)
         process_key = 'list_base_controllers'
@@ -1398,11 +1420,7 @@ class RobotControlUI(QMainWindow):
 
         # Display command in bold green
         cmd_str = 'timeout 10 ros2 control list_controllers'
-        cursor = self.full_control_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.full_control_status_text.setTextCursor(cursor)
-        self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        cursor.insertText('\n')  # Ensure newline after command
+        self._append_to_text_widget(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
 
         # Run the command with timeout (10 seconds)
         process_key = 'full_list_base_controllers'
@@ -1429,11 +1447,7 @@ class RobotControlUI(QMainWindow):
         
         # Display command in status
         cmd_str = 'ros2 topic list'
-        cursor = self.full_control_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.full_control_status_text.setTextCursor(cursor)
-        self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        cursor.insertText('\n')
+        self._append_to_text_widget(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
         
         # Start process and capture output
         process.finished.connect(lambda: self._on_topics_list_finished(process))
@@ -1557,11 +1571,7 @@ class RobotControlUI(QMainWindow):
         
         # Display command
         cmd_str = f'timeout 10 ros2 topic echo --once {topic}'
-        cursor = self.full_control_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.full_control_status_text.setTextCursor(cursor)
-        self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        cursor.insertText('\n')
+        self._append_to_text_widget(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
         
         # Start process with timeout
         process_key = f'topic_echo_{topic}'
@@ -1690,11 +1700,7 @@ class RobotControlUI(QMainWindow):
  
             # Display command in bold green
             cmd_str = program + ' ' + ' '.join(args)
-            cursor = self.status_text.textCursor()
-            cursor.movePosition(cursor.End)
-            self.status_text.setTextCursor(cursor)
-            self.status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-            cursor.insertText('\n')  # Ensure newline after command
+            self._append_to_text_widget(self.status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
  
             process.start(program, args)
             self.process_map[process_key] = process
@@ -1781,11 +1787,7 @@ class RobotControlUI(QMainWindow):
             process.finished.connect(lambda: self._on_base_process_finished(process_key, button, name))
 
             cmd_str = program + ' ' + ' '.join(args)
-            cursor = status_text.textCursor()
-            cursor.movePosition(cursor.End)
-            status_text.setTextCursor(cursor)
-            status_text.insertHtml(f"<b style='color:#57ab5a;'>▶ {cmd_str}</b>")
-            cursor.insertText('\n')
+            self._append_to_text_widget(status_text, f"<b style='color:#57ab5a;'>▶ {cmd_str}</b>")
 
             process.start(program, args)
             self.process_map[process_key] = process
@@ -1808,11 +1810,7 @@ class RobotControlUI(QMainWindow):
                 html_line = self._ansi_to_html(line)
                 
                 # Use insertHtml to properly render HTML entities
-                cursor = self.full_control_status_text.textCursor()
-                cursor.movePosition(cursor.End)
-                self.full_control_status_text.setTextCursor(cursor)
-                self.full_control_status_text.insertHtml(html_line)
-                cursor.insertText('\n')
+                self._append_to_text_widget(self.full_control_status_text, html_line)
  
     def _on_process_finished(self, process_key, button, name):
         """Handle when a process finishes unexpectedly"""
@@ -1880,11 +1878,7 @@ class RobotControlUI(QMainWindow):
                 html_line = self._ansi_to_html(line)
  
                 # Use insertHtml to properly render HTML entities
-                cursor = self.status_text.textCursor()
-                cursor.movePosition(cursor.End)
-                self.status_text.setTextCursor(cursor)
-                self.status_text.insertHtml(html_line)
-                cursor.insertText('\n')  # Use plain text newline to preserve formatting
+                self._append_to_text_widget(self.status_text, html_line)
  
     def handle_base_output(self, process):
         """Handle output for base control processes (outputs to base_status_text)"""
@@ -1901,11 +1895,7 @@ class RobotControlUI(QMainWindow):
                 html_line = self._ansi_to_html(line)
  
                 # Use insertHtml to properly render HTML entities
-                cursor = self.base_status_text.textCursor()
-                cursor.movePosition(cursor.End)
-                self.base_status_text.setTextCursor(cursor)
-                self.base_status_text.insertHtml(html_line)
-                cursor.insertText('\n')  # Use plain text newline to preserve formatting
+                self._append_to_text_widget(self.base_status_text, html_line)
  
     def _connect_robot_socket(self, status_text=None):
         """Connect to robot dashboard if not already connected"""
@@ -2012,11 +2002,7 @@ class RobotControlUI(QMainWindow):
  
         # Display command in bold green
         cmd_str = 'ps aux | grep -E \'ros2|robot\' | grep -v grep'
-        cursor = self.full_control_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.full_control_status_text.setTextCursor(cursor)
-        self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        cursor.insertText('\n')  # Ensure newline after command
+        self._append_to_text_widget(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
  
         # Run the command using shell to support pipe
         process_key = 'full_ps_ros2'
@@ -2063,11 +2049,7 @@ class RobotControlUI(QMainWindow):
  
             # Display command in bold green
             cmd_str = program + ' ' + ' '.join(args)
-            cursor = self.full_control_status_text.textCursor()
-            cursor.movePosition(cursor.End)
-            self.full_control_status_text.setTextCursor(cursor)
-            self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-            cursor.insertText('\n')  # Ensure newline after command
+            self._append_to_text_widget(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
  
             process.start(program, args)
             self.process_map[process_key] = process
@@ -2192,11 +2174,7 @@ class RobotControlUI(QMainWindow):
         
         # Display command in bold green (only if not silent)
         if not silent:
-            cursor = self.joint_status_text.textCursor()
-            cursor.movePosition(cursor.End)
-            self.joint_status_text.setTextCursor(cursor)
-            self.joint_status_text.insertHtml("<b style='color: #539bf5;'>▶ ros2 topic echo /joint_states --once</b><br>")
-            cursor.insertText('\n')
+            self._append_to_text_widget(self.joint_status_text, "<b style='color: #539bf5;'>▶ ros2 topic echo /joint_states --once</b><br>")
         
         # Store the process to retrieve output later
         process.finished.connect(lambda: self.parse_joint_states(process, silent))
@@ -2212,11 +2190,7 @@ class RobotControlUI(QMainWindow):
             lines = output.split('\n')
             for line in lines:
                 html_line = self._ansi_to_html(line)
-                cursor = self.joint_status_text.textCursor()
-                cursor.movePosition(cursor.End)
-                self.joint_status_text.setTextCursor(cursor)
-                self.joint_status_text.insertHtml(html_line)
-                cursor.insertText('\n')
+                self._append_to_text_widget(self.joint_status_text, html_line)
         
         # Check if topic actually published data (not timeout or error)
         if not output.strip() or 'ERROR' in output or output.strip().startswith('timeout'):
@@ -2407,11 +2381,7 @@ class RobotControlUI(QMainWindow):
         process.readyReadStandardOutput.connect(lambda: self._handle_joint_publish_output(process))
         
         # Display command in bold green
-        cursor = self.joint_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.joint_status_text.setTextCursor(cursor)
-        self.joint_status_text.insertHtml("<b style='color: #57ab5a;'>📤 Publishing joint trajectory...</b><br>")
-        cursor.insertText('\n')
+        self._append_to_text_widget(self.joint_status_text, "<b style='color: #57ab5a;'>📤 Publishing joint trajectory...</b><br>", add_newline=True)
         
         # Show the positions being published
         self.joint_status_text.append(f"Positions: {positions_str}")
@@ -2429,11 +2399,7 @@ class RobotControlUI(QMainWindow):
             lines = output.split('\n')
             for line in lines:
                 html_line = self._ansi_to_html(line)
-                cursor = self.joint_status_text.textCursor()
-                cursor.movePosition(cursor.End)
-                self.joint_status_text.setTextCursor(cursor)
-                self.joint_status_text.insertHtml(html_line)
-                cursor.insertText('\n')
+                self._append_to_text_widget(self.joint_status_text, html_line)
 
     def on_joint_publish_finished(self, process):
         """Handle completion of joint trajectory publish command"""
