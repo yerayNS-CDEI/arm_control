@@ -6,7 +6,7 @@
 
 import rclpy
 from rclpy.node import Node
-from navi_wall_interfaces.srv import HyperspectralCommand, HyperspectralConfig
+from arm_control.srv import HyperspectralCommand, HyperspectralConfig
 
 
 class TestHyperspectralClient(Node):

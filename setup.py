@@ -35,7 +35,8 @@ setup(
             'robot_status_check = control.robot_status_check:main',
             'send_and_monitor_trajectory = control.send_and_monitor_trajectory:main',
             'UI = control.UI:main',
-            
+            'inspection_manager = sensors.inspection_manager:main',
+
             # Planner nodes
             'base_placement_node = planner.base_placement_node:main',
             'planner_node = planner.planner_node:main',

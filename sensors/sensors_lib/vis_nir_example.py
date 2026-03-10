@@ -2,7 +2,7 @@
 #### VIS + NIR ACQUISITION
 ##################################################
 
-from .lenz_client import LenzClient
+from lenz_client import LenzClient
 import threading
 import time
 import matplotlib.pyplot as plt

@@ -1,0 +1,8 @@
+# PredictMaterial.srv
+# --- Petició (Request) ---
+float32[] vis_spectrum
+float32[] nir_spectrum
+---
+# --- Resposta (Response) ---
+string material
+float32 confidence

@@ -35,6 +35,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/OptimalBase.srv"
   "srv/HyperspectralCommand.srv"
   "srv/HyperspectralConfig.srv"
+  "srv/PredictMaterial.srv"
   DEPENDENCIES geometry_msgs std_msgs
 )
 
@@ -44,6 +45,7 @@ set(PYTHON_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/local/lib/python${Python3_VERSIO
 
 # Create symlinks for Python modules during install
 install(CODE "
+  file(MAKE_DIRECTORY ${PYTHON_INSTALL_DIR})
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
     ${CMAKE_CURRENT_SOURCE_DIR}/control
     ${PYTHON_INSTALL_DIR}/control)
@@ -94,6 +96,8 @@ install(CODE "
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/arduino_sensors.py \${LIB_DIR}/arduino_sensors)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/arduino_sensors_sim.py \${LIB_DIR}/arduino_sensors_sim)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/test_hyperspectral_client.py \${LIB_DIR}/test_hyperspectral_client)
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/ml_inference_node.py \${LIB_DIR}/ml_inference_node)
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/inspection_manager.py \${LIB_DIR}/inspection_manager)
 ")
 
 # Install launch files
