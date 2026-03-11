@@ -135,6 +135,12 @@ def generate_launch_description():
             executable="end_effector_pose_node",
             name="end_effector_pose_node",
             output="screen",
+        ),
+        Node(
+            package="arm_control",
+            executable="position_sender_node",
+            name="position_sender_node",
+            output="screen",
         ),        
     ])
 
