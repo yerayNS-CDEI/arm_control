@@ -35,6 +35,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/OptimalBase.srv"
   "srv/HyperspectralCommand.srv"
   "srv/HyperspectralConfig.srv"
+  "srv/SendPosition.srv"
   DEPENDENCIES geometry_msgs std_msgs
 )
 

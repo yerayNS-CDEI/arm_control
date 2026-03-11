@@ -1,0 +1,8 @@
+# Request
+string position_name  # Name of the position to send (e.g., 'folded', 'unfolded', 'up', etc.)
+
+---
+
+# Response
+bool success          # True if position was found and sent successfully
+string message        # Status or error message

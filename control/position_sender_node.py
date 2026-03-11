@@ -13,6 +13,7 @@ from rclpy.utilities import remove_ros_args
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from arm_control.srv import SendPosition
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -40,6 +41,12 @@ class PositionSenderNode(Node):
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)        
         self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
         
+        # Service for sending positions
+        self.send_position_service = self.create_service(
+            SendPosition,
+            'send_position',
+            self.send_position_service_callback
+        )
         
         # Predefined positions (can be loaded from config file)
         self.positions = {
@@ -148,9 +155,10 @@ class PositionSenderNode(Node):
         # Timer for checking status
         self.timer = self.create_timer(0.5, self.check_status)
         
-        self.get_logger().info("Position Sender Node initialized.")
+        self.get_logger().info("Position Sender Node initialized as a service.")
         self.get_logger().info(f"Available positions: {list(self.positions.keys())}")
-        self.get_logger().info("Use: ros2 run arm_control position_sender <position_name>")
+        self.get_logger().info("Service available at: /send_position")
+        self.get_logger().info("Use: ros2 service call /send_position arm_control/srv/SendPosition \"{position_name: '<name>'}\"")
         
     def joint_state_callback(self, msg):
         # Generate index array mapping expected order to actual message order
@@ -183,28 +191,45 @@ class PositionSenderNode(Node):
             self.movement_done = True
             self.get_logger().info(f"Position '{self.current_position_name}' reached successfully!")
             self.goal_sent = False
+    
+    def send_position_service_callback(self, request, response):
+        """Service callback to send a requested position."""
+        position_name = request.position_name
+        
+        self.get_logger().info(f"Received request to send position: '{position_name}'")
+        
+        success, message = self.send_position(position_name)
+        
+        response.success = success
+        response.message = message
+        
+        return response
             
     def send_position(self, position_name):
         """Send a predefined position to the manipulator."""
         if self.emergency_stop:
-            self.get_logger().warn("Cannot send position while emergency stop is active.")
-            return False
+            msg = "Cannot send position while emergency stop is active."
+            self.get_logger().warn(msg)
+            return False, msg
         
         if position_name not in self.positions:
+            msg = f"Position '{position_name}' not found! Available positions: {list(self.positions.keys())}"
             self.get_logger().error(f"Position '{position_name}' not found!")
             self.get_logger().info(f"Available positions: {list(self.positions.keys())}")
-            return False
+            return False, msg
         
         position_data = self.positions[position_name]
         pose_data = position_data.get('pose')
         
         if pose_data is None:
-            self.get_logger().error(f"No pose data defined for position '{position_name}'")
-            return False
+            msg = f"No pose data defined for position '{position_name}'"
+            self.get_logger().error(msg)
+            return False, msg
         
         if len(pose_data) != 7:
-            self.get_logger().error(f"Invalid pose data for '{position_name}': expected 7 values (x,y,z,qx,qy,qz,qw)")
-            return False
+            msg = f"Invalid pose data for '{position_name}': expected 7 values (x,y,z,qx,qy,qz,qw)"
+            self.get_logger().error(msg)
+            return False, msg
         
         current_position  = np.array([self.end_effector_pose.pose.position.x, self.end_effector_pose.pose.position.y, self.end_effector_pose.pose.position.z])
         dist_diff = pose_data[0:3] - current_position
@@ -236,7 +261,8 @@ class PositionSenderNode(Node):
         self.get_logger().info(f"   Position: x={pose_data[0]:.3f}, y={pose_data[1]:.3f}, z={pose_data[2]:.3f}")
         self.get_logger().info(f"   Orientation: x={pose_data[3]:.3f}, y={pose_data[4]:.3f}, z={pose_data[5]:.3f}, w={pose_data[6]:.3f}")
         
-        return True
+        success_msg = f"Position '{position_name}' sent to planner successfully"
+        return True, success_msg
     
     def check_status(self):
         """Periodic check of movement status."""
@@ -279,82 +305,18 @@ class PositionSenderNode(Node):
                 self.get_logger().info(f"      Pose: {pose}")
         self.get_logger().info("=" * 50)
 
-
 def main(args=None):
     rclpy.init(args=args)
     
     node = PositionSenderNode()
     
-    # Get command line arguments
-    import sys
-    node_args = remove_ros_args(sys.argv)[1:]  # node-only args (excluding script name)
-
-    if len(node_args) > 0:
-        position_name = node_args[0]
-        
-        if position_name == 'list':
-            node.list_positions()
-        else:
-            node.send_position(position_name)
-            
-            # Spin until movement is done
-            try:
-                while rclpy.ok() and not node.movement_done:
-                    rclpy.spin_once(node, timeout_sec=0.1)
-                
-                if node.movement_done:
-                    node.get_logger().info("Movement completed. Shutting down.")
-            except KeyboardInterrupt:
-                node.get_logger().info("Interrupted by user.")
-    else:
-        node.get_logger().info("No position specified. Running in interactive mode.")
-        node.get_logger().info("Type a position name to send it, 'list' to see all positions, or 'quit' to exit.")
-        node.list_positions()
-        
-        # Interactive mode with input
-        import threading
-        
-        def spin_node():
-            try:
-                rclpy.spin(node)
-            except:
-                pass
-        
-        # Start spinning in a separate thread
-        spin_thread = threading.Thread(target=spin_node, daemon=True)
-        spin_thread.start()
-        
-        try:
-            while rclpy.ok():
-                try:
-                    user_input = input("\nEnter position name (or 'list'/'quit'): ").strip()
-                    
-                    if user_input.lower() in ['quit', 'exit', 'q']:
-                        node.get_logger().info("Exiting interactive mode.")
-                        break
-                    elif user_input.lower() == 'list':
-                        node.list_positions()
-                    elif user_input:
-                        success = node.send_position(user_input)
-                        if success:
-                            # Wait for movement to complete
-                            import time
-                            while not node.movement_done and rclpy.ok():
-                                time.sleep(0.1)
-                    else:
-                        node.get_logger().warn("Empty input. Please enter a valid position name.")
-                except EOFError:
-                    break
-                except KeyboardInterrupt:
-                    node.get_logger().info("\nInterrupted by user.")
-                    break
-        except Exception as e:
-            node.get_logger().error(f"Error in interactive mode: {e}")
-        
-        node.get_logger().info("Shutting down.")
-    
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info("Interrupted by user.")
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
