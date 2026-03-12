@@ -77,6 +77,7 @@ class PublisherJointTrajectoryActionClient(Node):
         self.get_logger().info("Waiting for action server...")
         self._action_client.wait_for_server()
         self.get_logger().info("Action server already available.")
+        self.get_logger().info("\033[1;32mEmergency stop service: ros2 service call /emergency_stop std_srvs/srv/Trigger\033[0m")
         self.timer = self.create_timer(0.1, self.timer_callback)
 
     def joint_state_callback(self, msg):
