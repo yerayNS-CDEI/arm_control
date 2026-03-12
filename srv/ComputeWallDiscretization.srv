@@ -15,4 +15,5 @@ geometry_msgs/Pose[] wall_panels_centers
 geometry_msgs/Pose[] wall_panels_vertices
 geometry_msgs/Pose[] panel_cells_centers
 geometry_msgs/Pose[] panel_cells_vertices
+int32 cells_per_panel
 bool success
