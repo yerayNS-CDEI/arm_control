@@ -89,6 +89,7 @@ class WallDiscretizer(Node):
         super().__init__('wall_discretizer_node')
         self.srv = self.create_service(ComputeWallDiscretization, 'compute_wall_discretization', self.discretize_wall_callback)
         self.get_logger().info("Wall discretization node initialized. Service is already available.")
+        self.get_logger().info("\033[1;32mUse: ros2 service call /compute_wall_discretization arm_control/srv/ComputeWallDiscretization \"{start_point: {x: 0.0, y: 0.0, z: 0.0}, end_point: {x: 2.0, y: 0.0, z: 1.5}, robot_amplitude_range: 1.0, robot_height_range: 1.0, sensors_amplitude_range: 0.5, sensors_height_range: 0.5, resolution: 0.1, target_i: 0, target_j: 0}\"\033[0m")
 
     def discretize_wall_callback(self, request, response):
         try:

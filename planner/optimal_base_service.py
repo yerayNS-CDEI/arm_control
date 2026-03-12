@@ -44,6 +44,7 @@ class OptimalBaseService(Node):
         # Servicio
         self.srv = self.create_service(OptimalBase, 'compute_optimal_base', self.handle_request)
         self.get_logger().info("Service already running.")
+        self.get_logger().info("\033[1;32mUse: ros2 service call /compute_optimal_base arm_control/srv/OptimalBase \"{poses_ee_xyzrpy: [1.0, 0.0, 0.5, 0.0, 90.0, 0.0], obstacle_rects: [], obstacle_circles: [], min_dist: 0.5, round_decimals: 2, grid_res: 0.1, x_limits: [-2.0, 2.0], y_limits: [-2.0, 2.0], enable_simulator: false, enable_robot_viz: false}\"\033[0m")
 
         # Costmap subscription for automatic obstacle detection
         self.declare_parameter('costmap_topic', '/global_costmap/costmap')

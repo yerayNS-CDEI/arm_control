@@ -158,7 +158,7 @@ class PositionSenderNode(Node):
         self.get_logger().info("Position Sender Node initialized as a service.")
         self.get_logger().info(f"Available positions: {list(self.positions.keys())}")
         self.get_logger().info("Service available at: /send_position")
-        self.get_logger().info("Use: ros2 service call /send_position arm_control/srv/SendPosition \"{position_name: '<name>'}\"")
+        self.get_logger().info("\033[1;32mUse: ros2 service call /send_position arm_control/srv/SendPosition \"{position_name: '<name>'}\"\033[0m")
         
     def joint_state_callback(self, msg):
         # Generate index array mapping expected order to actual message order

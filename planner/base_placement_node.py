@@ -50,6 +50,7 @@ class BasePlacementNode(Node):
         # Configuring service
         self.srv = self.create_service(ComputeBasePlacement, 'compute_base_placement', self.computeBasePlacementCallback)
         self.get_logger().info("Service 'compute_base_placement' ready.")
+        self.get_logger().info("\033[1;32mUse: ros2 service call /compute_base_placement arm_control/srv/ComputeBasePlacement \"targets: [{position: {x: 1.7, y: 1.6, z: 0.8}, orientation: {x: 0.0, y: 0.7071, z: 0.0, w: 0.7071}}]\"\033[0m")
         
         # # Example objectives (this node can receive inputs from other nodes)
         # self.example_targets = [
