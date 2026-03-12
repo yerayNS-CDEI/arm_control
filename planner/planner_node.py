@@ -17,6 +17,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from planner.planner_lib.closed_form_algorithm import closed_form_algorithm
 from planner.planner_lib.Astar3D import find_path, world_to_grid, grid_to_world, dilate_obstacles
 from scipy.spatial.transform import Rotation as R, Slerp
+from scipy.ndimage import binary_erosion
 
 class PlannerNode(Node):
     def __init__(self):
@@ -103,8 +104,76 @@ class PlannerNode(Node):
         self.wall_marker_pub = self.create_publisher(Marker, 'wall_marker', 10)
         self.goal_marker_pub = self.create_publisher(Marker, 'goal_pose_marker', 10)
         self.ee_path_marker_pub = self.create_publisher(Marker, 'ee_path_markers', 10)
-        
+        self.reachability_marker_pub = self.create_publisher(Marker, 'reachability_boundary_marker', qos)
+
+        self._reachability_boundary_pts = self._compute_reachability_boundary()
+        self._reachability_timer = self.create_timer(2.0, self._publish_reachability_once)
+
         self.get_logger().info("Planner node initialized and waiting for goal poses...")
+
+    def _compute_reachability_boundary(self):
+        """Build the outer-shell voxels of the reachability space using morphological erosion.
+
+        A voxel is considered a boundary voxel if it is reachable AND at least one of its
+        6-connected neighbours is not reachable (or is outside the grid).  This is equivalent
+        to: boundary = reachable AND NOT eroded(reachable).
+        """
+        reachable_3d = np.zeros(self.grid_shape, dtype=bool)
+        for k, z in enumerate(self.z_levels):
+            reachable_3d[:, :, k] = np.asarray(self.reachability_map[z]) > 0
+
+        # binary_erosion with border_value=0 treats out-of-bounds as empty,
+        # so edge voxels of the reachable region are always kept as boundary.
+        interior = binary_erosion(reachable_3d, border_value=0)
+        boundary_mask = reachable_3d & ~interior
+
+        ii, jj, kk = np.where(boundary_mask)
+        pts = [
+            (float(self.x_vals[i]), float(self.y_vals[j]), float(self.z_vals[k]))
+            for i, j, k in zip(ii, jj, kk)
+        ]
+        self.get_logger().info(f"Reachability boundary pre-computed: {len(pts)} surface voxels.")
+        return pts
+
+    def _publish_reachability_once(self):
+        """One-shot timer callback: publish the reachability boundary marker then cancel."""
+        self.publish_reachability_boundary_marker()
+        self._reachability_timer.cancel()
+
+    def publish_reachability_boundary_marker(self):
+        """Publish the pre-computed reachability boundary as a SPHERE_LIST marker in RViz."""
+        if not self._reachability_boundary_pts:
+            self.get_logger().warn("Reachability boundary is empty — nothing to publish.")
+            return
+
+        m = Marker()
+        m.header.frame_id = "arm_base"
+        m.header.stamp = rclpy.time.Time().to_msg()
+        m.ns = "reachability_boundary"
+        m.id = 0
+        m.type = Marker.SPHERE_LIST
+        m.action = Marker.ADD
+
+        # Each sphere is slightly smaller than the voxel step for a clean non-overlapping look
+        scale = float(self.cart_step) * 0.8
+        m.scale.x = scale
+        m.scale.y = scale
+        m.scale.z = scale
+
+        # Semi-transparent blue/cyan shell
+        m.color.r = 0.2
+        m.color.g = 0.6
+        m.color.b = 1.0
+        m.color.a = 0.35
+
+        m.points = [Point(x=x, y=y, z=z) for (x, y, z) in self._reachability_boundary_pts]
+        m.lifetime.sec = 0  # Persist in RViz until deleted
+
+        self.reachability_marker_pub.publish(m)
+        self.get_logger().info(
+            f"Published reachability boundary marker with {len(m.points)} points "
+            f"on topic 'reachability_boundary_marker'."
+        )
 
     def clear_goal_and_path_markers(self):
         """Clear stale goal/path markers before planning a new goal."""
@@ -538,6 +607,7 @@ class PlannerNode(Node):
             msg.pose.orientation.w
         )
         self.publish_goal_marker(pose_data)
+        self.publish_reachability_boundary_marker()
         self.plan_and_send_trajectory(msg)
 
     def plan_and_send_trajectory(self, msg: PoseStamped):
