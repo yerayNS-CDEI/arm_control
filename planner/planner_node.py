@@ -100,6 +100,7 @@ class PlannerNode(Node):
         self.create_subscription(PoseStamped, "end_effector_pose", self.end_effector_pose_callback, 10)
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
+        self.planner_goal_failed_pub = self.create_publisher(Bool, '/planner/goal_failed', 10)
         self.cyl_marker_pub = self.create_publisher(Marker, 'obstacle_markers', 10)
         self.wall_marker_pub = self.create_publisher(Marker, 'wall_marker', 10)
         self.goal_marker_pub = self.create_publisher(Marker, 'goal_pose_marker', 10)
@@ -584,6 +585,11 @@ class PlannerNode(Node):
                 self.execution_complete = True
                 self.plan_and_send_trajectory(next_goal)
 
+    def publish_planner_goal_failed(self, failed: bool):
+        msg = Bool()
+        msg.data = bool(failed)
+        self.planner_goal_failed_pub.publish(msg)
+
     def goal_callback(self, msg: PoseStamped):
         if self.emergency_stop:
             self.get_logger().warn("Emergency stop is active, aborting trajectory planning. Ignoring goal.")
@@ -595,6 +601,7 @@ class PlannerNode(Node):
             self.goal_queue.append(msg)
             return
         
+        self.publish_planner_goal_failed(False)
         self.execution_complete = False
         self.clear_goal_and_path_markers()
         pose_data = (
@@ -615,6 +622,7 @@ class PlannerNode(Node):
 
         if self.current_joint_state is None:
             self.get_logger().error("No current joint state received yet. Cannot calculate trajectory.")
+            self.publish_planner_goal_failed(True)
             return
         
         # Goal definition
@@ -641,6 +649,7 @@ class PlannerNode(Node):
             goal_idx = world_to_grid(*goal_pos, self.x_vals, self.y_vals, self.z_vals)
         except Exception as e:
             self.get_logger().error(f"Failed to convert world to grid: {e}")
+            self.publish_planner_goal_failed(True)
             return
 
         # Occupancy grid: all free (NEEDS TO be parameterized)
@@ -706,6 +715,7 @@ class PlannerNode(Node):
         if not path:
             self.get_logger().warn("No path found!")
             self.execution_complete = True  # Mark execution as complete to allow new goals
+            self.publish_planner_goal_failed(True)
             return
 
         # Convert path to world coordinates
@@ -805,6 +815,7 @@ class PlannerNode(Node):
         if np.any(np.isnan(precise_goal_joint_values)):
             self.get_logger().error("IK solution contains NaN. Aborting.")
             self.execution_complete = True  # Mark execution as complete to allow new goals
+            self.publish_planner_goal_failed(True)
             return
 
         # --- Jump detection ---
@@ -832,6 +843,7 @@ class PlannerNode(Node):
 
         if jump_detected:
             self.execution_complete = True
+            self.publish_planner_goal_failed(True)
             return
 
         self.get_logger().info(f"Joint values: {all_joint_values_print}")
@@ -861,6 +873,7 @@ class PlannerNode(Node):
             self.get_logger().warn("Invalid path detected. Halting trajectory.")
             self.invalid_path = False
             self.execution_complete = True  # Mark execution as complete to allow new goals
+            self.publish_planner_goal_failed(True)
             return
         
         # Publish trajectory
@@ -879,6 +892,7 @@ class PlannerNode(Node):
             time_from_start += 3.0  # 3 seconds per waypoint for slow, smooth motion
 
         self.trajectory_pub.publish(traj_msg)
+        self.publish_planner_goal_failed(False)
         self.get_logger().info("Published planned trajectory.")
     
     def publish_cylinder_marker(self, center_xy, radius, z_min, z_max):
