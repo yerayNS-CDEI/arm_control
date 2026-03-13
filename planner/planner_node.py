@@ -23,6 +23,9 @@ class PlannerNode(Node):
     def __init__(self):
         super().__init__('planner_node')
         
+        # Set logger level to WARNING to reduce log output
+        self.get_logger().set_level(rclpy.logging.LoggingSeverity.WARN)
+        
         # Declare and get joint prefix parameter
         self.declare_parameter('joint_prefix', 'arm_')
         self.joint_prefix = self.get_parameter('joint_prefix').get_parameter_value().string_value
@@ -710,7 +713,7 @@ class PlannerNode(Node):
 
         # Convert path to world coordinates
         path_world_raw = [grid_to_world(i, j, k, self.x_vals, self.y_vals, self.z_vals) for i, j, k in path]
-        self.get_logger().error(f"Raw path waypoints (pre-prune): {path_world_raw}")
+        self.get_logger().info(f"Raw path waypoints (pre-prune): {path_world_raw}")
         
         # Debug: publish raw path (pre-prune)
         self.publish_ee_path_markers(
@@ -771,7 +774,7 @@ class PlannerNode(Node):
 
         # Convert to Euler angles
         interpolated_euler_angles = interp_rots.as_euler('xyz', degrees=True)
-        print("Interpolated Euler angles:\n", interpolated_euler_angles)
+        # print("Interpolated Euler angles:\n", interpolated_euler_angles)
 
         # Plan joint values
         # home_position = np.array([0.0, -1.2, -2.3, -1.2, 1.57, 0.0])
@@ -779,7 +782,7 @@ class PlannerNode(Node):
         all_joint_values = []
         all_joint_values_print = []
         q_current = np.array([self.current_joint_state.position[i] for i in self.joint_indices])
-        self.get_logger().error(f"Current joint state = {self.current_joint_state.position}")
+        self.get_logger().info(f"Current joint state = {self.current_joint_state.position}")
         all_joint_values_print.append(q_current)
 
         for i in range(len(path_world)):
@@ -852,10 +855,6 @@ class PlannerNode(Node):
 
         # Publish success
         self.get_logger().info("Joint planning published.")
-                
-        # if self.emergency_stop:  # Verifies if emergency stop is active
-        #     self.get_logger().warn("Emergency stop is active. Halting trajectory.")
-        #     return
         
         if self.invalid_path:  # Verifies if invalid IK in path
             self.get_logger().warn("Invalid path detected. Halting trajectory.")
