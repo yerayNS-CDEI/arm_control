@@ -191,7 +191,7 @@ def launch_setup(context, *args, **kwargs):
     }
 
     initial_joint_controllers = PathJoinSubstitution(
-        [FindPackageShare("arm_control"), "config", controllers_file]
+        [FindPackageShare("navi_wall"), "config", controllers_file]
     )
 
     rviz_config_file = PathJoinSubstitution(
