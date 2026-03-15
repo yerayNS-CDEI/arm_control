@@ -44,6 +44,28 @@ class RobotControlUI(QMainWindow):
         self.emergency_stop_publisher = self.node.create_publisher(Bool, '/arm/emergency_stop', qos)
         self.distance_sensor_publisher = self.node.create_publisher(Float32MultiArray, '/arm/distance_sensors', 10)
         self.emergency_stop_subscriber = self.node.create_subscription(Bool, '/arm/emergency_stop', self._on_emergency_stop_state, qos)
+        self.arm_joint_names = [
+            'arm_shoulder_pan_joint',
+            'arm_shoulder_lift_joint',
+            'arm_elbow_joint',
+            'arm_wrist_1_joint',
+            'arm_wrist_2_joint',
+            'arm_wrist_3_joint',
+        ]
+        self.arm_joint_limits = {
+            'arm_shoulder_pan_joint': (-6.28, 6.28),
+            'arm_shoulder_lift_joint': (-6.28, 6.28),
+            'arm_elbow_joint': (-6.28, 6.28),
+            'arm_wrist_1_joint': (-6.28, 6.28),
+            'arm_wrist_2_joint': (-6.28, 6.28),
+            'arm_wrist_3_joint': (-6.28, 6.28),
+        }
+        self.joint_state_subscriber = self.node.create_subscription(
+            JointState,
+            '/joint_states',
+            self._on_joint_states,
+            10,
+        )
  
         # Track processes and their associated buttons
         self.process_map = {}
@@ -243,12 +265,42 @@ class RobotControlUI(QMainWindow):
         sensors_layout.addStretch()
         boxes_layout.addWidget(sensors_box)
  
-        # Terminal and Status for Arm Control tab (side by side)
+        # Live Joint Monitor and Status for Arm Control tab (side by side)
         arm_terminal_status_layout = QHBoxLayout()
-        
-        # Left side: Terminal
-        self.arm_terminal = QTermWidget()
-        arm_terminal_status_layout.addWidget(self.arm_terminal)
+
+        # Left side: Live joint position monitor (read-only)
+        arm_joint_monitor = QGroupBox("Live Arm Joint Positions (rad)")
+        arm_joint_monitor_layout = QVBoxLayout()
+        arm_joint_monitor.setLayout(arm_joint_monitor_layout)
+        self.arm_control_joint_sliders = []
+        self.arm_control_joint_value_labels = []
+
+        for joint_name in self.arm_joint_names:
+            joint_row = QHBoxLayout()
+
+            label = QLabel(f"{joint_name}:")
+            label.setMinimumWidth(150)
+            joint_row.addWidget(label)
+
+            min_limit, max_limit = self.arm_joint_limits[joint_name]
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(int(min_limit * 100), int(max_limit * 100))
+            slider.setValue(0)
+            slider.setTickPosition(QSlider.TicksBelow)
+            slider.setTickInterval(100)
+            slider.setEnabled(False)
+            joint_row.addWidget(slider)
+
+            value_label = QLabel("0.000 rad")
+            value_label.setMinimumWidth(95)
+            joint_row.addWidget(value_label)
+
+            self.arm_control_joint_sliders.append(slider)
+            self.arm_control_joint_value_labels.append(value_label)
+            arm_joint_monitor_layout.addLayout(joint_row)
+
+        arm_joint_monitor_layout.addStretch()
+        arm_terminal_status_layout.addWidget(arm_joint_monitor)
         
         # Right side: Status display
         self.status_text = QTextEdit()
@@ -264,7 +316,7 @@ class RobotControlUI(QMainWindow):
         arm_terminal_status_layout.addWidget(self.status_text)
 
         status_header = QHBoxLayout()
-        status_header.addWidget(QLabel("sudo apt install libqtermwidget5-0-dev qtermwidget5-data"))
+        status_header.addWidget(QLabel("Arm Control - Live Joints + Status"))
         status_header.addStretch()
 
         # Search bar
@@ -466,24 +518,9 @@ class RobotControlUI(QMainWindow):
         
         joint_control_layout.addWidget(QLabel("<b>Joint Positions (radians):</b>"))
         
-        # Joint names in the correct order for publishing
-        joint_names = [
-            'arm_shoulder_pan_joint', 
-            'arm_shoulder_lift_joint', 
-            'arm_elbow_joint', 
-            'arm_wrist_1_joint', 
-            'arm_wrist_2_joint', 
-            'arm_wrist_3_joint'
-        ]
-        # Define joint limits (min, max) in radians
-        joint_limits = {
-            'arm_shoulder_pan_joint': (-6.28, 6.28),
-            'arm_shoulder_lift_joint': (-3.14, 0.0),  # Custom limit
-            'arm_elbow_joint': (-6.28, 6.28),
-            'arm_wrist_1_joint': (-6.28, 6.28),
-            'arm_wrist_2_joint': (-6.28, 6.28),
-            'arm_wrist_3_joint': (-6.28, 6.28)
-        }
+        # Joint names and limits in the correct order for publishing
+        joint_names = self.arm_joint_names
+        joint_limits = self.arm_joint_limits
 
         # Create sliders and input fields for each joint
         self.joint_inputs = []
@@ -548,7 +585,7 @@ class RobotControlUI(QMainWindow):
         
         btn_read_joints = QPushButton("Read Current Joint Positions")
         btn_read_joints.clicked.connect(self.read_joint_positions)
-        btn_read_joints.setToolTip("Read current joint positions from /arm/joint_states and populate fields")
+        btn_read_joints.setToolTip("Read current joint positions from /joint_states and populate fields")
         button_layout.addWidget(btn_read_joints)
         
         self.btn_publish_joints = QPushButton("Publish Joint Trajectory")
@@ -832,12 +869,42 @@ class RobotControlUI(QMainWindow):
         full_control_troubleshooting_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_troubleshooting_box)
 
-        # Terminal and Status for Full Control tab (create NEW widgets)
+        # Live Joint Monitor and Status for Full Control tab (side by side)
         full_control_terminal_status_layout = QHBoxLayout()
 
-        # Left side: NEW Terminal for Full Control
-        self.full_control_terminal = QTermWidget()
-        full_control_terminal_status_layout.addWidget(self.full_control_terminal)
+        # Left side: Live joint position monitor (read-only)
+        full_control_joint_monitor = QGroupBox("Live Arm Joint Positions (rad)")
+        full_control_joint_monitor_layout = QVBoxLayout()
+        full_control_joint_monitor.setLayout(full_control_joint_monitor_layout)
+        self.full_control_joint_sliders = []
+        self.full_control_joint_value_labels = []
+
+        for joint_name in self.arm_joint_names:
+            joint_row = QHBoxLayout()
+
+            label = QLabel(f"{joint_name}:")
+            label.setMinimumWidth(150)
+            joint_row.addWidget(label)
+
+            min_limit, max_limit = self.arm_joint_limits[joint_name]
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(int(min_limit * 100), int(max_limit * 100))
+            slider.setValue(0)
+            slider.setTickPosition(QSlider.TicksBelow)
+            slider.setTickInterval(100)
+            slider.setEnabled(False)
+            joint_row.addWidget(slider)
+
+            value_label = QLabel("0.000 rad")
+            value_label.setMinimumWidth(95)
+            joint_row.addWidget(value_label)
+
+            self.full_control_joint_sliders.append(slider)
+            self.full_control_joint_value_labels.append(value_label)
+            full_control_joint_monitor_layout.addLayout(joint_row)
+
+        full_control_joint_monitor_layout.addStretch()
+        full_control_terminal_status_layout.addWidget(full_control_joint_monitor)
 
         # Right side: NEW Status display for Full Control
         self.full_control_status_text = QTextEdit()
@@ -854,7 +921,7 @@ class RobotControlUI(QMainWindow):
 
         # Status header with search functionality
         full_control_status_header = QHBoxLayout()
-        full_control_status_header.addWidget(QLabel("Full Control - Terminal + Status"))
+        full_control_status_header.addWidget(QLabel("Full Control - Live Joints + Status"))
         full_control_status_header.addStretch()
 
         # Search bar for Full Control
@@ -1003,6 +1070,43 @@ class RobotControlUI(QMainWindow):
                 rclpy.spin_once(self.node, timeout_sec=0)
         except Exception:
             pass  # Ignore errors if context is shutting down
+
+    def _on_joint_states(self, msg):
+        """Update live joint sliders in Arm and Full Control tabs from joint states topics."""
+        if not msg.name or not msg.position:
+            return
+
+        joint_position_map = dict(zip(msg.name, msg.position))
+        updated_positions = {}
+
+        monitor_sets = [
+            ('arm_control_joint_sliders', 'arm_control_joint_value_labels'),
+            ('full_control_joint_sliders', 'full_control_joint_value_labels'),
+        ]
+
+        for slider_attr, label_attr in monitor_sets:
+            if not hasattr(self, slider_attr) or not hasattr(self, label_attr):
+                continue
+
+            sliders = getattr(self, slider_attr)
+            labels = getattr(self, label_attr)
+
+            for i, joint_name in enumerate(self.arm_joint_names):
+                if joint_name not in joint_position_map:
+                    continue
+                if i >= len(sliders) or i >= len(labels):
+                    continue
+
+                position = joint_position_map[joint_name]
+                slider = sliders[i]
+                slider_value = int(position * 100)
+                slider_value = max(slider.minimum(), min(slider.maximum(), slider_value))
+                slider.setValue(slider_value)
+                labels[i].setText(f"{position:.3f} rad")
+                updated_positions[joint_name] = position
+
+        if len(updated_positions) == len(self.arm_joint_names):
+            self.current_joint_positions = updated_positions
     
     def _on_tab_changed(self, index, tabs):
         """Handle tab change - check joint states when Joint Control tab is activated"""
@@ -2190,7 +2294,7 @@ class RobotControlUI(QMainWindow):
         self.joint_status_text.clear()
     
     def read_joint_positions(self, silent=False):
-        """Read current joint positions from /arm/joint_states and populate input fields"""
+        """Read current joint positions from /joint_states and populate input fields"""
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
         
@@ -2272,14 +2376,7 @@ class RobotControlUI(QMainWindow):
             joint_position_map = dict(zip(joint_names, positions))
             
             # Expected joint order (for UI display and publishing)
-            expected_joints = [
-                'arm_shoulder_pan_joint',
-                'arm_shoulder_lift_joint',
-                'arm_elbow_joint',
-                'arm_wrist_1_joint',
-                'arm_wrist_2_joint',
-                'arm_wrist_3_joint'
-            ]
+            expected_joints = self.arm_joint_names
             
             # Verify all expected joints are present
             missing_joints = [j for j in expected_joints if j not in joint_position_map]
@@ -2337,14 +2434,7 @@ class RobotControlUI(QMainWindow):
     def publish_joint_trajectory(self):
         """Publish joint trajectory to /arm/planned_trajectory topic"""
         # Expected joint order for publishing
-        expected_joints = [
-            'arm_shoulder_pan_joint',
-            'arm_shoulder_lift_joint',
-            'arm_elbow_joint',
-            'arm_wrist_1_joint',
-            'arm_wrist_2_joint',
-            'arm_wrist_3_joint'
-        ]
+        expected_joints = self.arm_joint_names
         
         # Get joint positions from input fields (in expected order)
         positions = [field.value() for field in self.joint_inputs]
