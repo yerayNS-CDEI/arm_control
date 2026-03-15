@@ -133,13 +133,18 @@ class RobotControlUI(QMainWindow):
         # Dropdown for position selection
         control_layout.addWidget(QLabel("Select Position:"))
         position_sender_layout = QHBoxLayout()
+        self.position_names = [
+            'custom', 'folded', 'unfolded', 'up', 'down', 'front',
+            'left', 'right', 'one', 'two', 'three', 'four', 'five',
+            'six', 'p1', 'initial', 'under', 'under1', 'under2'
+        ]
         self.position_dropdown = QComboBox()
-        self.position_dropdown.addItems(['custom', 'folded', 'unfolded', 'up', 'down', 'front', 'list'])
+        self.position_dropdown.addItems(self.position_names)
         position_sender_layout.addWidget(self.position_dropdown)
  
         btn_send_position = QPushButton("Send Position")
         btn_send_position.clicked.connect(self.send_position_command)
-        btn_send_position.setToolTip("ros2 run arm_control position_sender_node --ros-args -r __ns:=/arm -- <position>")
+        btn_send_position.setToolTip("ros2 service call /send_position arm_control/srv/SendPosition \"{position_name: '<position>'}\"")
         position_sender_layout.addWidget(btn_send_position)
         control_layout.addLayout(position_sender_layout)
  
@@ -694,6 +699,23 @@ class RobotControlUI(QMainWindow):
         self.btn_full_control_exploration.clicked.connect(lambda: self.toggle_exploration(mode='full', button=self.btn_full_control_exploration, sim_combo=self.full_control_sim_mode_combo))
         self.btn_full_control_exploration.setToolTip("ros2 run navi_wall explore --ros-args --params-file config/explore_params.yaml")
         full_control_mapping_layout.addWidget(self.btn_full_control_exploration)
+
+        full_control_position_separator = QFrame()
+        full_control_position_separator.setFrameShape(QFrame.HLine)
+        full_control_position_separator.setFrameShadow(QFrame.Sunken)
+        full_control_mapping_layout.addWidget(full_control_position_separator)
+
+        full_control_mapping_layout.addWidget(QLabel("Select Position:"))
+        full_control_position_layout = QHBoxLayout()
+        self.full_control_position_dropdown = QComboBox()
+        self.full_control_position_dropdown.addItems(self.position_names)
+        full_control_position_layout.addWidget(self.full_control_position_dropdown)
+
+        btn_full_control_send_position = QPushButton("Send Position")
+        btn_full_control_send_position.clicked.connect(self.send_full_control_position_command)
+        btn_full_control_send_position.setToolTip("ros2 service call /send_position arm_control/srv/SendPosition \"{position_name: '<position>'}\"")
+        full_control_position_layout.addWidget(btn_full_control_send_position)
+        full_control_mapping_layout.addLayout(full_control_position_layout)
 
         full_control_mapping_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_mapping_box)
@@ -2439,38 +2461,63 @@ class RobotControlUI(QMainWindow):
             self.status_text.append(f"<span style='color: #f47067;'>❌ Failed to send goal: {e}</span>")
  
     def send_position_command(self):
-        """Send position by launching node with selected position as argument"""
+        """Send selected position using /send_position service (Arm Control tab)."""
         position_name = self.position_dropdown.currentText()
- 
-        # Build command
-        ros2_args = ['run', 'arm_control', 'position_sender_node', 
-                     '--ros-args', '-r', '__ns:=/arm']
-        
-        # Build xterm command
-        ros2_cmd = 'ros2 ' + ' '.join(ros2_args)
-        xterm_args = ['-e', 'bash', '-c', ros2_cmd]
- 
-        # Display command in bold green
-        cmd_str = 'xterm -e ' + ros2_cmd
-        self.status_text.append(f"<b style='color: #57ab5a;'>→ {cmd_str}</b>")
-        self.status_text.append("")  # Add newline after command
- 
-        # Launch the position_sender_node in xterm
+        self._send_position_service_call(
+            position_name=position_name,
+            status_text=self.status_text,
+            output_handler=self.handle_output,
+        )
+
+    def send_full_control_position_command(self):
+        """Send selected position using /send_position service (Full Control tab)."""
+        position_name = self.full_control_position_dropdown.currentText()
+        self._send_position_service_call(
+            position_name=position_name,
+            status_text=self.full_control_status_text,
+            output_handler=self.handle_full_control_output,
+        )
+
+    def _send_position_service_call(self, position_name, status_text, output_handler):
+        """Execute ros2 service call for /send_position and stream output to target status widget."""
+        payload = f"{{position_name: '{position_name}'}}"
+        ros2_args = [
+            'service',
+            'call',
+            '/send_position',
+            'arm_control/srv/SendPosition',
+            payload,
+        ]
+
+        cmd_str = f'ros2 service call /send_position arm_control/srv/SendPosition "{payload}"'
+        self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
-        process.readyReadStandardOutput.connect(lambda: self.handle_output(process))
- 
-        # Store process temporarily to prevent garbage collection
-        process_key = f'position_cmd_{position_name}'
-        process.finished.connect(lambda: self._cleanup_position_sender(process_key, position_name))
-        process.start('xterm', xterm_args)
+        process.readyReadStandardOutput.connect(lambda: output_handler(process))
+
+        process_key = f"send_position_service_{time.time_ns()}"
+        process.finished.connect(
+            lambda: self._cleanup_send_position_service_call(process_key, position_name, status_text)
+        )
+
+        process.start('ros2', ros2_args)
         self.process_map[process_key] = process
- 
-    def _cleanup_position_sender(self, process_key, position_name):
-        """Clean up finished position sender process"""
-        if process_key in self.process_map:
-            del self.process_map[process_key]
-        self.status_text.append(f"✓ Position '{position_name}' command completed")
+
+    def _cleanup_send_position_service_call(self, process_key, position_name, status_text):
+        """Clean up one-shot send position service call process."""
+        if process_key not in self.process_map:
+            return
+
+        exit_code = self.process_map[process_key].exitCode()
+        del self.process_map[process_key]
+
+        if exit_code == 0:
+            status_text.append(f"✓ Position '{position_name}' request completed")
+        else:
+            status_text.append(
+                f"<span style='color: #c69026;'>⚠ Position '{position_name}' request finished with exit code {exit_code}</span>"
+            )
  
     def emergency_stop(self):
         """Toggle emergency stop state (latched)."""
