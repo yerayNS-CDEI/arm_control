@@ -1300,9 +1300,14 @@ class RobotControlUI(QMainWindow):
         sim_mode = sim_combo.currentText()
         controller_type = controller_type_combo.currentText()
         
-        # Build args based on sim mode
-        if sim_mode == 'true':
-            args = ['launch', 'navi_wall', 'mapping_3d.launch.py', f'sim:={sim_mode}', f'mode:={mode}', f'controller_type:={controller_type}']
+        args = [
+            'launch',
+            'navi_wall',
+            'mapping_3d.launch.py',
+            f'sim:={sim_mode}',
+            f'mode:={mode}',
+            f'controller_type:={controller_type}',
+        ]
         
         process_key = f'{mode}_mapping' if mode != 'base' else 'mapping'
         display_name = 'Mapping'
