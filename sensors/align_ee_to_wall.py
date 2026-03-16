@@ -85,6 +85,9 @@ class SensorsOrientation(Node):
         self.current_joint_state = msg
 
     def listener_distance_callback(self, msg):
+        if self.end_effector_pose is None:
+            self.get_logger().warn("Waiting for end-effector pose...")
+            return
         if len(msg.data) == 6 and  all(v > 0.0 for v in msg.data) and all(v < 255.0 for v in msg.data):
             ultra1, ultra2, ultra3 = msg.data[0:3]
             s1, s2, s3 = msg.data[3:6]

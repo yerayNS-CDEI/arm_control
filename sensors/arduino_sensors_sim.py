@@ -18,11 +18,13 @@ class SimulatedSensorNode(Node):
         self.declare_parameter('batch_size', 5)
         self.declare_parameter('calc_type', 0)  # 0: median, 1: average
         self.declare_parameter('publish_rate', 1.0)  # Hz
+        self.declare_parameter('autostart', False)
         
         # Get parameters
         self.batch_size = self.get_parameter('batch_size').value
         self.calc_type = self.get_parameter('calc_type').value
         publish_rate = self.get_parameter('publish_rate').value
+        autostart = self.get_parameter('autostart').value
         
         # QoS for Gazebo sensors (RELIABLE as confirmed)
         sensor_qos = QoSProfile(
@@ -59,7 +61,7 @@ class SimulatedSensorNode(Node):
         self.buffer_vl = [deque(maxlen=self.batch_size) for _ in range(3)]
         
         # Publication control
-        self.publish_now = False
+        self.publish_now = autostart
         self.publish_mode = 1  # Start in continuous mode for simulation
         
         # Timer for publishing at fixed rate
@@ -73,9 +75,12 @@ class SimulatedSensorNode(Node):
         for i in range(3):
             self.buffer_vl[i].append(self.tof_hardcoded[i] * 1000.0)  # Convert to mm
         
-        self.get_logger().info(f"Simulated sensor node initialized (batch_size={self.batch_size}, calc_type={self.calc_type})")
+        self.get_logger().info(f"Simulated sensor node initialized (batch_size={self.batch_size}, calc_type={self.calc_type}, autostart={autostart})")
         self.get_logger().info("ToF sensors hardcoded to 0.10m (not used in scanning)")
-        self.get_logger().info("Press 'c' to enable continuous publishing, 'p' for single publish")
+        if autostart:
+            self.get_logger().info("Autostart enabled: continuous publishing started")
+        else:
+            self.get_logger().info("Press 'c' to enable continuous publishing, 'p' for single publish")
     
     def listen_for_key(self):
         """Keyboard input thread for manual publish control"""
