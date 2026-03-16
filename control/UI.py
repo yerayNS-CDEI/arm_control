@@ -366,11 +366,18 @@ class RobotControlUI(QMainWindow):
         sim_param_layout.addWidget(QLabel("Simulation Mode:"))
         self.sim_mode_combo = QComboBox()
         self.sim_mode_combo.addItems(['false', 'true'])
+        self.sim_mode_combo.currentTextChanged.connect(self._update_headless_visibility)
         sim_param_layout.addWidget(self.sim_mode_combo)
         sim_param_layout.addWidget(QLabel("Controller Type:"))
         self.controller_type_combo = QComboBox()
         self.controller_type_combo.addItems(['omni', 'diff'])
         sim_param_layout.addWidget(self.controller_type_combo)
+        self.base_headless_label = QLabel("Headless:")
+        self.base_headless_combo = QComboBox()
+        self.base_headless_combo.addItems(['false', 'true'])
+        self.base_headless_combo.setCurrentText('false')
+        sim_param_layout.addWidget(self.base_headless_label)
+        sim_param_layout.addWidget(self.base_headless_combo)
         sim_param_layout.addStretch()
         base_tab_layout.insertLayout(0, sim_param_layout)
  
@@ -381,14 +388,14 @@ class RobotControlUI(QMainWindow):
  
         # Launch Mapping button
         self.btn_launch_mapping = QPushButton("Start Mapping")
-        self.btn_launch_mapping.clicked.connect(lambda: self.toggle_mapping(controller_type_combo=self.controller_type_combo))
-        self.btn_launch_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:=<mode>  controller_type:=<type>")
+        self.btn_launch_mapping.clicked.connect(lambda: self.toggle_mapping(controller_type_combo=self.controller_type_combo, headless_combo=self.base_headless_combo))
+        self.btn_launch_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:=<mode> mode:=base controller_type:=<type> headless:=<true/false>")
         mapping_loc_layout.addWidget(self.btn_launch_mapping)
- 
+
         # Launch Localization button
         self.btn_launch_localization = QPushButton("Start Localization")
-        self.btn_launch_localization.clicked.connect(lambda: self.toggle_localization(controller_type_combo=self.controller_type_combo))
-        self.btn_launch_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> controller_type:=<type>")
+        self.btn_launch_localization.clicked.connect(lambda: self.toggle_localization(controller_type_combo=self.controller_type_combo, headless_combo=self.base_headless_combo))
+        self.btn_launch_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=base controller_type:=<type> headless:=<true/false>")
         mapping_loc_layout.addWidget(self.btn_launch_localization)
  
         # View map button
@@ -646,6 +653,12 @@ class RobotControlUI(QMainWindow):
         self.full_control_controller_type_combo = QComboBox()
         self.full_control_controller_type_combo.addItems(['omni', 'diff'])
         full_control_sim_param_layout.addWidget(self.full_control_controller_type_combo)
+        self.full_control_headless_label = QLabel("Headless:")
+        self.full_control_headless_combo = QComboBox()
+        self.full_control_headless_combo.addItems(['false', 'true'])
+        self.full_control_headless_combo.setCurrentText('false')
+        full_control_sim_param_layout.addWidget(self.full_control_headless_label)
+        full_control_sim_param_layout.addWidget(self.full_control_headless_combo)
         full_control_sim_param_layout.addStretch()
         full_control_tab_layout.addLayout(full_control_sim_param_layout)
 
@@ -718,13 +731,13 @@ class RobotControlUI(QMainWindow):
         full_control_mapping_box.setLayout(full_control_mapping_layout)
 
         self.btn_full_control_mapping = QPushButton("Start Mapping")
-        self.btn_full_control_mapping.clicked.connect(lambda: self.toggle_mapping(mode='full', button=self.btn_full_control_mapping, sim_combo=self.full_control_sim_mode_combo, controller_type_combo=self.full_control_controller_type_combo))
-        self.btn_full_control_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:= <mode>  mode:=full controller_type:=<type>")
+        self.btn_full_control_mapping.clicked.connect(lambda: self.toggle_mapping(mode='full', button=self.btn_full_control_mapping, sim_combo=self.full_control_sim_mode_combo, controller_type_combo=self.full_control_controller_type_combo, headless_combo=self.full_control_headless_combo))
+        self.btn_full_control_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:=<mode> mode:=full controller_type:=<type> headless:=<true/false>")
         full_control_mapping_layout.addWidget(self.btn_full_control_mapping)
 
         self.btn_full_control_localization = QPushButton("Start Localization")
-        self.btn_full_control_localization.clicked.connect(lambda: self.toggle_localization(mode='full', button=self.btn_full_control_localization, sim_combo=self.full_control_sim_mode_combo, controller_type_combo=self.full_control_controller_type_combo))
-        self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:= mode:=full controller_type:=<type>")
+        self.btn_full_control_localization.clicked.connect(lambda: self.toggle_localization(mode='full', button=self.btn_full_control_localization, sim_combo=self.full_control_sim_mode_combo, controller_type_combo=self.full_control_controller_type_combo, headless_combo=self.full_control_headless_combo))
+        self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=full controller_type:=<type> headless:=<true/false>")
         full_control_mapping_layout.addWidget(self.btn_full_control_localization)
 
         self.btn_full_control_nav2 = QPushButton("Launch Nav2")
@@ -975,6 +988,7 @@ class RobotControlUI(QMainWindow):
         self.JOINT_TAB_INDEX = 2
         self.FULL_CONTROL_TAB_INDEX = 3
         self._update_init_box_state()
+        self._update_headless_visibility()
         
         # Initial topics list refresh
         QTimer.singleShot(1000, self.refresh_topics_list)  # Delay 1s to ensure ROS is ready
@@ -998,6 +1012,23 @@ class RobotControlUI(QMainWindow):
             self.full_control_init_box.setEnabled(False)
         else:
             self.full_control_init_box.setEnabled(True)
+        self._update_headless_visibility()
+
+    def _update_headless_visibility(self):
+        """Show headless selectors only when simulation mode is true."""
+        base_sim_mode = self.sim_mode_combo.currentText() if hasattr(self, "sim_mode_combo") else 'false'
+        base_visible = (base_sim_mode == 'true')
+        if hasattr(self, "base_headless_label"):
+            self.base_headless_label.setVisible(base_visible)
+        if hasattr(self, "base_headless_combo"):
+            self.base_headless_combo.setVisible(base_visible)
+
+        full_sim_mode = self.full_control_sim_mode_combo.currentText() if hasattr(self, "full_control_sim_mode_combo") else 'false'
+        full_visible = (full_sim_mode == 'true')
+        if hasattr(self, "full_control_headless_label"):
+            self.full_control_headless_label.setVisible(full_visible)
+        if hasattr(self, "full_control_headless_combo"):
+            self.full_control_headless_combo.setVisible(full_visible)
 
     def _set_tab_enabled(self, tab_index, enabled):
         """Enable or disable a tab (make it clickable or unclickable)"""
@@ -1288,7 +1319,7 @@ class RobotControlUI(QMainWindow):
         self._toggle_process('align_ee_to_wall', self.btn_align_ee_to_wall, 'Align EE to Wall',
                             'ros2', ['run', 'arm_control', 'align_ee_to_wall'])
         
-    def toggle_mapping(self, mode='base', button=None, sim_combo=None, controller_type_combo=None):
+    def toggle_mapping(self, mode='base', button=None, sim_combo=None, controller_type_combo=None, headless_combo=None):
         """Toggle mapping with configurable mode parameter"""
         if button is None:
             button = self.btn_launch_mapping
@@ -1296,9 +1327,12 @@ class RobotControlUI(QMainWindow):
             sim_combo = self.sim_mode_combo
         if controller_type_combo is None:
             controller_type_combo = self.controller_type_combo
+        if headless_combo is None:
+            headless_combo = self.base_headless_combo if mode == 'base' else self.full_control_headless_combo
         
         sim_mode = sim_combo.currentText()
         controller_type = controller_type_combo.currentText()
+        headless = headless_combo.currentText() if headless_combo else 'false'
         
         args = [
             'launch',
@@ -1307,6 +1341,7 @@ class RobotControlUI(QMainWindow):
             f'sim:={sim_mode}',
             f'mode:={mode}',
             f'controller_type:={controller_type}',
+            f'headless:={headless}',
         ]
         
         process_key = f'{mode}_mapping' if mode != 'base' else 'mapping'
@@ -1330,7 +1365,7 @@ class RobotControlUI(QMainWindow):
             self._update_tab_states_for_base()
 
     
-    def toggle_localization(self, mode='base', button=None, sim_combo=None, controller_type_combo=None):
+    def toggle_localization(self, mode='base', button=None, sim_combo=None, controller_type_combo=None, headless_combo=None):
         """Toggle localization with configurable mode parameter"""
         if button is None:
             button = self.btn_launch_localization
@@ -1338,16 +1373,19 @@ class RobotControlUI(QMainWindow):
             sim_combo = self.sim_mode_combo
         if controller_type_combo is None:
             controller_type_combo = self.controller_type_combo
+        if headless_combo is None:
+            headless_combo = self.base_headless_combo if mode == 'base' else self.full_control_headless_combo
         
         sim_mode = sim_combo.currentText()
         controller_type = controller_type_combo.currentText()
+        headless = headless_combo.currentText() if headless_combo else 'false'
         
         process_key = f'{mode}_localization' if mode != 'base' else 'localization'
         display_name = 'Localization'
         
         self._toggle_base_process(process_key, button, display_name,
                                 'ros2', ['launch', 'navi_wall', 'move_robot.launch.py',
-                                        f'sim:={sim_mode}', f'mode:={mode}', f'controller_type:={controller_type}'])
+                                        f'sim:={sim_mode}', f'mode:={mode}', f'controller_type:={controller_type}', f'headless:={headless}'])
         if mode == 'full':
             self._update_tab_states_for_full_control()
         
