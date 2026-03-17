@@ -80,7 +80,7 @@ class RobotControlUI(QMainWindow):
  
         # Robot dashboard connection
         self.robot_socket = None
-        self.robot_host = '192.168.1.102'
+        self.robot_host = '192.168.56.101'
         self.robot_port = 29999
  
         # Action client for canceling trajectory goals
@@ -208,11 +208,11 @@ class RobotControlUI(QMainWindow):
         init_layout.addWidget(self.status_cmd_combo)
  
         btn_send_status = QPushButton("Send Status Command")
-        btn_send_status.clicked.connect(self.send_status_command)
+        btn_send_status.clicked.connect(lambda: self.send_status_command())
         init_layout.addWidget(btn_send_status)
         
         btn_send_all_status = QPushButton("Send All Status Commands")
-        btn_send_all_status.clicked.connect(self.send_all_status_commands)
+        btn_send_all_status.clicked.connect(lambda: self.send_all_status_commands())
         btn_send_all_status.setToolTip("Send all status commands sequentially: robotmode, safetystatus, programState, running, get loaded program, is in remote control")
         init_layout.addWidget(btn_send_all_status)
  
@@ -236,7 +236,7 @@ class RobotControlUI(QMainWindow):
         init_layout.addWidget(self.control_cmd_combo)
  
         btn_send_control = QPushButton("Send Control Command")
-        btn_send_control.clicked.connect(self.send_control_command)
+        btn_send_control.clicked.connect(lambda: self.send_control_command())
         init_layout.addWidget(btn_send_control)
  
         init_layout.addStretch()
@@ -1258,7 +1258,7 @@ class RobotControlUI(QMainWindow):
         sim_mode = self.arm_sim_mode_combo.currentText()
         self._toggle_process('arm_launch', self.btn_general_launch, 'Arm',
                             'ros2', ['launch', 'arm_control', 'arm.launch.py',
-                                    'robot_ip:=192.168.1.102',
+                                    'robot_ip:=192.168.56.101',
                                     f'sim:={sim_mode}',
                                     'mode:=arm',
                                 ])

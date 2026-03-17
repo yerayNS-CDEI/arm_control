@@ -1,6 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import GroupAction, IncludeLaunchDescription, DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution, NotSubstitution
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import PushRosNamespace, Node, SetParameter
 from launch_ros.substitutions import FindPackageShare
@@ -84,6 +84,9 @@ def generate_launch_description():
     simulation = LaunchConfiguration('sim')
     mode = LaunchConfiguration('mode')
     namespace_arm = LaunchConfiguration('namespace_arm')
+    
+    # Invert simulation: when parent sim=true (base in Gazebo), pass false (arm to URSim)
+    inverted_sim = NotSubstitution(simulation)
 
     # --- Namespaced groups (namespace ONLY in the parent) ---
     arm_group = GroupAction([
@@ -100,21 +103,21 @@ def generate_launch_description():
                 'tf_prefix':            tf_prefix,
                 'prefix':               prefix,
                 'mode':                 mode,
+                'sim':                  inverted_sim,  # Inverted sim value
             }.items(),
-            condition=UnlessCondition(simulation)
         ),
         
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(ur_sim_control_launch),
-            launch_arguments={
-                'ur_type':              ur_type,
-                'tf_prefix':            tf_prefix,
-                'prefix':               prefix,
-                'mode':                 mode,
-                'launch_rviz':          launch_rviz,
-            }.items(),
-            condition=IfCondition(simulation)
-        ),
+        # IncludeLaunchDescription(
+        #     PythonLaunchDescriptionSource(ur_sim_control_launch),
+        #     launch_arguments={
+        #         'ur_type':              ur_type,
+        #         'tf_prefix':            tf_prefix,
+        #         'prefix':               prefix,
+        #         'mode':                 mode,
+        #         'launch_rviz':          launch_rviz,
+        #     }.items(),
+        #     # condition=IfCondition(simulation)
+        # ),
         
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(publisher_launch),
