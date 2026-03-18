@@ -166,18 +166,19 @@ class PositionSenderNode(Node):
         self.get_logger().info("\033[1;32mUse: ros2 service call /send_position arm_control/srv/SendPosition \"{position_name: '<name>'}\"\033[0m")
         
     def joint_state_callback(self, msg):
-        # Generate index array mapping expected order to actual message order
-        if self.joint_indices is None:
-            self.joint_indices = []
-            for expected_name in self.expected_joint_names:
-                try:
-                    idx = msg.name.index(expected_name)
-                    self.joint_indices.append(idx)
-                except ValueError:
-                    self.get_logger().error(f"Joint '{expected_name}' not found in joint_states message")
-                    self.joint_indices = None
-                    return
-        
+        # Recompute mapping on every message because different joint_states sources
+        # can have different joint ordering/lengths.
+        joint_indices = []
+        for expected_name in self.expected_joint_names:
+            try:
+                idx = msg.name.index(expected_name)
+            except ValueError:
+                return
+            if idx >= len(msg.position):
+                return
+            joint_indices.append(idx)
+
+        self.joint_indices = joint_indices
         self.current_joint_state = msg
         
     def end_effector_pose_callback(self, msg):
