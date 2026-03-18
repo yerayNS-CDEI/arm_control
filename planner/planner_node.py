@@ -564,18 +564,19 @@ class PlannerNode(Node):
             self.execution_complete = True
 
     def joint_state_callback(self, msg):
-        # Generate index array mapping expected order to actual message order
-        if self.joint_indices is None:
-            self.joint_indices = []
-            for expected_name in self.expected_joint_names:
-                try:
-                    idx = msg.name.index(expected_name)
-                    self.joint_indices.append(idx)
-                except ValueError:
-                    self.get_logger().error(f"Joint '{expected_name}' not found in joint_states message")
-                    self.joint_indices = None
-                    return
-        
+        # Recompute mapping on every message because different joint_states sources
+        # can have different joint ordering/lengths.
+        joint_indices = []
+        for expected_name in self.expected_joint_names:
+            try:
+                idx = msg.name.index(expected_name)
+            except ValueError:
+                return
+            if idx >= len(msg.position):
+                return
+            joint_indices.append(idx)
+
+        self.joint_indices = joint_indices
         self.current_joint_state = msg
         
 
@@ -640,6 +641,14 @@ class PlannerNode(Node):
 
         if self.end_effector_pose is None:
             self._fail_current_goal("No end effector pose received yet. Cannot calculate trajectory.")
+            return
+
+        if not self.joint_indices:
+            self._fail_current_goal("No valid arm joint-state indices available.")
+            return
+
+        if any(i >= len(self.current_joint_state.position) for i in self.joint_indices):
+            self._fail_current_goal("Received inconsistent joint_states message. Waiting for a valid arm joint-state frame.")
             return
         
         # Goal definition
@@ -801,10 +810,13 @@ class PlannerNode(Node):
 
         # Plan joint values
         # home_position = np.array([0.0, -1.2, -2.3, -1.2, 1.57, 0.0])
-        home_position = np.array([self.current_joint_state.position])
         all_joint_values = []
         all_joint_values_print = []
-        q_current = np.array([self.current_joint_state.position[i] for i in self.joint_indices])
+        try:
+            q_current = np.array([self.current_joint_state.position[i] for i in self.joint_indices])
+        except Exception as e:
+            self._fail_current_goal(f"Failed to extract current arm joint positions: {e}")
+            return
         self.get_logger().info(f"Current joint state = {self.current_joint_state.position}")
         all_joint_values_print.append(q_current)
 
