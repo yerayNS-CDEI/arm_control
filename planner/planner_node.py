@@ -12,6 +12,8 @@ from visualization_msgs.msg import Marker
 from ament_index_python.packages import get_package_share_directory
 import numpy as np
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+import tf2_ros
+from tf2_ros import TransformException
 
 # Import planning functions
 from planner.planner_lib.closed_form_algorithm import closed_form_algorithm
@@ -52,7 +54,19 @@ class PlannerNode(Node):
         self.invalid_path = False
         self.end_effector_pose = None
         self.i = 0  
+
+        # TF buffer and listener to query transforms dynamically
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
+        # Wrist-3-to-tool0 fixed transform (queried from TF tree)
+        self._T_wrist3_tool0 = None
+        self._T_tool0_wrist3 = None
+        self._tf_retry_count = 0
+        
+        # Start async transform loading with timer (retries every 1 second)
+        self._tf_retry_timer = self.create_timer(1.0, self._update_wrist3_tool0_transform)
+
         # Define cilinder parameters
         self.cyl_center_xy = (0.0, 0.0)   # (xc, yc)
         self.cyl_radius    = 0.3
@@ -114,6 +128,90 @@ class PlannerNode(Node):
         self._reachability_timer = self.create_timer(2.0, self._publish_reachability_once)
 
         self.get_logger().info("Planner node initialized and waiting for goal poses...")
+
+    def _update_wrist3_tool0_transform(self):
+        """
+        Query the TF tree for the transform from arm_wrist_3_link to arm_tool0.
+        Updates self._T_wrist3_tool0 and self._T_tool0_wrist3 matrices.
+        
+        Uses asynchronous retry pattern with timer - does not block initialization.
+        No fallback to hardcoded values for safety.
+        """
+        from_frame = f'{self.joint_prefix}wrist_3_link'
+        to_frame = f'{self.joint_prefix}tool0'
+        
+        try:
+            # Non-blocking check - if not available, timer will retry
+            if self.tf_buffer.can_transform(from_frame, to_frame, rclpy.time.Time(), rclpy.duration.Duration(seconds=0.1)):
+                # Query the transform FROM tool0 TO wrist_3 (this gives us where tool0 is in wrist_3 frame)
+                # We swap the order: lookup_transform(wrist_3, tool0) returns T_wrist3_tool0
+                transform = self.tf_buffer.lookup_transform(
+                    from_frame,  # target frame: wrist_3 
+                    to_frame,  # source frame: tool0
+                    rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.5)
+                )
+                
+                # Extract translation and rotation
+                tx = transform.transform.translation.x
+                ty = transform.transform.translation.y
+                tz = transform.transform.translation.z
+                
+                qx = transform.transform.rotation.x
+                qy = transform.transform.rotation.y
+                qz = transform.transform.rotation.z
+                qw = transform.transform.rotation.w
+                
+                # Build transformation matrix wrist_3 -> tool0
+                rot = R.from_quat([qx, qy, qz, qw])
+                self._T_wrist3_tool0 = np.eye(4)
+                self._T_wrist3_tool0[:3, :3] = rot.as_matrix()
+                self._T_wrist3_tool0[:3, 3] = [tx, ty, tz]
+                
+                # Compute inverse transform tool0 -> wrist_3
+                self._T_tool0_wrist3 = np.linalg.inv(self._T_wrist3_tool0)
+                
+                self.get_logger().info(
+                    f"✓ Successfully loaded transform {from_frame} -> {to_frame}: "
+                    f"translation = [{tx:.4f}, {ty:.4f}, {tz:.4f}], "
+                    f"rotation = [{qx:.3f}, {qy:.3f}, {qz:.3f}, {qw:.3f}]"
+                )
+                
+                # Cancel retry timer if it exists
+                if hasattr(self, '_tf_retry_timer'):
+                    self._tf_retry_timer.cancel()
+                return
+            else:
+                # Transform not yet available - will retry via timer
+                if not hasattr(self, '_tf_retry_count'):
+                    self._tf_retry_count = 0
+                
+                self._tf_retry_count += 1
+                
+                if self._tf_retry_count <= 5:
+                    self.get_logger().warn(
+                        f"Transform {from_frame} -> {to_frame} not yet available. "
+                        f"Waiting for TF tree... (attempt {self._tf_retry_count})"
+                    )
+                elif self._tf_retry_count % 10 == 0:
+                    # Log available frames to help debug
+                    all_frames = self.tf_buffer.all_frames_as_yaml()
+                    self.get_logger().error(
+                        f"Transform still not available after {self._tf_retry_count} attempts. "
+                        f"Available frames:\n{all_frames}"
+                    )
+                
+        except (TransformException, tf2_ros.LookupException, 
+                tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as ex:
+            if not hasattr(self, '_tf_retry_count'):
+                self._tf_retry_count = 0
+            
+            self._tf_retry_count += 1
+            
+            if self._tf_retry_count <= 5 or self._tf_retry_count % 10 == 0:
+                self.get_logger().warn(
+                    f"TF lookup exception (attempt {self._tf_retry_count}): {ex}"
+                )
 
     def _compute_reachability_boundary(self):
         """Build the outer-shell voxels of the reachability space using morphological erosion.
@@ -626,14 +724,36 @@ class PlannerNode(Node):
         if self.current_joint_state is None:
             self.get_logger().error("No current joint state received yet. Cannot calculate trajectory.")
             self.publish_planner_goal_failed(True)
+            self.execution_complete = True
             return
         
-        # Goal definition
+        # Ensure wrist_3 <-> tool0 transforms are loaded (CRITICAL - no fallback for safety)
+        if self._T_wrist3_tool0 is None or self._T_tool0_wrist3 is None:
+            self.get_logger().error(
+                "❌ CRITICAL: Transforms not yet loaded from TF tree. Cannot plan trajectory safely. "
+                f"Waiting for {self.joint_prefix}wrist_3_link <-> {self.joint_prefix}tool0 transform. "
+                "Ensure robot_state_publisher is running and publishing the URDF."
+            )
+            self.publish_planner_goal_failed(True)
+            self.execution_complete = True
+            return
+        
+        # Goal definition (in arm_tool0 frame)
         goal_pos = [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]
         goal_orn = [msg.pose.orientation.x,msg.pose.orientation.y,msg.pose.orientation.z,msg.pose.orientation.w]
         goal_orientation = R.from_quat(goal_orn)
-        self.get_logger().info(f"Received goal position: {goal_pos}")
-        self.get_logger().info(f"Received goal orientation: {goal_orn}")
+        self.get_logger().info(f"Received goal position (tool0): {goal_pos}")
+        self.get_logger().info(f"Received goal orientation (tool0): {goal_orn}")
+
+        # Convert goal from arm_tool0 to arm_wrist_3_link (IK targets the wrist_3 frame)
+        # tool0 and wrist_3 share the same orientation; wrist_3 is 15 cm behind along tool0 Z
+        T_wg_tool0 = np.eye(4)
+        T_wg_tool0[:3, :3] = goal_orientation.as_matrix()
+        T_wg_tool0[:3, 3] = np.array(goal_pos)
+        T_wg_wrist3 = T_wg_tool0 @ self._T_tool0_wrist3
+        goal_pos_wrist3 = T_wg_wrist3[:3, 3].tolist()
+        goal_orientation_wrist3 = R.from_matrix(T_wg_wrist3[:3, :3])
+        self.get_logger().info(f"Converted goal position (wrist_3): {goal_pos_wrist3}")
 
         # Example start position (NEEDS TO be parameterized)
         # if self.i == 0:
@@ -646,10 +766,18 @@ class PlannerNode(Node):
         start_pos = [self.end_effector_pose.pose.position.x, self.end_effector_pose.pose.position.y, self.end_effector_pose.pose.position.z]
         start_orn = [self.end_effector_pose.pose.orientation.x, self.end_effector_pose.pose.orientation.y, self.end_effector_pose.pose.orientation.z, self.end_effector_pose.pose.orientation.w]
         start_orientation = R.from_quat(start_orn)
+
+        # Convert start from arm_tool0 to arm_wrist_3_link
+        T_ws_tool0 = np.eye(4)
+        T_ws_tool0[:3, :3] = start_orientation.as_matrix()
+        T_ws_tool0[:3, 3] = np.array(start_pos)
+        T_ws_wrist3 = T_ws_tool0 @ self._T_tool0_wrist3
+        start_pos_wrist3 = T_ws_wrist3[:3, 3].tolist()
+        start_orientation_wrist3 = R.from_matrix(T_ws_wrist3[:3, :3])
             
         try:
-            start_idx = world_to_grid(*start_pos, self.x_vals, self.y_vals, self.z_vals)
-            goal_idx = world_to_grid(*goal_pos, self.x_vals, self.y_vals, self.z_vals)
+            start_idx = world_to_grid(*start_pos_wrist3, self.x_vals, self.y_vals, self.z_vals)
+            goal_idx = world_to_grid(*goal_pos_wrist3, self.x_vals, self.y_vals, self.z_vals)
         except Exception as e:
             self.get_logger().error(f"Failed to convert world to grid: {e}")
             self.publish_planner_goal_failed(True)
@@ -729,8 +857,8 @@ class PlannerNode(Node):
         self.publish_ee_path_markers(
             path_world_raw,
             frame_id="arm_base",
-            current_ee_xyz=start_pos,
-            goal_xyz=goal_pos,
+            current_ee_xyz=start_pos_wrist3,
+            goal_xyz=goal_pos_wrist3,
             ns="ee_path_raw",
             id_offset=100,
             rgba=(0.0, 1.0, 1.0, 0.5),   # cyan
@@ -740,40 +868,26 @@ class PlannerNode(Node):
         )
 
         # Prune path endpoints
-        path_world = self._prune_path_endpoints(path_world_raw, start_pos, goal_pos, tol_m=0.02, log=True)
+        path_world = self._prune_path_endpoints(path_world_raw, start_pos_wrist3, goal_pos_wrist3, tol_m=0.02, log=True)
         path_len = len(path_world)
         if path_len == 0:
             self.get_logger().warn("Path pruned to empty. Falling back to direct goal IK.")
         
-        # Publish pruned path
-        self.publish_ee_path_markers(
-            path_world,
-            frame_id="arm_base",
-            current_ee_xyz=start_pos,
-            goal_xyz=goal_pos,
-            ns="ee_path_pruned",
-            id_offset=200,
-            rgba=(1.0, 0.5, 0.0, 1.0),  # orange
-            z_offset=0.0,
-            line_width=0.01,
-            sphere_diam=0.02
-        )
-
-        # Interpolate orientations along the (possibly pruned) path
+        # Interpolate orientations along the (possibly pruned) path (wrist_3 orientations)
         if path_len == 0:
             # No waypoint orientations needed; we will only use the goal orientation
-            interp_rots = R.from_quat([goal_orientation.as_quat()])
+            interp_rots = R.from_quat([goal_orientation_wrist3.as_quat()])
             interp_rot_matrices = interp_rots.as_matrix()
 
         elif path_len == 1:
             # Single waypoint: use midpoint orientation (t=0.5) so it is truly intermediate
-            key_rots = R.from_quat([start_orientation.as_quat(), goal_orientation.as_quat()])
+            key_rots = R.from_quat([start_orientation_wrist3.as_quat(), goal_orientation_wrist3.as_quat()])
             slerp = Slerp([0, 1], key_rots)
             interp_rots = slerp([0.5])
             interp_rot_matrices = interp_rots.as_matrix()
 
         else:
-            key_rots = R.from_quat([start_orientation.as_quat(), goal_orientation.as_quat()])
+            key_rots = R.from_quat([start_orientation_wrist3.as_quat(), goal_orientation_wrist3.as_quat()])
             slerp = Slerp([0, 1], key_rots)
             # Exclude t=0 (start) and t=1 (goal) so every waypoint has a strictly
             # intermediate orientation; the actual start/goal orientations are handled
@@ -781,6 +895,48 @@ class PlannerNode(Node):
             times = np.linspace(0, 1, path_len + 2)[1:-1]
             interp_rots = slerp(times)
             interp_rot_matrices = interp_rots.as_matrix()
+
+        # Build full path lists for visualization (waypoints + final goal)
+        if path_len == 0:
+            _vis_rots = [goal_orientation_wrist3.as_matrix()]
+        else:
+            _vis_rots = list(interp_rot_matrices) + [goal_orientation_wrist3.as_matrix()]
+        _vis_wrist3 = list(path_world) + [tuple(goal_pos_wrist3)]
+
+        # Compute tool0 positions by applying T_wrist3_tool0 at each wrist_3 pose
+        _vis_tool0 = []
+        for _pf, _rf in zip(_vis_wrist3, _vis_rots):
+            _T = np.eye(4)
+            _T[:3, :3] = _rf
+            _T[:3, 3] = np.array(_pf)
+            _vis_tool0.append(tuple((_T @ self._T_wrist3_tool0)[:3, 3]))
+
+        # Publish pruned wrist_3 path (orange)
+        self.publish_ee_path_markers(
+            _vis_wrist3,
+            frame_id="arm_base",
+            current_ee_xyz=start_pos_wrist3,
+            goal_xyz=goal_pos_wrist3,
+            ns="ee_path_pruned",
+            id_offset=200,
+            rgba=(1.0, 0.5, 0.0, 1.0),  # orange - wrist_3 path
+            z_offset=0.0,
+            line_width=0.01,
+            sphere_diam=0.02
+        )
+        # Publish corresponding tool0 path (magenta)
+        self.publish_ee_path_markers(
+            _vis_tool0,
+            frame_id="arm_base",
+            current_ee_xyz=start_pos,
+            goal_xyz=goal_pos,
+            ns="ee_path_tool0",
+            id_offset=300,
+            rgba=(0.8, 0.0, 0.8, 1.0),  # magenta - tool0 path
+            z_offset=0.0,
+            line_width=0.01,
+            sphere_diam=0.02
+        )
 
         # Convert to Euler angles
         interpolated_euler_angles = interp_rots.as_euler('xyz', degrees=True)
@@ -807,8 +963,8 @@ class PlannerNode(Node):
         
         # Final goal pose to ensure accuracy — always use the exact goal orientation,
         # regardless of whether/how waypoint orientations were interpolated.
-        pos = goal_pos
-        orn = goal_orientation.as_matrix()
+        pos = goal_pos_wrist3
+        orn = goal_orientation_wrist3.as_matrix()
         T = create_pose_matrix(pos, orn)
         
         precise_goal_joint_values = closed_form_algorithm(T, q_current, type=0)
