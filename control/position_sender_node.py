@@ -36,10 +36,14 @@ class PositionSenderNode(Node):
         self.marker_pub = self.create_publisher(Marker, 'goal_pose_marker', 10)
         
         # Subscriber for execution status
+        # Subscribe to both namespaced and global topics to survive launch namespace drift.
         self.subscriptor_ = self.create_subscription(PoseStamped, 'end_effector_pose', self.end_effector_pose_callback, 10)
+        self.subscriptor_global_ = self.create_subscription(PoseStamped, '/end_effector_pose', self.end_effector_pose_callback, 10)
         self.execution_status_sub = self.create_subscription(Bool,'execution_status',self.execution_status_callback,10)
+        self.execution_status_sub_global = self.create_subscription(Bool,'/execution_status',self.execution_status_callback,10)
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)        
         self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
+        self.create_subscription(JointState, "/joint_states", self.joint_state_callback, 10)
         
         # Service for sending positions
         self.send_position_service = self.create_service(
@@ -140,6 +144,7 @@ class PositionSenderNode(Node):
         self.execution_status = False
         self.current_position_name = None
         self.emergency_stop = False
+        self.end_effector_pose = None
         
         # Expected joint names in desired order
         self.expected_joint_names = [
@@ -230,10 +235,11 @@ class PositionSenderNode(Node):
             msg = f"Invalid pose data for '{position_name}': expected 7 values (x,y,z,qx,qy,qz,qw)"
             self.get_logger().error(msg)
             return False, msg
-        
-        current_position  = np.array([self.end_effector_pose.pose.position.x, self.end_effector_pose.pose.position.y, self.end_effector_pose.pose.position.z])
-        dist_diff = pose_data[0:3] - current_position
-        distance = np.linalg.norm(dist_diff)
+
+        if self.publisher_.get_subscription_count() == 0:
+            msg = "No planner subscriber detected on /arm/goal_pose. Goal not sent."
+            self.get_logger().warn(msg)
+            return False, msg
             
         ####################################
         ## GOAL POSE PUBLISHING FOR PLANNER

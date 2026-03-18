@@ -12,14 +12,36 @@ class EndEffectorListener(Node):
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.frame_candidates = [
+            ('arm_base', 'arm_tool0'),
+            ('arm_base', 'arm_tool0_controller'),
+            ('arm_base_link', 'arm_tool0'),
+            ('arm_base_link', 'arm_tool0_controller'),
+            ('base', 'tool0'),
+            ('base_link', 'tool0'),
+        ]
 
         self.timer = self.create_timer(1.0, self.timer_callback)  # 1 Hz
         self.publisher_ = self.create_publisher(PoseStamped, 'end_effector_pose', 10)
 
     def timer_callback(self):
         try:
-            trans: TransformStamped = self.tf_buffer.lookup_transform(
-                'arm_base', 'arm_tool0', rclpy.time.Time())     # tool0_controller for real robot, tool0 for simulation     # if no namespace is needed, erase "arm/" in both
+            trans = None
+            selected_frames = None
+            for base_frame, tool_frame in self.frame_candidates:
+                try:
+                    trans = self.tf_buffer.lookup_transform(
+                        base_frame, tool_frame, rclpy.time.Time())
+                    selected_frames = (base_frame, tool_frame)
+                    break
+                except Exception:
+                    continue
+
+            if trans is None:
+                raise RuntimeError(
+                    "Unable to find transform for any candidate frame pair: "
+                    f"{self.frame_candidates}"
+                )
             
             pos = trans.transform.translation
             rot = trans.transform.rotation
@@ -45,7 +67,7 @@ class EndEffectorListener(Node):
 
             pose_msg = PoseStamped()
             pose_msg.header.stamp = self.get_clock().now().to_msg()
-            pose_msg.header.frame_id = 'arm_base'
+            pose_msg.header.frame_id = selected_frames[0]
             pose_msg.pose.position.x = pos.x
             pose_msg.pose.position.y = pos.y
             pose_msg.pose.position.z = pos.z

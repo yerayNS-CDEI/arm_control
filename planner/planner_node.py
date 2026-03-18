@@ -98,9 +98,13 @@ class PlannerNode(Node):
 
         # Create subscriber and publishers
         self.create_subscription(PoseStamped, '/arm/goal_pose', self.goal_callback, 10)
+        # Subscribe to both namespaced and global topics to survive launch namespace drift.
         self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
+        self.create_subscription(JointState, "/joint_states", self.joint_state_callback, 10)
         self.create_subscription(Bool, "execution_status", self.execution_status_callback, 10)
+        self.create_subscription(Bool, "/execution_status", self.execution_status_callback, 10)
         self.create_subscription(PoseStamped, "end_effector_pose", self.end_effector_pose_callback, 10)
+        self.create_subscription(PoseStamped, "/end_effector_pose", self.end_effector_pose_callback, 10)
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
         self.planner_goal_failed_pub = self.create_publisher(Bool, '/planner/goal_failed', 10)
@@ -585,25 +589,19 @@ class PlannerNode(Node):
             if self.goal_queue:
                 next_goal = self.goal_queue.pop(0)
                 self.get_logger().info("Executing next goal in queue.")
-                self.execution_complete = True
-                self.plan_and_send_trajectory(next_goal)
+                self._dispatch_goal(next_goal)
 
     def publish_planner_goal_failed(self, failed: bool):
         msg = Bool()
         msg.data = bool(failed)
         self.planner_goal_failed_pub.publish(msg)
 
-    def goal_callback(self, msg: PoseStamped):
-        if self.emergency_stop:
-            self.get_logger().warn("Emergency stop is active, aborting trajectory planning. Ignoring goal.")
-            self.execution_complete = True  # Ensure we can accept new goals after emergency is cleared
-            return  # Aborting if emergency state is active
-        
-        if not self.execution_complete:
-            self.get_logger().warn("Previous trajectory not finished. Goal queued.")
-            self.goal_queue.append(msg)
-            return
-        
+    def _fail_current_goal(self, message: str):
+        self.get_logger().error(message)
+        self.execution_complete = True
+        self.publish_planner_goal_failed(True)
+
+    def _dispatch_goal(self, msg: PoseStamped):
         self.publish_planner_goal_failed(False)
         self.execution_complete = False
         self.clear_goal_and_path_markers()
@@ -620,12 +618,28 @@ class PlannerNode(Node):
         self.publish_reachability_boundary_marker()
         self.plan_and_send_trajectory(msg)
 
+    def goal_callback(self, msg: PoseStamped):
+        if self.emergency_stop:
+            self.get_logger().warn("Emergency stop is active, aborting trajectory planning. Ignoring goal.")
+            self.execution_complete = True  # Ensure we can accept new goals after emergency is cleared
+            return  # Aborting if emergency state is active
+        
+        if not self.execution_complete:
+            self.get_logger().warn("Previous trajectory not finished. Goal queued.")
+            self.goal_queue.append(msg)
+            return
+
+        self._dispatch_goal(msg)
+
     def plan_and_send_trajectory(self, msg: PoseStamped):
         self.invalid_path = False  # Reset invalid path flag at start of planning
 
         if self.current_joint_state is None:
-            self.get_logger().error("No current joint state received yet. Cannot calculate trajectory.")
-            self.publish_planner_goal_failed(True)
+            self._fail_current_goal("No current joint state received yet. Cannot calculate trajectory.")
+            return
+
+        if self.end_effector_pose is None:
+            self._fail_current_goal("No end effector pose received yet. Cannot calculate trajectory.")
             return
         
         # Goal definition
@@ -651,8 +665,7 @@ class PlannerNode(Node):
             start_idx = world_to_grid(*start_pos, self.x_vals, self.y_vals, self.z_vals)
             goal_idx = world_to_grid(*goal_pos, self.x_vals, self.y_vals, self.z_vals)
         except Exception as e:
-            self.get_logger().error(f"Failed to convert world to grid: {e}")
-            self.publish_planner_goal_failed(True)
+            self._fail_current_goal(f"Failed to convert world to grid: {e}")
             return
 
         # Occupancy grid: all free (NEEDS TO be parameterized)
