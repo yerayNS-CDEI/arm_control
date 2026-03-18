@@ -73,7 +73,13 @@ def generate_launch_description():
         default_value='',
         description='Namespace for the arm robot',
     )
-    
+
+    controllers_file_arg = DeclareLaunchArgument(
+        'controllers_file',
+        default_value='mobile_manipulator_controllers.yaml',
+        description='YAML file with controllers configuration',
+    )
+
     # Use LaunchConfiguration values
     robot_ip = LaunchConfiguration('robot_ip')
     use_fake_hardware = LaunchConfiguration('use_fake_hardware')
@@ -84,6 +90,7 @@ def generate_launch_description():
     simulation = LaunchConfiguration('sim')
     mode = LaunchConfiguration('mode')
     namespace_arm = LaunchConfiguration('namespace_arm')
+    controllers_file = LaunchConfiguration('controllers_file')
     
     # Invert simulation: when parent sim=true (base in Gazebo), pass false (arm to URSim)
     inverted_sim = NotSubstitution(simulation)
@@ -104,6 +111,7 @@ def generate_launch_description():
                 'prefix':               prefix,
                 'mode':                 mode,
                 'sim':                  inverted_sim,  # Inverted sim value
+                'controllers_file':     controllers_file,
             }.items(),
         ),
         
@@ -157,5 +165,6 @@ def generate_launch_description():
         simulation_arg,
         mode_arg,
         namespace_arm_arg,
+        controllers_file_arg,
         arm_group,
     ])
