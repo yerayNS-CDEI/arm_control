@@ -663,7 +663,7 @@ class RobotControlUI(QMainWindow):
         self.full_control_hybrid_sim_combo = QComboBox()
         self.full_control_hybrid_sim_combo.addItems(['false', 'true'])
         self.full_control_hybrid_sim_combo.setCurrentText('false')
-        self.full_control_hybrid_sim_combo.currentTextChanged.connect(self._update_headless_visibility)
+        self.full_control_hybrid_sim_combo.currentTextChanged.connect(self._on_full_control_hybrid_changed)
         full_control_sim_param_layout.addWidget(self.full_control_hybrid_sim_label)
         full_control_sim_param_layout.addWidget(self.full_control_hybrid_sim_combo)
         self.full_control_headless_label = QLabel("Headless:")
@@ -1019,6 +1019,7 @@ class RobotControlUI(QMainWindow):
         self.JOINT_TAB_INDEX = 2
         self.FULL_CONTROL_TAB_INDEX = 3
         self._update_init_box_state()
+        self._update_full_control_init_box_state()
         self._update_headless_visibility()
         
         # Initial topics list refresh
@@ -1038,12 +1039,21 @@ class RobotControlUI(QMainWindow):
         self.arm_sim_mode_combo.blockSignals(False)
         self.sim_mode_combo.blockSignals(False)
         
-        # Update init box state based on simulation mode
-        if sim_mode == 'true':
-            self.full_control_init_box.setEnabled(False)
-        else:
-            self.full_control_init_box.setEnabled(True)
+        self._update_full_control_init_box_state()
         self._update_headless_visibility()
+
+    def _on_full_control_hybrid_changed(self):
+        """Refresh dependent UI elements when Full Control hybrid_sim changes."""
+        self._update_full_control_init_box_state()
+        self._update_headless_visibility()
+
+    def _update_full_control_init_box_state(self):
+        """Disable Full Control initialization only when sim=true and hybrid_sim=false."""
+        full_sim_mode = self.full_control_sim_mode_combo.currentText() if hasattr(self, "full_control_sim_mode_combo") else 'false'
+        full_hybrid_mode = self.full_control_hybrid_sim_combo.currentText() if hasattr(self, "full_control_hybrid_sim_combo") else 'false'
+        should_disable = (full_sim_mode == 'true' and full_hybrid_mode == 'false')
+        if hasattr(self, "full_control_init_box"):
+            self.full_control_init_box.setEnabled(not should_disable)
 
     def _update_headless_visibility(self):
         """Show headless selectors only when simulation mode is true."""
