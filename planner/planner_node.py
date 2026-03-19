@@ -734,7 +734,6 @@ class PlannerNode(Node):
         self.invalid_path = False  # Reset invalid path flag at start of planning
 
         if self.current_joint_state is None:
-<<<<<<< ursim
             self._fail_current_goal("No current joint state received yet. Cannot calculate trajectory.")
             return
 
@@ -748,22 +747,11 @@ class PlannerNode(Node):
 
         if any(i >= len(self.current_joint_state.position) for i in self.joint_indices):
             self._fail_current_goal("Received inconsistent joint_states message. Waiting for a valid arm joint-state frame.")
-=======
-            self.get_logger().error("No current joint state received yet. Cannot calculate trajectory.")
-            self.publish_planner_goal_failed(True)
-            self.execution_complete = True
             return
         
         # Ensure wrist_3 <-> tool0 transforms are loaded (CRITICAL - no fallback for safety)
         if self._T_wrist3_tool0 is None or self._T_tool0_wrist3 is None:
-            self.get_logger().error(
-                "❌ CRITICAL: Transforms not yet loaded from TF tree. Cannot plan trajectory safely. "
-                f"Waiting for {self.joint_prefix}wrist_3_link <-> {self.joint_prefix}tool0 transform. "
-                "Ensure robot_state_publisher is running and publishing the URDF."
-            )
-            self.publish_planner_goal_failed(True)
-            self.execution_complete = True
->>>>>>> main
+            self._fail_current_goal( f"❌ CRITICAL: Transforms not yet loaded from TF tree. Cannot plan trajectory safely. Waiting for {self.joint_prefix}wrist_3_link <-> {self.joint_prefix}tool0 transform. Ensure robot_state_publisher is running and publishing the URDF.")
             return
         
         # Goal definition (in arm_tool0 frame)
