@@ -44,7 +44,9 @@
     trajectory_port:=50003
     non_blocking_read:=true
     keep_alive_count:=2
-    arm_dyn_scale:=0.003"
+    arm_dyn_scale:=0.003
+    ee_cylinder_length:=0.15
+    ee_cylinder_radius:=0.035"
 
     >
 
@@ -410,11 +412,41 @@
       <origin xyz="0 0 0" rpy="0 ${-pi/2.0} ${-pi/2.0}" />
     </joint>
 
+    <!-- Cylinder adapter between flange and tool0 (parameterized) -->
+    <link name="${tf_prefix}ee_cylinder_link">
+      <visual>
+        <!-- cylinder is centered at this link's origin; URDF cylinders are along local Z,
+             so the joint below rotates 90° around Y to align Z with the flange X-axis -->
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="${ee_cylinder_radius}" length="${ee_cylinder_length}"/>
+        </geometry>
+        <material name="ee_cylinder_grey">
+          <color rgba="0.6 0.6 0.6 1.0"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="${ee_cylinder_radius}" length="${ee_cylinder_length}"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <!-- Joint: flange -> ee_cylinder_link (centred at half-length along flange X = tool0 Z) -->
+    <joint name="${tf_prefix}flange-ee_cylinder" type="fixed">
+      <parent link="${tf_prefix}flange"/>
+      <child  link="${tf_prefix}ee_cylinder_link"/>
+      <!-- translate half cylinder length along flange X, then rotate 90° around Y so cylinder Z aligns with flange X -->
+      <origin xyz="${ee_cylinder_length / 2.0} 0 0" rpy="0 ${pi/2.0} 0"/>
+    </joint>
+
     <!-- ROS-Industrial 'tool0' frame - all-zeros tool frame -->
     <link name="${tf_prefix}tool0"/>
     <joint name="${tf_prefix}flange-tool0" type="fixed">
       <!-- default toolframe - X+ left, Y+ up, Z+ front -->
-      <origin xyz="0 0 0" rpy="${pi/2.0} 0 ${pi/2.0}"/>
+      <!-- Full cylinder length offset along flange X (= cylinder length along tool0 Z) -->
+      <origin xyz="${ee_cylinder_length} 0 0" rpy="${pi/2.0} 0 ${pi/2.0}"/>
       <parent link="${tf_prefix}flange"/>
       <child link="${tf_prefix}tool0"/>
     </joint>

@@ -48,6 +48,10 @@
    <xacro:arg name="sim_ignition" default="false" />
    <xacro:arg name="simulation_controllers" default="" />
    <xacro:arg name="arm_dyn_scale" default="0.003"/>
+   
+   <!-- End-effector cylinder parameters -->
+   <xacro:arg name="ee_cylinder_length" default="0.15"/>
+   <xacro:arg name="ee_cylinder_radius" default="0.035"/>
 
    <!-- initial position for simulations (Fake Hardware, Gazebo, Ignition) -->
    <xacro:arg name="initial_positions_file" default="$(find arm_control)/config/initial_positions.yaml"/>
@@ -124,6 +128,8 @@
      script_sender_port="$(arg script_sender_port)"
      trajectory_port="$(arg trajectory_port)"
      arm_dyn_scale="$(arg arm_dyn_scale)"
+     ee_cylinder_length="$(arg ee_cylinder_length)"
+     ee_cylinder_radius="$(arg ee_cylinder_radius)"
      >
      <origin xyz="0 0 0" rpy="0 0 0" />          <!-- position robot in the world -->
    </xacro:ur_robot>
