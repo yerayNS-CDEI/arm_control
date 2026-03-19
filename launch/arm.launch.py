@@ -1,6 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import GroupAction, IncludeLaunchDescription, DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution, NotSubstitution, AndSubstitution
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import PushRosNamespace, Node, SetParameter
 from launch_ros.substitutions import FindPackageShare
@@ -60,6 +60,12 @@ def generate_launch_description():
         default_value='false',
         description='Whether to run in simulation mode',
     )
+
+    hybrid_sim_arg = DeclareLaunchArgument(
+        'hybrid_sim',
+        default_value='true',
+        description='If true launch ur_control stack (hybrid mode). If false, ur_sim_control can be launched when sim=true.',
+    )
     
     mode_arg = DeclareLaunchArgument(
         "mode",
@@ -73,7 +79,13 @@ def generate_launch_description():
         default_value='',
         description='Namespace for the arm robot',
     )
-    
+
+    controllers_file_arg = DeclareLaunchArgument(
+        'controllers_file',
+        default_value='mobile_manipulator_controllers.yaml',
+        description='YAML file with controllers configuration',
+    )
+
     # Use LaunchConfiguration values
     robot_ip = LaunchConfiguration('robot_ip')
     use_fake_hardware = LaunchConfiguration('use_fake_hardware')
@@ -82,8 +94,13 @@ def generate_launch_description():
     launch_rviz = LaunchConfiguration('launch_rviz')
     ur_type = LaunchConfiguration('ur_type')
     simulation = LaunchConfiguration('sim')
+    hybrid_sim = LaunchConfiguration('hybrid_sim')
     mode = LaunchConfiguration('mode')
     namespace_arm = LaunchConfiguration('namespace_arm')
+    controllers_file = LaunchConfiguration('controllers_file')
+    
+    # Invert simulation: when parent sim=true (base in Gazebo), pass false (arm to URSim)
+    inverted_sim = NotSubstitution(simulation)
 
     # --- Namespaced groups (namespace ONLY in the parent) ---
     arm_group = GroupAction([
@@ -100,8 +117,10 @@ def generate_launch_description():
                 'tf_prefix':            tf_prefix,
                 'prefix':               prefix,
                 'mode':                 mode,
+                'sim':                  inverted_sim,  # Inverted sim value
+                'controllers_file':     controllers_file,
             }.items(),
-            condition=UnlessCondition(simulation)
+            condition=IfCondition(hybrid_sim),
         ),
         
         IncludeLaunchDescription(
@@ -112,8 +131,9 @@ def generate_launch_description():
                 'prefix':               prefix,
                 'mode':                 mode,
                 'launch_rviz':          launch_rviz,
+                'controllers_file':     controllers_file,
             }.items(),
-            condition=IfCondition(simulation)
+            condition=IfCondition(AndSubstitution(simulation, NotSubstitution(hybrid_sim))),
         ),
         
         IncludeLaunchDescription(
@@ -152,7 +172,9 @@ def generate_launch_description():
         launch_rviz_arg,
         ur_type_arg,
         simulation_arg,
+        hybrid_sim_arg,
         mode_arg,
         namespace_arm_arg,
+        controllers_file_arg,
         arm_group,
     ])

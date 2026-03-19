@@ -112,9 +112,13 @@ class PlannerNode(Node):
 
         # Create subscriber and publishers
         self.create_subscription(PoseStamped, '/arm/goal_pose', self.goal_callback, 10)
+        # Subscribe to both namespaced and global topics to survive launch namespace drift.
         self.create_subscription(JointState, "joint_states", self.joint_state_callback, 10)
+        self.create_subscription(JointState, "/joint_states", self.joint_state_callback, 10)
         self.create_subscription(Bool, "execution_status", self.execution_status_callback, 10)
+        self.create_subscription(Bool, "/execution_status", self.execution_status_callback, 10)
         self.create_subscription(PoseStamped, "end_effector_pose", self.end_effector_pose_callback, 10)
+        self.create_subscription(PoseStamped, "/end_effector_pose", self.end_effector_pose_callback, 10)
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
         self.planner_goal_failed_pub = self.create_publisher(Bool, '/planner/goal_failed', 10)
@@ -658,18 +662,19 @@ class PlannerNode(Node):
             self.execution_complete = True
 
     def joint_state_callback(self, msg):
-        # Generate index array mapping expected order to actual message order
-        if self.joint_indices is None:
-            self.joint_indices = []
-            for expected_name in self.expected_joint_names:
-                try:
-                    idx = msg.name.index(expected_name)
-                    self.joint_indices.append(idx)
-                except ValueError:
-                    self.get_logger().error(f"Joint '{expected_name}' not found in joint_states message")
-                    self.joint_indices = None
-                    return
-        
+        # Recompute mapping on every message because different joint_states sources
+        # can have different joint ordering/lengths.
+        joint_indices = []
+        for expected_name in self.expected_joint_names:
+            try:
+                idx = msg.name.index(expected_name)
+            except ValueError:
+                return
+            if idx >= len(msg.position):
+                return
+            joint_indices.append(idx)
+
+        self.joint_indices = joint_indices
         self.current_joint_state = msg
         
 
@@ -683,25 +688,19 @@ class PlannerNode(Node):
             if self.goal_queue:
                 next_goal = self.goal_queue.pop(0)
                 self.get_logger().info("Executing next goal in queue.")
-                self.execution_complete = True
-                self.plan_and_send_trajectory(next_goal)
+                self._dispatch_goal(next_goal)
 
     def publish_planner_goal_failed(self, failed: bool):
         msg = Bool()
         msg.data = bool(failed)
         self.planner_goal_failed_pub.publish(msg)
 
-    def goal_callback(self, msg: PoseStamped):
-        if self.emergency_stop:
-            self.get_logger().warn("Emergency stop is active, aborting trajectory planning. Ignoring goal.")
-            self.execution_complete = True  # Ensure we can accept new goals after emergency is cleared
-            return  # Aborting if emergency state is active
-        
-        if not self.execution_complete:
-            self.get_logger().warn("Previous trajectory not finished. Goal queued.")
-            self.goal_queue.append(msg)
-            return
-        
+    def _fail_current_goal(self, message: str):
+        self.get_logger().error(message)
+        self.execution_complete = True
+        self.publish_planner_goal_failed(True)
+
+    def _dispatch_goal(self, msg: PoseStamped):
         self.publish_planner_goal_failed(False)
         self.execution_complete = False
         self.clear_goal_and_path_markers()
@@ -718,24 +717,41 @@ class PlannerNode(Node):
         self.publish_reachability_boundary_marker()
         self.plan_and_send_trajectory(msg)
 
+    def goal_callback(self, msg: PoseStamped):
+        if self.emergency_stop:
+            self.get_logger().warn("Emergency stop is active, aborting trajectory planning. Ignoring goal.")
+            self.execution_complete = True  # Ensure we can accept new goals after emergency is cleared
+            return  # Aborting if emergency state is active
+        
+        if not self.execution_complete:
+            self.get_logger().warn("Previous trajectory not finished. Goal queued.")
+            self.goal_queue.append(msg)
+            return
+
+        self._dispatch_goal(msg)
+
     def plan_and_send_trajectory(self, msg: PoseStamped):
         self.invalid_path = False  # Reset invalid path flag at start of planning
 
         if self.current_joint_state is None:
-            self.get_logger().error("No current joint state received yet. Cannot calculate trajectory.")
-            self.publish_planner_goal_failed(True)
-            self.execution_complete = True
+            self._fail_current_goal("No current joint state received yet. Cannot calculate trajectory.")
+            return
+
+        if self.end_effector_pose is None:
+            self._fail_current_goal("No end effector pose received yet. Cannot calculate trajectory.")
+            return
+
+        if not self.joint_indices:
+            self._fail_current_goal("No valid arm joint-state indices available.")
+            return
+
+        if any(i >= len(self.current_joint_state.position) for i in self.joint_indices):
+            self._fail_current_goal("Received inconsistent joint_states message. Waiting for a valid arm joint-state frame.")
             return
         
         # Ensure wrist_3 <-> tool0 transforms are loaded (CRITICAL - no fallback for safety)
         if self._T_wrist3_tool0 is None or self._T_tool0_wrist3 is None:
-            self.get_logger().error(
-                "❌ CRITICAL: Transforms not yet loaded from TF tree. Cannot plan trajectory safely. "
-                f"Waiting for {self.joint_prefix}wrist_3_link <-> {self.joint_prefix}tool0 transform. "
-                "Ensure robot_state_publisher is running and publishing the URDF."
-            )
-            self.publish_planner_goal_failed(True)
-            self.execution_complete = True
+            self._fail_current_goal( f"❌ CRITICAL: Transforms not yet loaded from TF tree. Cannot plan trajectory safely. Waiting for {self.joint_prefix}wrist_3_link <-> {self.joint_prefix}tool0 transform. Ensure robot_state_publisher is running and publishing the URDF.")
             return
         
         # Goal definition (in arm_tool0 frame)
@@ -779,8 +795,7 @@ class PlannerNode(Node):
             start_idx = world_to_grid(*start_pos_wrist3, self.x_vals, self.y_vals, self.z_vals)
             goal_idx = world_to_grid(*goal_pos_wrist3, self.x_vals, self.y_vals, self.z_vals)
         except Exception as e:
-            self.get_logger().error(f"Failed to convert world to grid: {e}")
-            self.publish_planner_goal_failed(True)
+            self._fail_current_goal(f"Failed to convert world to grid: {e}")
             return
 
         # Occupancy grid: all free (NEEDS TO be parameterized)
@@ -944,10 +959,13 @@ class PlannerNode(Node):
 
         # Plan joint values
         # home_position = np.array([0.0, -1.2, -2.3, -1.2, 1.57, 0.0])
-        home_position = np.array([self.current_joint_state.position])
         all_joint_values = []
         all_joint_values_print = []
-        q_current = np.array([self.current_joint_state.position[i] for i in self.joint_indices])
+        try:
+            q_current = np.array([self.current_joint_state.position[i] for i in self.joint_indices])
+        except Exception as e:
+            self._fail_current_goal(f"Failed to extract current arm joint positions: {e}")
+            return
         self.get_logger().info(f"Current joint state = {self.current_joint_state.position}")
         all_joint_values_print.append(q_current)
 

@@ -52,6 +52,10 @@ def launch_setup(context, *args, **kwargs):
     trajectory_port = LaunchConfiguration("trajectory_port")
     # My arguments
     mode = LaunchConfiguration("mode")
+    sim = LaunchConfiguration("sim")
+    
+    # sim is inverted from arm.launch.py, so invert back for base simulation
+    base_simulation = NotSubstitution(sim)
 
     joint_limit_params = PathJoinSubstitution(
         [FindPackageShare(description_package), "config", ur_type, "joint_limits.yaml"]
@@ -72,18 +76,21 @@ def launch_setup(context, *args, **kwargs):
         [FindPackageShare("ur_robot_driver"), "resources", "rtde_output_recipe.txt"]
     )
 
-    if PythonExpression(["'", mode, "' == 'arm'"]):
+    # Evaluate mode in context
+    mode_value = mode.perform(context)
+    
+    if mode_value == 'arm':
         description_file = "ur.urdf.xacro"
         description_file_path = PathJoinSubstitution(
             [FindPackageShare("arm_control"), "urdf", description_file]
         )
-    elif PythonExpression(["'", mode, "' == 'full'"]):
+    elif mode_value == 'full':
         description_file = "mobile_manipulator.urdf.xacro"
         description_file_path = PathJoinSubstitution(
             [FindPackageShare("navi_wall"), "navi_wall_description/description", description_file]
         )
     else:
-        raise RuntimeError("Mode not recognized, please select 'full' or 'arm'")
+        raise RuntimeError(f"Mode not recognized: '{mode_value}'. Please select 'full' or 'arm'")
                                                  
     robot_description_content = Command(
         [
@@ -180,6 +187,13 @@ def launch_setup(context, *args, **kwargs):
             " ",
             "trajectory_port:=",
             trajectory_port,
+            " ",
+            "simulation:=",
+            base_simulation,  # Inverted back for base (true when parent was true)
+            " ",
+            "sim_gazebo:=false",  # Arm never in Gazebo Classic
+            " ",
+            "sim_ignition:=false",  # Arm always connects to URSim/real, never simulated
             " ",
         ]
     )

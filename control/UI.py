@@ -63,7 +63,13 @@ class RobotControlUI(QMainWindow):
         self.joint_state_subscriber = self.node.create_subscription(
             JointState,
             '/joint_states',
-            self._on_joint_states,
+            lambda msg: self._on_joint_states(msg, '/joint_states'),
+            10,
+        )
+        self.arm_joint_state_subscriber = self.node.create_subscription(
+            JointState,
+            '/arm/joint_states',
+            lambda msg: self._on_joint_states(msg, '/arm/joint_states'),
             10,
         )
  
@@ -80,7 +86,7 @@ class RobotControlUI(QMainWindow):
  
         # Robot dashboard connection
         self.robot_socket = None
-        self.robot_host = '192.168.1.102'
+        self.robot_host = '192.168.56.101'
         self.robot_port = 29999
  
         # Action client for canceling trajectory goals
@@ -143,7 +149,7 @@ class RobotControlUI(QMainWindow):
         control_layout.addWidget(QLabel("System Control:"))
         self.btn_general_launch = QPushButton("Start Arm")
         self.btn_general_launch.clicked.connect(self.toggle_arm_launch)
-        self.btn_general_launch.setToolTip("ros2 launch arm_control arm.launch.py sim:=<mode> robot_ip:=192.168.1.102 mode:=arm")
+        self.btn_general_launch.setToolTip("robot_ip=192.168.56.101 when hybrid_sim=true, else 192.168.1.102")
         control_layout.addWidget(self.btn_general_launch)
  
         # RQT Joint Controller button
@@ -166,14 +172,14 @@ class RobotControlUI(QMainWindow):
  
         btn_send_position = QPushButton("Send Position")
         btn_send_position.clicked.connect(self.send_position_command)
-        btn_send_position.setToolTip("ros2 service call /send_position arm_control/srv/SendPosition \"{position_name: '<position>'}\"")
+        btn_send_position.setToolTip("Uses /arm/send_position when hybrid_sim=true, otherwise /send_position")
         position_sender_layout.addWidget(btn_send_position)
         control_layout.addLayout(position_sender_layout)
  
         # List Controllers button
         btn_list_controllers = QPushButton("List Controllers")
         btn_list_controllers.clicked.connect(self.list_controllers)
-        btn_list_controllers.setToolTip("ros2 control list_controllers -c /arm/controller_manager")
+        btn_list_controllers.setToolTip("List controllers for all detected controller_manager nodes")
         control_layout.addWidget(btn_list_controllers)
  
         # Emergency stop button
@@ -208,11 +214,11 @@ class RobotControlUI(QMainWindow):
         init_layout.addWidget(self.status_cmd_combo)
  
         btn_send_status = QPushButton("Send Status Command")
-        btn_send_status.clicked.connect(self.send_status_command)
+        btn_send_status.clicked.connect(lambda: self.send_status_command())
         init_layout.addWidget(btn_send_status)
         
         btn_send_all_status = QPushButton("Send All Status Commands")
-        btn_send_all_status.clicked.connect(self.send_all_status_commands)
+        btn_send_all_status.clicked.connect(lambda: self.send_all_status_commands())
         btn_send_all_status.setToolTip("Send all status commands sequentially: robotmode, safetystatus, programState, running, get loaded program, is in remote control")
         init_layout.addWidget(btn_send_all_status)
  
@@ -236,7 +242,7 @@ class RobotControlUI(QMainWindow):
         init_layout.addWidget(self.control_cmd_combo)
  
         btn_send_control = QPushButton("Send Control Command")
-        btn_send_control.clicked.connect(self.send_control_command)
+        btn_send_control.clicked.connect(lambda: self.send_control_command())
         init_layout.addWidget(btn_send_control)
  
         init_layout.addStretch()
@@ -441,7 +447,7 @@ class RobotControlUI(QMainWindow):
         # List Controllers button
         btn_list_base_controllers = QPushButton("List Controllers")
         btn_list_base_controllers.clicked.connect(self.run_list_base_controllers)
-        btn_list_base_controllers.setToolTip("ros2 control list_controllers")
+        btn_list_base_controllers.setToolTip("List controllers for all detected controller_manager nodes")
         troubleshooting_layout.addWidget(btn_list_base_controllers)
  
         # Launch RQT button
@@ -592,12 +598,12 @@ class RobotControlUI(QMainWindow):
         
         btn_read_joints = QPushButton("Read Current Joint Positions")
         btn_read_joints.clicked.connect(self.read_joint_positions)
-        btn_read_joints.setToolTip("Read current joint positions from /joint_states and populate fields")
+        btn_read_joints.setToolTip("Reads /arm/joint_states when hybrid_sim=true, else /joint_states")
         button_layout.addWidget(btn_read_joints)
         
         self.btn_publish_joints = QPushButton("Publish Joint Trajectory")
         self.btn_publish_joints.clicked.connect(self.publish_joint_trajectory)
-        self.btn_publish_joints.setToolTip("Publish joint trajectory to /arm/planned_trajectory topic")
+        self.btn_publish_joints.setToolTip("Publishes to /arm/planned_trajectory when hybrid_sim=true, else /planned_trajectory")
         self.btn_publish_joints.setEnabled(False)  # Disabled until positions are read
         button_layout.addWidget(self.btn_publish_joints)
         
@@ -653,6 +659,13 @@ class RobotControlUI(QMainWindow):
         self.full_control_controller_type_combo = QComboBox()
         self.full_control_controller_type_combo.addItems(['omni', 'diff'])
         full_control_sim_param_layout.addWidget(self.full_control_controller_type_combo)
+        self.full_control_hybrid_sim_label = QLabel("Hybrid Sim:")
+        self.full_control_hybrid_sim_combo = QComboBox()
+        self.full_control_hybrid_sim_combo.addItems(['false', 'true'])
+        self.full_control_hybrid_sim_combo.setCurrentText('false')
+        self.full_control_hybrid_sim_combo.currentTextChanged.connect(self._on_full_control_hybrid_changed)
+        full_control_sim_param_layout.addWidget(self.full_control_hybrid_sim_label)
+        full_control_sim_param_layout.addWidget(self.full_control_hybrid_sim_combo)
         self.full_control_headless_label = QLabel("Headless:")
         self.full_control_headless_combo = QComboBox()
         self.full_control_headless_combo.addItems(['false', 'true'])
@@ -731,13 +744,31 @@ class RobotControlUI(QMainWindow):
         full_control_mapping_box.setLayout(full_control_mapping_layout)
 
         self.btn_full_control_mapping = QPushButton("Start Mapping")
-        self.btn_full_control_mapping.clicked.connect(lambda: self.toggle_mapping(mode='full', button=self.btn_full_control_mapping, sim_combo=self.full_control_sim_mode_combo, controller_type_combo=self.full_control_controller_type_combo, headless_combo=self.full_control_headless_combo))
-        self.btn_full_control_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:=<mode> mode:=full controller_type:=<type> headless:=<true/false>")
+        self.btn_full_control_mapping.clicked.connect(
+            lambda: self.toggle_mapping(
+                mode='full',
+                button=self.btn_full_control_mapping,
+                sim_combo=self.full_control_sim_mode_combo,
+                controller_type_combo=self.full_control_controller_type_combo,
+                headless_combo=self.full_control_headless_combo,
+                hybrid_sim_combo=self.full_control_hybrid_sim_combo,
+            )
+        )
+        self.btn_full_control_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:=<mode> mode:=full controller_type:=<type> hybrid_sim:=<true/false> headless:=<true/false>")
         full_control_mapping_layout.addWidget(self.btn_full_control_mapping)
 
         self.btn_full_control_localization = QPushButton("Start Localization")
-        self.btn_full_control_localization.clicked.connect(lambda: self.toggle_localization(mode='full', button=self.btn_full_control_localization, sim_combo=self.full_control_sim_mode_combo, controller_type_combo=self.full_control_controller_type_combo, headless_combo=self.full_control_headless_combo))
-        self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=full controller_type:=<type> headless:=<true/false>")
+        self.btn_full_control_localization.clicked.connect(
+            lambda: self.toggle_localization(
+                mode='full',
+                button=self.btn_full_control_localization,
+                sim_combo=self.full_control_sim_mode_combo,
+                controller_type_combo=self.full_control_controller_type_combo,
+                headless_combo=self.full_control_headless_combo,
+                hybrid_sim_combo=self.full_control_hybrid_sim_combo,
+            )
+        )
+        self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=full controller_type:=<type> hybrid_sim:=<true/false> headless:=<true/false>")
         full_control_mapping_layout.addWidget(self.btn_full_control_localization)
 
         self.btn_full_control_nav2 = QPushButton("Launch Nav2")
@@ -763,7 +794,7 @@ class RobotControlUI(QMainWindow):
 
         btn_full_control_send_position = QPushButton("Send Position")
         btn_full_control_send_position.clicked.connect(self.send_full_control_position_command)
-        btn_full_control_send_position.setToolTip("ros2 service call /send_position arm_control/srv/SendPosition \"{position_name: '<position>'}\"")
+        btn_full_control_send_position.setToolTip("Uses /arm/send_position when hybrid_sim=true, otherwise /send_position")
         full_control_position_layout.addWidget(btn_full_control_send_position)
         full_control_mapping_layout.addLayout(full_control_position_layout)
 
@@ -818,7 +849,7 @@ class RobotControlUI(QMainWindow):
 
         self.btn_full_control_list_controllers = QPushButton("List Controllers")
         self.btn_full_control_list_controllers.clicked.connect(self.run_list_full_controllers)
-        self.btn_full_control_list_controllers.setToolTip("ros2 control list_controllers")
+        self.btn_full_control_list_controllers.setToolTip("List controllers for all detected controller_manager nodes")
         full_control_troubleshooting_layout.addWidget(self.btn_full_control_list_controllers)
 
         self.btn_full_control_rqt = QPushButton("Start RQT")
@@ -988,6 +1019,7 @@ class RobotControlUI(QMainWindow):
         self.JOINT_TAB_INDEX = 2
         self.FULL_CONTROL_TAB_INDEX = 3
         self._update_init_box_state()
+        self._update_full_control_init_box_state()
         self._update_headless_visibility()
         
         # Initial topics list refresh
@@ -1007,12 +1039,21 @@ class RobotControlUI(QMainWindow):
         self.arm_sim_mode_combo.blockSignals(False)
         self.sim_mode_combo.blockSignals(False)
         
-        # Update init box state based on simulation mode
-        if sim_mode == 'true':
-            self.full_control_init_box.setEnabled(False)
-        else:
-            self.full_control_init_box.setEnabled(True)
+        self._update_full_control_init_box_state()
         self._update_headless_visibility()
+
+    def _on_full_control_hybrid_changed(self):
+        """Refresh dependent UI elements when Full Control hybrid_sim changes."""
+        self._update_full_control_init_box_state()
+        self._update_headless_visibility()
+
+    def _update_full_control_init_box_state(self):
+        """Disable Full Control initialization only when sim=true and hybrid_sim=false."""
+        full_sim_mode = self.full_control_sim_mode_combo.currentText() if hasattr(self, "full_control_sim_mode_combo") else 'false'
+        full_hybrid_mode = self.full_control_hybrid_sim_combo.currentText() if hasattr(self, "full_control_hybrid_sim_combo") else 'false'
+        should_disable = (full_sim_mode == 'true' and full_hybrid_mode == 'false')
+        if hasattr(self, "full_control_init_box"):
+            self.full_control_init_box.setEnabled(not should_disable)
 
     def _update_headless_visibility(self):
         """Show headless selectors only when simulation mode is true."""
@@ -1029,6 +1070,24 @@ class RobotControlUI(QMainWindow):
             self.full_control_headless_label.setVisible(full_visible)
         if hasattr(self, "full_control_headless_combo"):
             self.full_control_headless_combo.setVisible(full_visible)
+
+        # Full Control hybrid selector is only meaningful in sim mode.
+        if hasattr(self, "full_control_hybrid_sim_label"):
+            self.full_control_hybrid_sim_label.setVisible(full_visible)
+        if hasattr(self, "full_control_hybrid_sim_combo"):
+            self.full_control_hybrid_sim_combo.setVisible(full_visible)
+
+        # In Full Control, headless is only meaningful when hybrid_sim is false.
+        full_hybrid_mode = (
+            self.full_control_hybrid_sim_combo.currentText()
+            if hasattr(self, "full_control_hybrid_sim_combo")
+            else 'false'
+        )
+        full_headless_visible = full_visible and (full_hybrid_mode == 'false')
+        if hasattr(self, "full_control_headless_label"):
+            self.full_control_headless_label.setVisible(full_headless_visible)
+        if hasattr(self, "full_control_headless_combo"):
+            self.full_control_headless_combo.setVisible(full_headless_visible)
 
     def _set_tab_enabled(self, tab_index, enabled):
         """Enable or disable a tab (make it clickable or unclickable)"""
@@ -1102,8 +1161,12 @@ class RobotControlUI(QMainWindow):
         except Exception:
             pass  # Ignore errors if context is shutting down
 
-    def _on_joint_states(self, msg):
+    def _on_joint_states(self, msg, source_topic=None):
         """Update live joint sliders in Arm and Full Control tabs from joint states topics."""
+        active_topic = self._get_joint_states_topic_for_ui()
+        if source_topic is not None and source_topic != active_topic:
+            return
+
         if not msg.name or not msg.position:
             return
 
@@ -1256,10 +1319,13 @@ class RobotControlUI(QMainWindow):
     
     def toggle_arm_launch(self):
         sim_mode = self.arm_sim_mode_combo.currentText()
+        hybrid_sim = 'true' if self._is_hybrid_sim_enabled() else 'false'
+        robot_ip = self._get_robot_ip_for_arm_launch()
         self._toggle_process('arm_launch', self.btn_general_launch, 'Arm',
                             'ros2', ['launch', 'arm_control', 'arm.launch.py',
-                                    'robot_ip:=192.168.1.102',
+                                    f'robot_ip:={robot_ip}',
                                     f'sim:={sim_mode}',
+                                    f'hybrid_sim:={hybrid_sim}',
                                     'mode:=arm',
                                 ])
         
@@ -1319,7 +1385,7 @@ class RobotControlUI(QMainWindow):
         self._toggle_process('align_ee_to_wall', self.btn_align_ee_to_wall, 'Align EE to Wall',
                             'ros2', ['run', 'arm_control', 'align_ee_to_wall'])
         
-    def toggle_mapping(self, mode='base', button=None, sim_combo=None, controller_type_combo=None, headless_combo=None):
+    def toggle_mapping(self, mode='base', button=None, sim_combo=None, controller_type_combo=None, headless_combo=None, hybrid_sim_combo=None):
         """Toggle mapping with configurable mode parameter"""
         if button is None:
             button = self.btn_launch_mapping
@@ -1329,10 +1395,13 @@ class RobotControlUI(QMainWindow):
             controller_type_combo = self.controller_type_combo
         if headless_combo is None:
             headless_combo = self.base_headless_combo if mode == 'base' else self.full_control_headless_combo
+        if hybrid_sim_combo is None and mode == 'full' and hasattr(self, "full_control_hybrid_sim_combo"):
+            hybrid_sim_combo = self.full_control_hybrid_sim_combo
         
         sim_mode = sim_combo.currentText()
         controller_type = controller_type_combo.currentText()
         headless = headless_combo.currentText() if headless_combo else 'false'
+        hybrid_sim = hybrid_sim_combo.currentText() if hybrid_sim_combo else 'false'
         
         args = [
             'launch',
@@ -1341,8 +1410,10 @@ class RobotControlUI(QMainWindow):
             f'sim:={sim_mode}',
             f'mode:={mode}',
             f'controller_type:={controller_type}',
-            f'headless:={headless}',
         ]
+        if mode == 'full':
+            args.append(f'hybrid_sim:={hybrid_sim}')
+        args.append(f'headless:={headless}')
         
         process_key = f'{mode}_mapping' if mode != 'base' else 'mapping'
         display_name = 'Mapping'
@@ -1365,7 +1436,7 @@ class RobotControlUI(QMainWindow):
             self._update_tab_states_for_base()
 
     
-    def toggle_localization(self, mode='base', button=None, sim_combo=None, controller_type_combo=None, headless_combo=None):
+    def toggle_localization(self, mode='base', button=None, sim_combo=None, controller_type_combo=None, headless_combo=None, hybrid_sim_combo=None):
         """Toggle localization with configurable mode parameter"""
         if button is None:
             button = self.btn_launch_localization
@@ -1375,17 +1446,26 @@ class RobotControlUI(QMainWindow):
             controller_type_combo = self.controller_type_combo
         if headless_combo is None:
             headless_combo = self.base_headless_combo if mode == 'base' else self.full_control_headless_combo
+        if hybrid_sim_combo is None and mode == 'full' and hasattr(self, "full_control_hybrid_sim_combo"):
+            hybrid_sim_combo = self.full_control_hybrid_sim_combo
         
         sim_mode = sim_combo.currentText()
         controller_type = controller_type_combo.currentText()
         headless = headless_combo.currentText() if headless_combo else 'false'
+        hybrid_sim = hybrid_sim_combo.currentText() if hybrid_sim_combo else 'false'
         
         process_key = f'{mode}_localization' if mode != 'base' else 'localization'
         display_name = 'Localization'
         
-        self._toggle_base_process(process_key, button, display_name,
-                                'ros2', ['launch', 'navi_wall', 'move_robot.launch.py',
-                                        f'sim:={sim_mode}', f'mode:={mode}', f'controller_type:={controller_type}', f'headless:={headless}'])
+        localization_args = [
+            'launch', 'navi_wall', 'move_robot.launch.py',
+            f'sim:={sim_mode}', f'mode:={mode}', f'controller_type:={controller_type}',
+        ]
+        if mode == 'full':
+            localization_args.append(f'hybrid_sim:={hybrid_sim}')
+        localization_args.append(f'headless:={headless}')
+
+        self._toggle_base_process(process_key, button, display_name, 'ros2', localization_args)
         if mode == 'full':
             self._update_tab_states_for_full_control()
         
@@ -1554,21 +1634,36 @@ class RobotControlUI(QMainWindow):
         """Clean up finished ps aux process"""
         if process_key in self.process_map:
             del self.process_map[process_key]
+
+    def _build_list_all_controllers_script(self):
+        """Shell script that lists controllers for every detected controller_manager node."""
+        return (
+            "manager_nodes=$(ros2 node list 2>/dev/null | grep -E '(^|/)controller_manager$' | sort -u); "
+            "if [ -z \"$manager_nodes\" ]; then "
+            "  echo \"No controller_manager nodes found.\"; "
+            "  exit 1; "
+            "fi; "
+            "for cm in $manager_nodes; do "
+            "  echo \"===== $cm =====\"; "
+            "  timeout 8 ros2 control list_controllers -c \"$cm\" || echo \"[WARN] Failed to query $cm\"; "
+            "  echo; "
+            "done"
+        )
  
     def run_list_base_controllers(self):
-        """List ROS2 controllers using ros2 control CLI"""
+        """List controllers for all detected controller_manager nodes."""
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
         process.readyReadStandardOutput.connect(lambda: self.handle_base_output(process))
  
         # Display command in bold green
-        cmd_str = 'timeout 10 ros2 control list_controllers'
+        cmd_str = "for cm in $(ros2 node list | grep -E '(^|/)controller_manager$'); do ros2 control list_controllers -c $cm; done"
         self._append_to_text_widget(self.base_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
  
         # Run the command with timeout (10 seconds)
         process_key = 'list_base_controllers'
         process.finished.connect(lambda: self._cleanup_list_base_controllers(process_key))
-        process.start('timeout', ['10', 'ros2', 'control', 'list_controllers'])
+        process.start('bash', ['-c', self._build_list_all_controllers_script()])
         self.process_map[process_key] = process
  
     def _cleanup_list_base_controllers(self, process_key):
@@ -1582,19 +1677,19 @@ class RobotControlUI(QMainWindow):
                 self.base_status_text.append("✓ List controllers command completed")
 
     def run_list_full_controllers(self):
-        """List ROS2 controllers using ros2 control CLI (Full Control tab)"""
+        """List controllers for all detected controller_manager nodes (Full Control tab)."""
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
         process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
 
         # Display command in bold green
-        cmd_str = 'timeout 10 ros2 control list_controllers'
+        cmd_str = "for cm in $(ros2 node list | grep -E '(^|/)controller_manager$'); do ros2 control list_controllers -c $cm; done"
         self._append_to_text_widget(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
 
         # Run the command with timeout (10 seconds)
         process_key = 'full_list_base_controllers'
         process.finished.connect(lambda: self._cleanup_list_full_controllers(process_key))
-        process.start('timeout', ['10', 'ros2', 'control', 'list_controllers'])
+        process.start('bash', ['-c', self._build_list_all_controllers_script()])
         self.process_map[process_key] = process
 
     def _cleanup_list_full_controllers(self, process_key):
@@ -2070,6 +2165,17 @@ class RobotControlUI(QMainWindow):
         """Connect to robot dashboard if not already connected"""
         if status_text is None:
             status_text = self.status_text
+
+        desired_host = self._get_robot_ip_for_arm_launch()
+        if self.robot_host != desired_host:
+            if self.robot_socket:
+                try:
+                    self.robot_socket.close()
+                except Exception:
+                    pass
+                self.robot_socket = None
+            self.robot_host = desired_host
+
         if self.robot_socket is None:
             try:
                 self.robot_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -2234,20 +2340,19 @@ class RobotControlUI(QMainWindow):
             self.full_control_status_text.append(f"⚠ {name} exited")
 
     def list_controllers(self):
-        """List ROS2 controllers using ros2 control CLI"""
+        """List controllers for all detected controller_manager nodes (Arm tab)."""
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
         process.readyReadStandardOutput.connect(lambda: self.handle_output(process))
  
         # Display command in bold green
-        cmd_str = 'ros2 control list_controllers -c /arm/controller_manager'
-        self.status_text.append(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        self.status_text.append("")  # Add newline after command
+        cmd_str = "for cm in $(ros2 node list | grep -E '(^|/)controller_manager$'); do ros2 control list_controllers -c $cm; done"
+        self._append_to_text_widget(self.status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
  
         # Run the command
         process_key = 'list_controllers'
         process.finished.connect(lambda: self._cleanup_list_controllers(process_key))
-        process.start('ros2', ['control', 'list_controllers', '-c', '/arm/controller_manager'])
+        process.start('bash', ['-c', self._build_list_all_controllers_script()])
         self.process_map[process_key] = process
  
     def _cleanup_list_controllers(self, process_key):
@@ -2337,17 +2442,21 @@ class RobotControlUI(QMainWindow):
         self.joint_status_text.clear()
     
     def read_joint_positions(self, silent=False):
-        """Read current joint positions from /joint_states and populate input fields"""
+        """Read current joint positions from the active joint_states topic and populate input fields."""
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
+        joint_states_topic = self._get_joint_states_topic_for_ui()
         
         # Display command in bold green (only if not silent)
         if not silent:
-            self._append_to_text_widget(self.joint_status_text, "<b style='color: #539bf5;'>▶ ros2 topic echo /joint_states --once</b><br>")
+            self._append_to_text_widget(
+                self.joint_status_text,
+                f"<b style='color: #539bf5;'>▶ ros2 topic echo {joint_states_topic} --once</b><br>"
+            )
         
         # Store the process to retrieve output later
         process.finished.connect(lambda: self.parse_joint_states(process, silent))
-        process.start('bash', ['-c', 'timeout 5 ros2 topic echo /joint_states --once'])
+        process.start('bash', ['-c', f'timeout 5 ros2 topic echo {joint_states_topic} --once'])
 
     
     def parse_joint_states(self, process, silent=False):
@@ -2475,7 +2584,9 @@ class RobotControlUI(QMainWindow):
 
      
     def publish_joint_trajectory(self):
-        """Publish joint trajectory to /arm/planned_trajectory topic"""
+        """Publish joint trajectory to the active planned_trajectory topic."""
+        planned_trajectory_topic = self._get_planned_trajectory_topic_for_ui()
+
         # Expected joint order for publishing
         expected_joints = self.arm_joint_names
         
@@ -2529,7 +2640,7 @@ class RobotControlUI(QMainWindow):
         time_nanosec = int((self.time_from_start_input.value() - time_sec) * 1e9)
         
         # Build the ros2 topic pub command
-        cmd = f"ros2 topic pub --once /planned_trajectory trajectory_msgs/msg/JointTrajectory \"{{header: {{stamp: {{sec: 0, nanosec: 0}}, frame_id: ''}}, joint_names: ['arm_shoulder_pan_joint', 'arm_shoulder_lift_joint', 'arm_elbow_joint', 'arm_wrist_1_joint', 'arm_wrist_2_joint', 'arm_wrist_3_joint'], points: [{{positions: [{positions_str}], velocities: [], accelerations: [], effort: [], time_from_start: {{sec: {time_sec}, nanosec: {time_nanosec}}}}}]}}\""
+        cmd = f"ros2 topic pub --once {planned_trajectory_topic} trajectory_msgs/msg/JointTrajectory \"{{header: {{stamp: {{sec: 0, nanosec: 0}}, frame_id: ''}}, joint_names: ['arm_shoulder_pan_joint', 'arm_shoulder_lift_joint', 'arm_elbow_joint', 'arm_wrist_1_joint', 'arm_wrist_2_joint', 'arm_wrist_3_joint'], points: [{{positions: [{positions_str}], velocities: [], accelerations: [], effort: [], time_from_start: {{sec: {time_sec}, nanosec: {time_nanosec}}}}}]}}\""
         
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
@@ -2594,7 +2705,7 @@ class RobotControlUI(QMainWindow):
             self.status_text.append(f"<span style='color: #f47067;'>❌ Failed to send goal: {e}</span>")
  
     def send_position_command(self):
-        """Send selected position using /send_position service (Arm Control tab)."""
+        """Send selected position using dynamic send_position service endpoint (Arm Control tab)."""
         position_name = self.position_dropdown.currentText()
         self._send_position_service_call(
             position_name=position_name,
@@ -2603,7 +2714,7 @@ class RobotControlUI(QMainWindow):
         )
 
     def send_full_control_position_command(self):
-        """Send selected position using /send_position service (Full Control tab)."""
+        """Send selected position using dynamic send_position service endpoint (Full Control tab)."""
         position_name = self.full_control_position_dropdown.currentText()
         self._send_position_service_call(
             position_name=position_name,
@@ -2611,18 +2722,49 @@ class RobotControlUI(QMainWindow):
             output_handler=self.handle_full_control_output,
         )
 
+    def _is_hybrid_sim_enabled(self):
+        """Return True when Full Control hybrid simulation mode is selected."""
+        if not hasattr(self, "full_control_hybrid_sim_combo"):
+            return False
+        return self.full_control_hybrid_sim_combo.currentText() == 'true'
+
+    def _get_joint_states_topic_for_ui(self):
+        """Pick the joint_states topic for slider updates/readback based on hybrid_sim."""
+        if self._is_hybrid_sim_enabled():
+            return '/arm/joint_states'
+        return '/joint_states'
+
+    def _get_planned_trajectory_topic_for_ui(self):
+        """Pick the planned_trajectory topic for Joint Control publishing based on hybrid_sim."""
+        if self._is_hybrid_sim_enabled():
+            return '/arm/planned_trajectory'
+        return '/planned_trajectory'
+
+    def _get_robot_ip_for_arm_launch(self):
+        """Pick robot_ip based on hybrid_sim selection."""
+        if self._is_hybrid_sim_enabled():
+            return '192.168.56.101'
+        return '192.168.1.102'
+
+    def _get_send_position_service_name(self):
+        """Pick service namespace based on hybrid_sim selection."""
+        if self._is_hybrid_sim_enabled():
+            return '/arm/send_position'
+        return '/send_position'
+
     def _send_position_service_call(self, position_name, status_text, output_handler):
-        """Execute ros2 service call for /send_position and stream output to target status widget."""
+        """Execute ros2 service call for the selected send_position service and stream output."""
         payload = f"{{position_name: '{position_name}'}}"
+        service_name = self._get_send_position_service_name()
         ros2_args = [
             'service',
             'call',
-            '/send_position',
+            service_name,
             'arm_control/srv/SendPosition',
             payload,
         ]
 
-        cmd_str = f'ros2 service call /send_position arm_control/srv/SendPosition "{payload}"'
+        cmd_str = f'ros2 service call {service_name} arm_control/srv/SendPosition "{payload}"'
         self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
 
         process = QProcess(self)
