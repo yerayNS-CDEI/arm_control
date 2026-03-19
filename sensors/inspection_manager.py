@@ -165,13 +165,13 @@ class InspectionManager(Node):
         self.get_logger().info(f"  Mesura OK: {cam_detail}")
 
         # --- Validacio de longituds (el node rebutja espectres != 256) ---
-        for spectrum, label in [
+        for spectrum, spectrum_label in [
             (res_cam.vis_spectrum, "GSM VIS"),
             (res_cam.nir_spectrum, "GSM NIR"),
             (res_grf.vis_spectrum, "GRF VIS"),
             (res_grf.nir_spectrum, "GRF NIR"),
         ]:
-            if not self._validate_spectrum(spectrum, label):
+            if not self._validate_spectrum(spectrum, spectrum_label):
                 return
 
         # --- Normalitzacio ---
@@ -194,7 +194,10 @@ class InspectionManager(Node):
 
         # 3. Dividim les dades netes. (Usem > 0 al divisor per evitar errors matemàtics)
         vis_norm = np.divide(vis_gsm_net, vis_grf_net, out=np.zeros(SPECTRUM_LENGTH), where=vis_grf_net > 0)
+        vis_norm = np.maximum(vis_norm, 0)  # Assegurem que no hi ha valors negatius
+        
         nir_norm = np.divide(nir_gsm_net, nir_grf_net, out=np.zeros(SPECTRUM_LENGTH), where=nir_grf_net > 0)
+        nir_norm = np.maximum(nir_norm, 0)  # Assegurem que no hi ha valors negatius
 
         # Doble validacio: la normalitzacio no ha de canviar la longitud
         if not self._validate_spectrum(vis_norm, "VIS normalitzat") or \
