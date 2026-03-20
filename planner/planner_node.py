@@ -120,6 +120,7 @@ class PlannerNode(Node):
         self.create_subscription(PoseStamped, "end_effector_pose", self.end_effector_pose_callback, 10)
         self.create_subscription(PoseStamped, "/end_effector_pose", self.end_effector_pose_callback, 10)
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
+        self.reset_sub = self.create_subscription(Bool, "/planner/reset", self.reset_callback, 10)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
         self.planner_goal_failed_pub = self.create_publisher(Bool, '/planner/goal_failed', 10)
         self.cyl_marker_pub = self.create_publisher(Marker, 'obstacle_markers', 10)
@@ -660,6 +661,33 @@ class PlannerNode(Node):
         self.emergency_stop = msg.data
         if self.emergency_stop:
             self.execution_complete = True
+
+    def reset_callback(self, msg: Bool):
+        """
+        Reset planner state to initialization values when requested.
+        This allows unstucking the planner when goals are stuck due to inactive controllers.
+        """
+        if msg.data:
+            # Store queue length before clearing for logging
+            queued_goals = len(self.goal_queue)
+            
+            # Reset state variables to their initialization values
+            self.execution_complete = True
+            self.goal_queue = []
+            self.emergency_stop = False
+            self.invalid_path = False
+            
+            # Clear visualization markers
+            self.clear_goal_and_path_markers()
+            
+            self.get_logger().warn(
+                "Planner state RESET requested and completed. "
+                f"Cleared {queued_goals} queued goals. "
+                "Ready to accept new goals."
+            )
+            
+            # Publish that any previous goal has failed (since we're resetting)
+            self.publish_planner_goal_failed(True)
 
     def joint_state_callback(self, msg):
         # Recompute mapping on every message because different joint_states sources
