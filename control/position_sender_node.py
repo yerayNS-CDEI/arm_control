@@ -140,7 +140,7 @@ class PositionSenderNode(Node):
             # FSM positions
             'folded_fsm': {
                 'joints': (),
-                'pose': (0.254, -0.173, 0.401, 0.498, 0.710, 0.286, 0.407)
+                'pose': (-0.254, -0.273, 0.400, 0.498, 0.710, 0.286, 0.407)  # Raised Z from 0.401 to 0.550
             },
             'unfolded_fsm': {
                 'joints': (),
