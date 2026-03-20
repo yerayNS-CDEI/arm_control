@@ -135,6 +135,16 @@ class PositionSenderNode(Node):
             'under2': {
                 'joints': (),
                 'pose': (-0.51400, -0.51400, -0.76200, 0.924, -0.380, 0.0, 0.0)
+            },
+            
+            # FSM positions
+            'folded_fsm': {
+                'joints': (),
+                'pose': (0.254, -0.173, 0.401, 0.498, 0.710, 0.286, 0.407)
+            },
+            'unfolded_fsm': {
+                'joints': (),
+                'pose': (0.411, -0.173, 0.850, 0.406, 0.577, 0.408, 0.580)
             }
         }
         
