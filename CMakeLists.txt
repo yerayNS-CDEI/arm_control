@@ -36,6 +36,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/HyperspectralCommand.srv"
   "srv/HyperspectralConfig.srv"
   "srv/SendPosition.srv"
+  "srv/ScriptCommand.srv"
   DEPENDENCIES geometry_msgs std_msgs
 )
 
@@ -71,6 +72,8 @@ install(CODE "
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/exhaustive_scan_node.py \${LIB_DIR}/exhaustive_scan_node)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/freedrive_control.py \${LIB_DIR}/freedrive_control)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/position_sender_node.py \${LIB_DIR}/position_sender_node)
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/script_command_client_example.py \${LIB_DIR}/script_command_client_example)
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/script_command_service_node.py \${LIB_DIR}/script_command_service_node)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/publisher_joint_trajectory_planned.py \${LIB_DIR}/publisher_joint_trajectory_planned)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/remote_DASHBOARD.py \${LIB_DIR}/remote_DASHBOARD)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/remote_SCRIPT.py \${LIB_DIR}/remote_SCRIPT)

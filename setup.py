@@ -34,6 +34,7 @@ setup(
             'robot_command_logger = control.robot_command_logger:main',
             'robot_status_check = control.robot_status_check:main',
             'send_and_monitor_trajectory = control.send_and_monitor_trajectory:main',
+            'script_command_service_node = control.script_command_service_node:main',
             'UI = control.UI:main',
             
             # Planner nodes
