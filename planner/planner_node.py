@@ -656,6 +656,56 @@ class PlannerNode(Node):
         if log:
             self.get_logger().info(f"[prune] result: {before} -> {after} waypoints")
         return pw
+    
+    def _identify_obstacle(self, position, occupancy_grid, grid_idx):
+        """
+        Identify which specific obstacle a position is inside.
+        Returns a descriptive string naming the obstacle.
+        """
+        x, y, z = position
+        i, j, k = grid_idx
+        
+        obstacles = []
+        
+        # Check cylinder obstacle
+        dist_xy = np.sqrt((x - self.cyl_center_xy[0])**2 + (y - self.cyl_center_xy[1])**2)
+        if dist_xy <= self.cyl_radius and self.z_min <= z <= self.z_max:
+            obstacles.append(f"Cylinder (center={self.cyl_center_xy}, radius={self.cyl_radius}m, z=[{self.z_min}, {self.z_max}])")
+        
+        # Check base footprint
+        if self.base_z_min <= z <= self.base_z_max:
+            # Simple point-in-polygon check
+            polygon = self.base_footprint_xy
+            n = len(polygon)
+            inside = False
+            p1x, p1y = polygon[0]
+            for i_poly in range(n + 1):
+                p2x, p2y = polygon[i_poly % n]
+                if y > min(p1y, p2y):
+                    if y <= max(p1y, p2y):
+                        if x <= max(p1x, p2x):
+                            if p1y != p2y:
+                                xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                            if p1x == p2x or x <= xinters:
+                                inside = not inside
+                p1x, p1y = p2x, p2y
+            
+            if inside:
+                obstacles.append(f"Mobile base footprint (polygon with {len(polygon)} vertices, z=[{self.base_z_min}, {self.base_z_max}])")
+        
+        # Check if it's in the undilated occupancy grid
+        if occupancy_grid[grid_idx] == 1:
+            if not obstacles:
+                obstacles.append("Unknown obstacle (present in occupancy grid)")
+        else:
+            # Only in dilated grid, not in original
+            if not obstacles:
+                obstacles.append("Dilated safety margin around obstacle")
+        
+        if obstacles:
+            return " AND ".join(obstacles)
+        else:
+            return "Unknown (possibly dilation margin)"
         
     def emergency_callback(self, msg):
         self.emergency_stop = msg.data
@@ -825,6 +875,45 @@ class PlannerNode(Node):
         except Exception as e:
             self._fail_current_goal(f"Failed to convert world to grid: {e}")
             return
+        
+        # Check if tool0 positions are outside workspace bounds (warn but don't fail if wrist_3 is ok)
+        # Check start tool0
+        try:
+            start_tool0_idx = world_to_grid(*start_pos, self.x_vals, self.y_vals, self.z_vals)
+            st_i, st_j, st_k = start_tool0_idx
+            if not (0 <= st_i < self.grid_size and 0 <= st_j < self.grid_size and 0 <= st_k < len(self.z_levels)):
+                self.get_logger().warn(
+                    f"⚠️  Start tool0 position is OUTSIDE workspace bounds, but wrist_3 is inside.\n"
+                    f"  Start (tool0): {[round(x, 3) for x in start_pos]} → grid {start_tool0_idx}\n"
+                    f"  Start (wrist_3): {[round(x, 3) for x in start_pos_wrist3]} → grid {start_idx}\n"
+                    f"  → Planning will continue using wrist_3 position."
+                )
+        except Exception:
+            self.get_logger().warn(
+                f"⚠️  Start tool0 position is FAR OUTSIDE workspace bounds, but wrist_3 is inside.\n"
+                f"  Start (tool0): {[round(x, 3) for x in start_pos]} (failed grid conversion)\n"
+                f"  Start (wrist_3): {[round(x, 3) for x in start_pos_wrist3]} → grid {start_idx}"
+            )
+        
+        # Check goal tool0
+        try:
+            goal_tool0_idx = world_to_grid(*goal_pos, self.x_vals, self.y_vals, self.z_vals)
+            gt_i, gt_j, gt_k = goal_tool0_idx
+            if not (0 <= gt_i < self.grid_size and 0 <= gt_j < self.grid_size and 0 <= gt_k < len(self.z_levels)):
+                self.get_logger().warn(
+                    f"⚠️  Goal tool0 position is OUTSIDE workspace bounds, but wrist_3 is inside.\n"
+                    f"  Goal (tool0): {[round(x, 3) for x in goal_pos]} → grid {goal_tool0_idx}\n"
+                    f"  Goal (wrist_3): {[round(x, 3) for x in goal_pos_wrist3]} → grid {goal_idx}\n"
+                    f"  → Planning will continue using wrist_3 position (IK target).\n"
+                    f"  → Tool extends beyond reachable workspace - verify this is intentional."
+                )
+        except Exception:
+            self.get_logger().warn(
+                f"⚠️  Goal tool0 position is FAR OUTSIDE workspace bounds, but wrist_3 is inside.\n"
+                f"  Goal (tool0): {[round(x, 3) for x in goal_pos]} (failed grid conversion)\n"
+                f"  Goal (wrist_3): {[round(x, 3) for x in goal_pos_wrist3]} → grid {goal_idx}\n"
+                f"  → Planning will continue using wrist_3 position (IK target)."
+            )
 
         # Occupancy grid: all free (NEEDS TO be parameterized)
         occupancy_grid = np.zeros(self.grid_shape, dtype=np.uint8)
@@ -884,10 +973,101 @@ class PlannerNode(Node):
         occupancy_grid_dilated = dilate_obstacles(occupancy_grid, dilation_distance, self.x_vals)
         # occupancy_grid_dilated = np.zeros(self.grid_shape, dtype=np.uint8)      # Eliminating all obstacles for now
 
+        # --- Pre-flight check: verify start and goal are not inside obstacles ---
+        start_i, start_j, start_k = start_idx
+        goal_i, goal_j, goal_k = goal_idx
+        
+        # Check if indices are within bounds
+        if not (0 <= start_i < self.grid_size and 0 <= start_j < self.grid_size and 0 <= start_k < len(self.z_levels)):
+            self._fail_current_goal(
+                f"❌ Start wrist_3 position OUT OF BOUNDS: grid_idx={start_idx}, "
+                f"pos_wrist3={start_pos_wrist3}. Start IK target is outside reachable workspace."
+            )
+            return
+        
+        if not (0 <= goal_i < self.grid_size and 0 <= goal_j < self.grid_size and 0 <= goal_k < len(self.z_levels)):
+            self._fail_current_goal(
+                f"❌ Goal wrist_3 position OUT OF BOUNDS: grid_idx={goal_idx}, "
+                f"pos_wrist3={goal_pos_wrist3}. "
+                f"Goal IK target is outside reachable workspace - cannot plan path.\n"
+                f"  Note: Tool0 was at {goal_pos} (may also be out of bounds)."
+            )
+            return
+        
+        # Check if start wrist_3 is inside an obstacle
+        if occupancy_grid_dilated[start_i, start_j, start_k] == 1:
+            # Identify which obstacle
+            obstacle_name = self._identify_obstacle(start_pos_wrist3, occupancy_grid, start_idx)
+            self._fail_current_goal(
+                f"❌ Start wrist_3 position is INSIDE OBSTACLE: {obstacle_name}\n"
+                f"  Start pos (wrist_3): {[round(x, 3) for x in start_pos_wrist3]}\n"
+                f"  Start pos (tool0): {[round(x, 3) for x in start_pos]}\n"
+                f"  Grid index (wrist_3): {start_idx}\n"
+                f"  Obstacle detection: dilated grid shows occupied voxel.\n"
+                f"  → Cannot plan path - start wrist_3 is in collision!"
+            )
+            return
+        
+        # Check if start tool0 is inside an obstacle (if within grid bounds)
+        try:
+            start_tool0_idx = world_to_grid(*start_pos, self.x_vals, self.y_vals, self.z_vals)
+            st_i, st_j, st_k = start_tool0_idx
+            if (0 <= st_i < self.grid_size and 0 <= st_j < self.grid_size and 0 <= st_k < len(self.z_levels)):
+                if occupancy_grid_dilated[st_i, st_j, st_k] == 1:
+                    obstacle_name = self._identify_obstacle(start_pos, occupancy_grid, start_tool0_idx)
+                    self._fail_current_goal(
+                        f"❌ Start tool0 position is INSIDE OBSTACLE: {obstacle_name}\n"
+                        f"  Start pos (tool0): {[round(x, 3) for x in start_pos]}\n"
+                        f"  Start pos (wrist_3): {[round(x, 3) for x in start_pos_wrist3]}\n"
+                        f"  Grid index (tool0): {start_tool0_idx}\n"
+                        f"  → Cannot plan path - tool is in collision!"
+                    )
+                    return
+        except Exception:
+            pass  # tool0 out of bounds - already warned earlier
+        
+        # Check if goal wrist_3 is inside an obstacle
+        if occupancy_grid_dilated[goal_i, goal_j, goal_k] == 1:
+            # Identify which obstacle
+            obstacle_name = self._identify_obstacle(goal_pos_wrist3, occupancy_grid, goal_idx)
+            self._fail_current_goal(
+                f"❌ Goal wrist_3 position is INSIDE OBSTACLE: {obstacle_name}\n"
+                f"  Goal pos (wrist_3): {[round(x, 3) for x in goal_pos_wrist3]}\n"
+                f"  Goal pos (tool0): {[round(x, 3) for x in goal_pos]}\n"
+                f"  Grid index (wrist_3): {goal_idx}\n"
+                f"  Obstacle detection: dilated grid shows occupied voxel.\n"
+                f"  → Cannot plan path - goal wrist_3 is in collision!"
+            )
+            return
+        
+        # Check if goal tool0 is inside an obstacle (if within grid bounds)
+        try:
+            goal_tool0_idx = world_to_grid(*goal_pos, self.x_vals, self.y_vals, self.z_vals)
+            gt_i, gt_j, gt_k = goal_tool0_idx
+            if (0 <= gt_i < self.grid_size and 0 <= gt_j < self.grid_size and 0 <= gt_k < len(self.z_levels)):
+                if occupancy_grid_dilated[gt_i, gt_j, gt_k] == 1:
+                    obstacle_name = self._identify_obstacle(goal_pos, occupancy_grid, goal_tool0_idx)
+                    self._fail_current_goal(
+                        f"❌ Goal tool0 position is INSIDE OBSTACLE: {obstacle_name}\n"
+                        f"  Goal pos (tool0): {[round(x, 3) for x in goal_pos]}\n"
+                        f"  Goal pos (wrist_3): {[round(x, 3) for x in goal_pos_wrist3]}\n"
+                        f"  Grid index (tool0): {goal_tool0_idx}\n"
+                        f"  → Cannot plan path - tool is in collision!"
+                    )
+                    return
+        except Exception:
+            pass  # tool0 out of bounds - already warned earlier
+
         path = find_path(occupancy_grid_dilated, start_idx, goal_idx)
         self.get_logger().info(f"Found path with length {len(path)}")
         if not path:
-            self.get_logger().warn("No path found!")
+            self.get_logger().warn(
+                "No path found by A* algorithm!\n"
+                f"  Start: {start_pos_wrist3} (grid {start_idx})\n"
+                f"  Goal: {goal_pos_wrist3} (grid {goal_idx})\n"
+                "  Possible causes: goal unreachable due to obstacles blocking all paths, "
+                "or start/goal in narrow passage that was eliminated by dilation."
+            )
             self.execution_complete = True  # Mark execution as complete to allow new goals
             self.publish_planner_goal_failed(True)
             return
