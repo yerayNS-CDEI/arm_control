@@ -33,7 +33,7 @@ def launch_setup(context, *args, **kwargs):
     controller_spawner_timeout = LaunchConfiguration("controller_spawner_timeout")
     initial_joint_controller = LaunchConfiguration("initial_joint_controller")
     activate_joint_controller = LaunchConfiguration("activate_joint_controller")
-    launch_rviz = LaunchConfiguration("launch_rviz")
+    stack_launch_rviz = LaunchConfiguration("stack_launch_rviz")
     headless_mode = LaunchConfiguration("headless_mode")
     launch_dashboard_client = LaunchConfiguration("launch_dashboard_client")
     use_tool_communication = LaunchConfiguration("use_tool_communication")
@@ -280,6 +280,7 @@ def launch_setup(context, *args, **kwargs):
             }
         ],
         output="screen",
+        condition=UnlessCondition(use_fake_hardware),
     )
 
     controller_stopper_node = Node(
@@ -316,7 +317,7 @@ def launch_setup(context, *args, **kwargs):
 
     rviz_node = Node(
         package="rviz2",
-        condition=IfCondition(launch_rviz),
+        condition=IfCondition(stack_launch_rviz),
         executable="rviz2",
         name="rviz2",
         output="log",
@@ -496,7 +497,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "initial_joint_controller",
-            default_value="joint_trajectory_controller",
+            default_value="scaled_joint_trajectory_controller",
             choices=[
                 "scaled_joint_trajectory_controller",
                 "joint_trajectory_controller",
@@ -516,7 +517,7 @@ def generate_launch_description():
         )
     )
     declared_arguments.append(
-        DeclareLaunchArgument("launch_rviz", default_value="true", description="Launch RViz?")
+        DeclareLaunchArgument("stack_launch_rviz", default_value="true", description="Launch the stack RViz?")
     )
     declared_arguments.append(
         DeclareLaunchArgument(
