@@ -1,0 +1,21 @@
+# These limits are consumed by MoveIt for time parameterization. They do not
+# replace the URDF limits, they only augment them with acceleration limits.
+joint_limits:
+  arm_shoulder_pan_joint:
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  arm_shoulder_lift_joint:
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  arm_elbow_joint:
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  arm_wrist_1_joint:
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  arm_wrist_2_joint:
+    has_acceleration_limits: true
+    max_acceleration: 5.0
+  arm_wrist_3_joint:
+    has_acceleration_limits: true
+    max_acceleration: 5.0

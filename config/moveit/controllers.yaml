@@ -1,0 +1,27 @@
+controller_names:
+  - scaled_joint_trajectory_controller
+  - joint_trajectory_controller
+
+scaled_joint_trajectory_controller:
+  action_ns: follow_joint_trajectory
+  type: FollowJointTrajectory
+  default: true
+  joints:
+    - arm_shoulder_pan_joint
+    - arm_shoulder_lift_joint
+    - arm_elbow_joint
+    - arm_wrist_1_joint
+    - arm_wrist_2_joint
+    - arm_wrist_3_joint
+
+joint_trajectory_controller:
+  action_ns: follow_joint_trajectory
+  type: FollowJointTrajectory
+  default: false
+  joints:
+    - arm_shoulder_pan_joint
+    - arm_shoulder_lift_joint
+    - arm_elbow_joint
+    - arm_wrist_1_joint
+    - arm_wrist_2_joint
+    - arm_wrist_3_joint
