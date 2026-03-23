@@ -30,7 +30,7 @@ def launch_setup(context, *args, **kwargs):
     tf_prefix = LaunchConfiguration("tf_prefix")
     start_joint_controller = LaunchConfiguration("start_joint_controller")
     initial_joint_controller = LaunchConfiguration("initial_joint_controller")
-    launch_rviz = LaunchConfiguration("launch_rviz")
+    stack_launch_rviz = LaunchConfiguration("stack_launch_rviz")
     gazebo_gui = LaunchConfiguration("gazebo_gui")
     # My arguments
     mode = LaunchConfiguration("mode")
@@ -116,7 +116,7 @@ def launch_setup(context, *args, **kwargs):
         name="rviz2",
         output="log",
         arguments=["-d", rviz_config_file],
-        condition=IfCondition(launch_rviz),
+        condition=IfCondition(stack_launch_rviz),
     )
 
     joint_state_broadcaster_spawner = Node(
@@ -131,7 +131,7 @@ def launch_setup(context, *args, **kwargs):
             target_action=joint_state_broadcaster_spawner,
             on_exit=[rviz_node],
         ),
-        condition=IfCondition(launch_rviz),
+        condition=IfCondition(stack_launch_rviz),
     )
 
     # There may be other controllers of the joints, but this is the initially-started one
@@ -318,7 +318,7 @@ def generate_launch_description():
         )
     )
     declared_arguments.append(
-        DeclareLaunchArgument("launch_rviz", default_value="true", description="Launch RViz?")
+        DeclareLaunchArgument("stack_launch_rviz", default_value="true", description="Launch the stack RViz?")
     )
     declared_arguments.append(
         DeclareLaunchArgument(

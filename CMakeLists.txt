@@ -85,6 +85,7 @@ install(CODE "
   # Planner nodes
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/planner/base_placement_node.py \${LIB_DIR}/base_placement_node)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/planner/planner_node.py \${LIB_DIR}/planner_node)
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/planner/moveit_planner_node.py \${LIB_DIR}/moveit_planner_node)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/planner/visualize_wall_discretization_client.py \${LIB_DIR}/visualize_wall_discretization_client)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/planner/wall_discretization_node.py \${LIB_DIR}/wall_discretization_node)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/planner/optimal_base_service.py \${LIB_DIR}/optimal_base_service)
@@ -124,6 +125,14 @@ install(DIRECTORY urdf/
 install(DIRECTORY rviz/
   DESTINATION share/${PROJECT_NAME}/rviz
   FILES_MATCHING PATTERN "*.rviz"
+)
+
+# Install SRDF files
+install(DIRECTORY srdf/
+  DESTINATION share/${PROJECT_NAME}/srdf
+  FILES_MATCHING
+  PATTERN "*.srdf"
+  PATTERN "*.xacro"
 )
 
 # Install resource files
