@@ -22,6 +22,8 @@ from planner.planner_lib.closed_form_algorithm import closed_form_algorithm
 class PositionSenderNode(Node):
     def __init__(self):
         super().__init__('position_sender_node')
+        self.declare_parameter('planner_backend', 'legacy')
+        self.planner_backend = str(self.get_parameter('planner_backend').value).strip().lower()
         
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -30,8 +32,9 @@ class PositionSenderNode(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL
         )
         
-        # Publisher for goal pose
-        self.publisher_ = self.create_publisher(PoseStamped, '/arm/goal_pose', 10)
+        # Publishers for planner goals
+        self.pose_goal_pub = self.create_publisher(PoseStamped, '/arm/goal_pose', 10)
+        self.joint_goal_pub = self.create_publisher(JointState, '/arm/joint_goal', 10)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
         self.marker_pub = self.create_publisher(Marker, 'goal_pose_marker', 10)
         
@@ -59,7 +62,7 @@ class PositionSenderNode(Node):
                 'pose': (0.56100, -0.17302, 0.85076, 0.406, 0.577, 0.408, 0.580)
             },
             'folded': {
-                'joints': (3.1313, -1.6422, -2.4464, -2.7985, -0.6618, 0.2421),
+                'joints': (3.290, -2.007, -2.513, -0.647, -0.468, -1.048),
                 'pose': (-0.44101, 0.38792, 0.13674, -0.327, 0.753, 0.564, -0.087)
             },
             'unfolded': {
@@ -125,7 +128,7 @@ class PositionSenderNode(Node):
                 'pose': (0.17536, 0.43514, 0.28396, -0.16963, 0.98548, 0.00540, 0.00323)
             },
             'under': {
-                'joints': (),
+                'joints': (1.747, -3.119, -1.139, -0.444, 1.564, 2.976),
                 'pose': (0.00068, 1.00176, -0.58394, -0.16963, 0.98548, 0.00540, 0.00323)
             },
             'under1': {
@@ -173,6 +176,7 @@ class PositionSenderNode(Node):
         self.get_logger().info("Position Sender Node initialized as a service.")
         self.get_logger().info(f"Available positions: {list(self.positions.keys())}")
         self.get_logger().info("Service available at: /send_position")
+        self.get_logger().info(f"Planner backend mode: {self.planner_backend}")
         self.get_logger().info("\033[1;32mUse: ros2 service call /send_position arm_control/srv/SendPosition \"{position_name: '<name>'}\"\033[0m")
         
     def joint_state_callback(self, msg):
@@ -235,7 +239,11 @@ class PositionSenderNode(Node):
             return False, msg
         
         position_data = self.positions[position_name]
+        joint_data = position_data.get('joints')
         pose_data = position_data.get('pose')
+
+        if self.planner_backend == 'moveit' and joint_data:
+            return self.send_joint_goal(position_name, joint_data)
         
         if pose_data is None:
             msg = f"No pose data defined for position '{position_name}'"
@@ -247,7 +255,7 @@ class PositionSenderNode(Node):
             self.get_logger().error(msg)
             return False, msg
 
-        if self.publisher_.get_subscription_count() == 0:
+        if self.pose_goal_pub.get_subscription_count() == 0:
             msg = "No planner subscriber detected on /arm/goal_pose. Goal not sent."
             self.get_logger().warn(msg)
             return False, msg
@@ -268,7 +276,7 @@ class PositionSenderNode(Node):
         msg.pose.orientation.z = pose_data[5]
         msg.pose.orientation.w = pose_data[6]
         
-        self.publisher_.publish(msg)        
+        self.pose_goal_pub.publish(msg)
         
         self.goal_sent = True
         self.movement_done = False
@@ -279,6 +287,36 @@ class PositionSenderNode(Node):
         self.get_logger().info(f"   Orientation: x={pose_data[3]:.3f}, y={pose_data[4]:.3f}, z={pose_data[5]:.3f}, w={pose_data[6]:.3f}")
         
         success_msg = f"Position '{position_name}' sent to planner successfully"
+        return True, success_msg
+
+    def send_joint_goal(self, position_name, joint_data):
+        """Send a joint-space goal to the MoveIt planner."""
+        if len(joint_data) != 6:
+            msg = f"Invalid joint data for '{position_name}': expected 6 joint values"
+            self.get_logger().error(msg)
+            return False, msg
+
+        if self.joint_goal_pub.get_subscription_count() == 0:
+            msg = "No MoveIt subscriber detected on /arm/joint_goal. Joint goal not sent."
+            self.get_logger().warn(msg)
+            return False, msg
+
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = list(self.expected_joint_names)
+        msg.position = [float(value) for value in joint_data]
+
+        self.joint_goal_pub.publish(msg)
+
+        self.goal_sent = True
+        self.movement_done = False
+        self.current_position_name = position_name
+
+        joint_values_text = ", ".join(f"{value:.3f}" for value in msg.position)
+        self.get_logger().info(f"→ Sending joint goal '{position_name}' to MoveIt...")
+        self.get_logger().info(f"   Joints: [{joint_values_text}]")
+
+        success_msg = f"Joint goal '{position_name}' sent to MoveIt successfully"
         return True, success_msg
     
     def check_status(self):

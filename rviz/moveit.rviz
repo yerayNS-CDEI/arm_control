@@ -5,9 +5,11 @@ Panels:
     Property Tree Widget:
       Expanded:
         - /Global Options1
+        - /MotionPlanning1
+        - /MotionPlanning1/Planning Request1
         - /RobotModel1
       Splitter Ratio: 0.5
-    Tree Height: 283
+    Tree Height: 272
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -102,6 +104,26 @@ Visualization Manager:
             Alpha: 1
             Show Axes: false
             Show Trail: false
+          arm_plate_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          arm_sensor_A_sensor_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          arm_sensor_B_sensor_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          arm_sensor_C_sensor_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
           arm_shoulder_link:
             Alpha: 1
             Show Axes: false
@@ -160,7 +182,7 @@ Visualization Manager:
         Joint Violation Color: 255; 0; 255
         Planning Group: arm_manipulator
         Query Goal State: true
-        Query Start State: false
+        Query Start State: true
         Show Workspace: false
         Start State Alpha: 0.3499999940395355
         Start State Color: 0; 255; 0
@@ -212,6 +234,26 @@ Visualization Manager:
             Alpha: 1
             Show Axes: false
             Show Trail: false
+          arm_plate_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          arm_sensor_A_sensor_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          arm_sensor_B_sensor_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          arm_sensor_C_sensor_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
           arm_shoulder_link:
             Alpha: 1
             Show Axes: false
@@ -295,7 +337,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 3.9257960319519043
+      Distance: 3.454700469970703
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -310,10 +352,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.16039852797985077
+      Pitch: 0.2653985619544983
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 2.845396041870117
+      Yaw: 2.3653948307037354
     Saved: ~
 Window Geometry:
   Displays:
@@ -325,7 +367,7 @@ Window Geometry:
     collapsed: false
   MotionPlanning - Trajectory Slider:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000002b4000002dbfc0200000006fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000004100fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e0067010000003d0000017d0000017d00fffffffb000000100044006900730070006c00610079007301000001c000000158000000c900fffffffb0000001200530065006c0065006300740069006f006e000000028f0000005c0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007300000002d3000000670000005c00fffffffb0000000a005600690065007700730000000328000000cf000000a400ffffff000003d6000002db00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000002b4000002dbfc0200000006fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000004100fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e0067010000003d000001880000017d00fffffffb000000100044006900730070006c00610079007301000001cb0000014d000000c900fffffffb0000001200530065006c0065006300740069006f006e000000028f0000005c0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007300000002d3000000670000005c00fffffffb0000000a005600690065007700730000000328000000cf000000a400ffffff000003d6000002db00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Tool Properties:

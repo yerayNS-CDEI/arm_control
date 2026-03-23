@@ -167,6 +167,7 @@ def generate_launch_description():
                 executable='position_sender_node',
                 name='position_sender_node',
                 output='screen',
+                parameters=[{'planner_backend': planner_backend}],
             ),
         ]
     )

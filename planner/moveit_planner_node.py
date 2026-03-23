@@ -14,11 +14,13 @@ from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import (
     CollisionObject,
     Constraints,
+    JointConstraint,
     OrientationConstraint,
     PlanningScene,
     PositionConstraint,
 )
 from moveit_msgs.srv import ApplyPlanningScene
+from sensor_msgs.msg import JointState
 from shape_msgs.msg import Mesh, MeshTriangle, SolidPrimitive
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
@@ -114,6 +116,7 @@ class MoveItPlannerNode(Node):
         self._planning_scene_client = self.create_client(ApplyPlanningScene, 'apply_planning_scene')
 
         self.create_subscription(PoseStamped, '/arm/goal_pose', self.goal_callback, 10)
+        self.create_subscription(JointState, '/arm/joint_goal', self.joint_goal_callback, 10)
         self.create_subscription(Bool, 'emergency_stop', self.emergency_callback, qos)
         self.create_subscription(Bool, '/arm/emergency_stop', self.emergency_callback, qos)
         if self.enable_planning_scene_obstacles and self.enable_wall_scene_sync:
@@ -141,12 +144,30 @@ class MoveItPlannerNode(Node):
         )
 
     def goal_callback(self, msg: PoseStamped):
-        self.goal_queue.append(msg)
+        self.goal_queue.append(('pose', msg))
         frame_id = msg.header.frame_id or self.planning_frame
         self.get_logger().info(
             f"Queued MoveIt goal in frame '{frame_id}' at "
             f"({msg.pose.position.x:.3f}, {msg.pose.position.y:.3f}, {msg.pose.position.z:.3f})."
         )
+
+    def joint_goal_callback(self, msg: JointState):
+        if len(msg.name) != len(msg.position):
+            self.get_logger().error(
+                'Ignoring joint goal: joint name and position arrays have different lengths.'
+            )
+            return
+
+        if not msg.name:
+            self.get_logger().error('Ignoring joint goal: no joint names were provided.')
+            return
+
+        self.goal_queue.append(('joint', msg))
+        joint_summary = ', '.join(
+            f"{joint_name}={position:.3f}"
+            for joint_name, position in zip(msg.name, msg.position)
+        )
+        self.get_logger().info(f"Queued MoveIt joint goal: {joint_summary}.")
 
     def emergency_callback(self, msg: Bool):
         self.emergency_stop = bool(msg.data)
@@ -178,7 +199,11 @@ class MoveItPlannerNode(Node):
             if not self._action_client.server_is_ready():
                 self.get_logger().warn('Waiting for MoveIt move_action server...')
                 return
-            self.send_move_group_goal(self.goal_queue.popleft())
+            goal_type, goal_msg = self.goal_queue.popleft()
+            if goal_type == 'joint':
+                self.send_move_group_joint_goal(goal_msg)
+            else:
+                self.send_move_group_goal(goal_msg)
 
     def send_move_group_goal(self, goal_pose: PoseStamped):
         self.execution_complete = False
@@ -212,6 +237,28 @@ class MoveItPlannerNode(Node):
         future = self._action_client.send_goal_async(goal_msg)
         future.add_done_callback(self.goal_response_callback)
 
+    def send_move_group_joint_goal(self, joint_goal: JointState):
+        self.execution_complete = False
+
+        goal_msg = MoveGroup.Goal()
+        goal_msg.request.group_name = self.group_name
+        goal_msg.request.num_planning_attempts = self.planning_attempts
+        goal_msg.request.allowed_planning_time = self.planning_time
+        goal_msg.request.max_velocity_scaling_factor = self.max_velocity_scaling
+        goal_msg.request.max_acceleration_scaling_factor = self.max_acceleration_scaling
+        goal_msg.request.goal_constraints = [self.build_joint_goal_constraints(joint_goal)]
+
+        goal_msg.planning_options.plan_only = False
+        goal_msg.planning_options.look_around = False
+        goal_msg.planning_options.replan = True
+        goal_msg.planning_options.replan_attempts = 3
+        goal_msg.planning_options.replan_delay = 0.2
+
+        self.goal_failed_pub.publish(Bool(data=False))
+        self.get_logger().info('Sending MoveIt joint-space planning+execution goal...')
+        future = self._action_client.send_goal_async(goal_msg)
+        future.add_done_callback(self.goal_response_callback)
+
     def build_goal_constraints(self, pose: Pose, frame_id: str) -> Constraints:
         constraints = Constraints()
 
@@ -241,6 +288,21 @@ class MoveItPlannerNode(Node):
 
         constraints.position_constraints = [position_constraint]
         constraints.orientation_constraints = [orientation_constraint]
+        return constraints
+
+    def build_joint_goal_constraints(self, joint_goal: JointState) -> Constraints:
+        constraints = Constraints()
+        constraints.joint_constraints = []
+
+        for joint_name, position in zip(joint_goal.name, joint_goal.position):
+            joint_constraint = JointConstraint()
+            joint_constraint.joint_name = joint_name
+            joint_constraint.position = float(position)
+            joint_constraint.tolerance_above = 0.001
+            joint_constraint.tolerance_below = 0.001
+            joint_constraint.weight = 1.0
+            constraints.joint_constraints.append(joint_constraint)
+
         return constraints
 
     def goal_response_callback(self, future):
