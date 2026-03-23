@@ -109,9 +109,11 @@ def launch_setup(context, *args, **kwargs):
         )
     }
 
-    robot_description_kinematics = PathJoinSubstitution(
-        [FindPackageShare("arm_control"), "config", "moveit", "kinematics.yaml"]
-    )
+    kinematics_yaml = load_yaml("arm_control", os.path.join("config", "moveit", "kinematics.yaml"))
+    robot_description_kinematics = {
+        "robot_description_kinematics": kinematics_yaml
+    }
+    rviz_kinematics = kinematics_yaml
     robot_description_planning = {
         "robot_description_planning": load_yaml(
             "arm_control", os.path.join("config", "moveit", "joint_limits.yaml")
@@ -208,6 +210,7 @@ def launch_setup(context, *args, **kwargs):
             robot_description,
             robot_description_semantic,
             {"publish_robot_description_semantic": publish_robot_description_semantic},
+            rviz_kinematics,
             ompl_planning_pipeline_config,
             {"default_planning_pipeline": "move_group"},
             {"move_group.planning_plugin": "ompl_interface/OMPLPlanner"},
