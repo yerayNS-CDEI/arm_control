@@ -179,6 +179,7 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(moveit_launch),
         launch_arguments={
             'ur_type': ur_type,
+            'mode': mode,
             'tf_prefix': tf_prefix,
             'use_fake_hardware': use_fake_hardware,
             'use_sim_time': simulation,
@@ -197,6 +198,7 @@ def generate_launch_description():
                 'group_name': 'arm_manipulator',
                 'end_effector_link': 'arm_tool0',
                 'planning_frame': 'arm_base',
+                'mode': mode,
                 'enable_wall_scene_sync': ParameterValue(enable_wall_scene_sync, value_type=bool),
             }
         ],
