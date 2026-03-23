@@ -111,6 +111,9 @@ def generate_launch_description():
         ["'false' if '", planner_backend, "' == 'moveit' else '", launch_rviz, "'"]
     )
 
+    joint_controller_type = PythonExpression(
+        ["'scaled_joint_trajectory_controller' if '", planner_backend, "' == 'moveit' else 'joint_trajectory_controller'"]
+    )
     inverted_sim = NotSubstitution(simulation)
 
     arm_group = GroupAction(
@@ -127,7 +130,7 @@ def generate_launch_description():
                     'mode': mode,
                     'sim': inverted_sim,
                     'stack_launch_rviz': stack_launch_rviz,
-                    'initial_joint_controller': 'scaled_joint_trajectory_controller',
+                    'initial_joint_controller': joint_controller_type,
                     'activate_joint_controller': 'true',
                 }.items(),
                 condition=IfCondition(hybrid_sim),
