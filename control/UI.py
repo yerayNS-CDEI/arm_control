@@ -81,6 +81,10 @@ class RobotControlUI(QMainWindow):
         self.cleared_status_backup = None
         self.base_cleared_status_backup = None
         
+        # Store process list for kill functionality
+        self.current_process_list = []
+        self.ps_output_accumulator = ""
+        
         # Emergency stop UI state
         self.emergency_stop_active = False
  
@@ -803,6 +807,12 @@ class RobotControlUI(QMainWindow):
         full_control_position_layout.addWidget(btn_full_control_send_position)
         full_control_mapping_layout.addLayout(full_control_position_layout)
 
+        # Reset Planner button
+        btn_reset_planner = QPushButton("Reset Planner")
+        btn_reset_planner.clicked.connect(self.reset_planner)
+        btn_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
+        full_control_mapping_layout.addWidget(btn_reset_planner)
+
         full_control_mapping_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_mapping_box)
 
@@ -914,6 +924,26 @@ class RobotControlUI(QMainWindow):
         self.topic_info_display.setPlaceholderText("Topic bandwidth and frequency info will appear here...")
         self.topic_info_display.setStyleSheet("background-color: #f6f8fa; color: #1f2328; border: 1px solid #d0d7de; font-family: 'Courier New', monospace; padding: 4px;")
         full_control_troubleshooting_layout.addWidget(self.topic_info_display)
+
+        # Process Kill Section
+        full_control_troubleshooting_layout.addWidget(QLabel("\nProcess Management:"))
+        
+        # Process selector with kill button
+        process_selector_layout = QHBoxLayout()
+        self.process_combo = QComboBox()
+        self.process_combo.setEditable(False)
+        self.process_combo.setMinimumWidth(150)
+        self.process_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.process_combo.setPlaceholderText("Select process to kill...")
+        process_selector_layout.addWidget(self.process_combo, 1)  # Stretch factor of 1
+        
+        btn_kill_process = QPushButton("Kill Process")
+        btn_kill_process.clicked.connect(self.kill_selected_process)
+        btn_kill_process.setToolTip("Kill the selected process using kill -9")
+        btn_kill_process.setMaximumWidth(120)
+        btn_kill_process.setStyleSheet("background-color: #d73a49; color: white; font-weight: bold;")
+        process_selector_layout.addWidget(btn_kill_process, 0)  # No stretch
+        full_control_troubleshooting_layout.addLayout(process_selector_layout)
 
         full_control_troubleshooting_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_troubleshooting_box)
@@ -2279,7 +2309,12 @@ class RobotControlUI(QMainWindow):
         """Run ps aux | grep ros2 command (Full Control tab)"""
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
-        process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
+        
+        # Clear accumulator for new ps command
+        self.ps_output_accumulator = ""
+        
+        # Connect to special handler that accumulates output
+        process.readyReadStandardOutput.connect(lambda: self._handle_ps_output(process))
  
         # Display command in bold green
         cmd_str = 'ps aux | grep -E \'ros2|robot\' | grep -v grep'
@@ -2287,12 +2322,34 @@ class RobotControlUI(QMainWindow):
  
         # Run the command using shell to support pipe
         process_key = 'full_ps_ros2'
-        process.finished.connect(lambda: self._cleanup_full_ps_ros(process_key))
+        process.finished.connect(lambda: self._cleanup_full_ps_ros(process_key, process))
         process.start('bash', ['-c', 'ps aux | grep -E \'ros2|robot\' | grep -v grep'])
         self.process_map[process_key] = process
  
-    def _cleanup_full_ps_ros(self, process_key):
-        """Clean up finished ps aux process (Full Control tab)"""
+    def _handle_ps_output(self, process):
+        """Handle output from ps command, accumulating it and displaying it"""
+        output = process.readAllStandardOutput().data().decode()
+        if output:
+            # Accumulate for later parsing
+            self.ps_output_accumulator += output
+            
+            # Also display it
+            lines = output.split('\n')
+            for line in lines:
+                if line.strip():
+                    html_line = self._ansi_to_html(line)
+                    self._append_to_text_widget(self.full_control_status_text, html_line)
+    
+    def _cleanup_full_ps_ros(self, process_key, process):
+        """Clean up finished ps aux process and populate process combobox (Full Control tab)"""
+        # Read any remaining output
+        remaining_output = process.readAllStandardOutput().data().decode()
+        if remaining_output:
+            self.ps_output_accumulator += remaining_output
+        
+        # Parse the accumulated process list and populate combobox
+        self.populate_process_combo(self.ps_output_accumulator)
+        
         if process_key in self.process_map:
             del self.process_map[process_key]
     
@@ -2730,6 +2787,55 @@ class RobotControlUI(QMainWindow):
             ui_context='full',
         )
 
+    def reset_planner(self):
+        """Reset the planner by publishing to /planner/reset topic"""
+        process_key = 'reset_planner'
+        
+        # Clean up existing process if any
+        if process_key in self.process_map:
+            existing_process = self.process_map[process_key]
+            if existing_process.state() == QProcess.Running:
+                existing_process.kill()
+                existing_process.waitForFinished(1000)
+            del self.process_map[process_key]
+        
+        # Create and start the process
+        process = QProcess()
+        command = 'ros2'
+        args = ['topic', 'pub', '--once', '/planner/reset', 'std_msgs/msg/Bool', '{data: true}']
+        
+        # Connect output to full control status text
+        process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
+        process.readyReadStandardError.connect(lambda: self.handle_full_control_output(process))
+        process.finished.connect(lambda: self._cleanup_reset_planner(process_key))
+        
+        # Start the process
+        process.start(command, args)
+        self.process_map[process_key] = process
+        
+        # Log to status
+        self._append_to_text_widget(
+            self.full_control_status_text,
+            f"<span style='color: #58a6ff;'>[Reset Planner]</span> Publishing reset to /planner/reset..."
+        )
+    
+    def _cleanup_reset_planner(self, process_key):
+        """Clean up reset planner process"""
+        if process_key in self.process_map:
+            process = self.process_map[process_key]
+            exit_code = process.exitCode()
+            if exit_code == 0:
+                self._append_to_text_widget(
+                    self.full_control_status_text,
+                    f"<span style='color: #3fb950;'>[Reset Planner]</span> Successfully reset planner."
+                )
+            else:
+                self._append_to_text_widget(
+                    self.full_control_status_text,
+                    f"<span style='color: #f85149;'>[Reset Planner]</span> Command failed with exit code {exit_code}."
+                )
+            del self.process_map[process_key]
+
     def _is_hybrid_sim_enabled(self, context='full'):
         """Return True when the requested tab is using hybrid / URSim mode."""
         if context == 'arm':
@@ -2997,6 +3103,95 @@ class RobotControlUI(QMainWindow):
                 subprocess.run(['pkill', '-9', '-f', pattern], timeout=2, stderr=subprocess.DEVNULL)
             except:
                 pass
+    
+    def populate_process_combo(self, ps_output):
+        """Parse ps output and populate the process combobox"""
+        self.current_process_list = []
+        self.process_combo.clear()
+        
+        if not ps_output:
+            self.process_combo.addItem("No processes found")
+            return
+        
+        lines = ps_output.strip().split('\n')
+        item_index = 0
+        for line in lines:
+            if not line.strip():
+                continue
+            
+            # Parse ps aux output: USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND
+            parts = line.split(None, 10)  # Split into max 11 parts
+            if len(parts) >= 11:
+                pid = parts[1]
+                command = parts[10]
+                
+                # Store process info and add to combobox
+                process_info = {'pid': pid, 'command': command, 'full_line': line}
+                self.current_process_list.append(process_info)
+                
+                # Display only PID in the combobox
+                display_text = f"PID: {pid}"
+                self.process_combo.addItem(display_text)
+                
+                # Set tooltip to show full command
+                tooltip = f"PID: {pid}\nCommand: {command}"
+                self.process_combo.setItemData(item_index, tooltip, Qt.ToolTipRole)
+                item_index += 1
+        
+        if not self.current_process_list:
+            self.process_combo.addItem("No processes found")
+        else:
+            self._append_to_text_widget(self.full_control_status_text, 
+                                       f"<span style='color: #57ab5a;'>Found {len(self.current_process_list)} ROS2 processes</span>")
+    
+    def kill_selected_process(self):
+        """Kill the process selected in the combobox"""
+        current_index = self.process_combo.currentIndex()
+        
+        if current_index < 0 or current_index >= len(self.current_process_list):
+            self._append_to_text_widget(self.full_control_status_text, 
+                                       "<span style='color: #d73a49;'>No process selected or invalid selection</span>")
+            return
+        
+        process_info = self.current_process_list[current_index]
+        pid = process_info['pid']
+        command = process_info['command']
+        
+        # Confirm and kill
+        from PyQt5.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, 
+            'Confirm Kill Process',
+            f"Are you sure you want to kill process {pid}?\n\nCommand: {command[:100]}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Execute kill command
+            kill_process = QProcess(self)
+            kill_process.setProcessChannelMode(QProcess.MergedChannels)
+            
+            cmd_str = f'kill -9 {pid}'
+            self._append_to_text_widget(self.full_control_status_text, 
+                                       f"<b style='color: #d73a49;'>▶ {cmd_str}</b>")
+            
+            kill_process.finished.connect(lambda: self._on_kill_process_finished(pid, kill_process))
+            kill_process.start('kill', ['-9', pid])
+    
+    def _on_kill_process_finished(self, pid, process):
+        """Handle kill process completion"""
+        exit_code = process.exitCode()
+        
+        if exit_code == 0:
+            self._append_to_text_widget(self.full_control_status_text, 
+                                       f"<span style='color: #57ab5a;'>✓ Successfully killed process {pid}</span>")
+            # Refresh the process list after killing
+            QTimer.singleShot(500, self.run_full_control_ps_ros)
+        else:
+            error_output = process.readAllStandardOutput().data().decode()
+            self._append_to_text_widget(self.full_control_status_text, 
+                                       f"<span style='color: #d73a49;'>✗ Failed to kill process {pid}: {error_output}</span>")
  
 if __name__ == '__main__':
     app = QApplication(sys.argv)
