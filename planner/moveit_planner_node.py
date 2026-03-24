@@ -38,6 +38,7 @@ class MoveItPlannerNode(Node):
         self.declare_parameter('group_name', 'arm_manipulator')
         self.declare_parameter('end_effector_link', 'arm_tool0')
         self.declare_parameter('planning_frame', 'arm_base')
+        self.declare_parameter('mode', 'arm')
         self.declare_parameter('planning_time', 5.0)
         self.declare_parameter('planning_attempts', 5)
         self.declare_parameter('position_tolerance', 0.002)
@@ -64,6 +65,7 @@ class MoveItPlannerNode(Node):
         self.group_name = self.get_parameter('group_name').value
         self.end_effector_link = self.get_parameter('end_effector_link').value
         self.planning_frame = self.get_parameter('planning_frame').value
+        self.mode = str(self.get_parameter('mode').value).strip().lower()
         self.planning_time = float(self.get_parameter('planning_time').value)
         self.planning_attempts = int(self.get_parameter('planning_attempts').value)
         self.position_tolerance = float(self.get_parameter('position_tolerance').value)
@@ -93,6 +95,15 @@ class MoveItPlannerNode(Node):
         self.base_footprint_z_limits = list(
             self.get_parameter('base_footprint_z_limits').value
         )
+
+        if self.mode == 'full' and self.enable_base_collision:
+            self.get_logger().info(
+                'Full mode detected; disabling legacy synthetic mobile-base collision objects '
+                'because the full robot URDF already contains the mounted base geometry.'
+            )
+            self.enable_base_collision = False
+            self.enable_base_column_collision = False
+            self.enable_base_footprint_collision = False
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -412,9 +423,13 @@ class MoveItPlannerNode(Node):
             return
 
         self._scene_dirty = False
+        if self.enable_base_collision:
+            obstacle_summary = 'and legacy mobile-base obstacles'
+        else:
+            obstacle_summary = 'and no synthetic mobile-base obstacles'
         self.get_logger().info(
             f'PlanningScene updated with {len(self._wall_panels)} wall panel(s) '
-            'and legacy mobile-base obstacles.'
+            f'{obstacle_summary}.'
         )
 
     def build_planning_scene_diff(self) -> PlanningScene:

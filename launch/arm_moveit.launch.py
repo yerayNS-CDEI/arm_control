@@ -12,6 +12,7 @@ from ur_moveit_config.launch_common import load_yaml
 
 def launch_setup(context, *args, **kwargs):
     ur_type = LaunchConfiguration("ur_type")
+    mode = LaunchConfiguration("mode")
     tf_prefix = LaunchConfiguration("tf_prefix")
     use_fake_hardware = LaunchConfiguration("use_fake_hardware")
     use_sim_time = LaunchConfiguration("use_sim_time")
@@ -22,11 +23,33 @@ def launch_setup(context, *args, **kwargs):
     kinematics_params_file = LaunchConfiguration("kinematics_params_file")
     warehouse_sqlite_path = LaunchConfiguration("warehouse_sqlite_path")
 
+    mode_value = context.perform_substitution(mode).strip().lower()
+
     xacro_executable = PathJoinSubstitution([FindExecutable(name="xacro")])
-    urdf_file = PathJoinSubstitution([FindPackageShare("arm_control"), "urdf", "ur.urdf.xacro"])
-    srdf_file = PathJoinSubstitution(
-        [FindPackageShare("arm_control"), "srdf", "arm_control.srdf.xacro"]
-    )
+    if mode_value == "full":
+        urdf_file = PathJoinSubstitution(
+            [
+                FindPackageShare("navi_wall"),
+                "navi_wall_description/description",
+                "mobile_manipulator.urdf.xacro",
+            ]
+        )
+        srdf_file = PathJoinSubstitution(
+            [FindPackageShare("arm_control"), "srdf", "mobile_manipulator.srdf.xacro"]
+        )
+        robot_name = "mobile_manipulator"
+    elif mode_value == "arm":
+        urdf_file = PathJoinSubstitution(
+            [FindPackageShare("arm_control"), "urdf", "ur.urdf.xacro"]
+        )
+        srdf_file = PathJoinSubstitution(
+            [FindPackageShare("arm_control"), "srdf", "arm_control.srdf.xacro"]
+        )
+        robot_name = "ur"
+    else:
+        raise RuntimeError(
+            f"Mode not recognized: '{mode_value}'. Please select 'full' or 'arm'."
+        )
     rviz_file = PathJoinSubstitution([FindPackageShare("arm_control"), "rviz", "moveit.rviz"])
 
     joint_limit_params = PathJoinSubstitution(
@@ -39,53 +62,55 @@ def launch_setup(context, *args, **kwargs):
         [FindPackageShare("ur_description"), "config", ur_type, "visual_parameters.yaml"]
     )
 
-    robot_description_content = Command(
-        [
-            xacro_executable,
-            " ",
-            urdf_file,
-            " ",
-            "robot_ip:=0.0.0.0",
-            " ",
-            "joint_limit_params:=",
-            joint_limit_params,
-            " ",
-            "kinematics_params:=",
-            kinematics_params_file,
-            " ",
-            "physical_params:=",
-            physical_params,
-            " ",
-            "visual_params:=",
-            visual_params,
-            " ",
-            "safety_limits:=true",
-            " ",
-            "safety_pos_margin:=0.15",
-            " ",
-            "safety_k_position:=20",
-            " ",
-            "name:=ur",
-            " ",
-            "ur_type:=",
-            ur_type,
-            " ",
-            "tf_prefix:=",
-            tf_prefix,
-            " ",
-            "use_fake_hardware:=",
-            use_fake_hardware,
-            " ",
-            "fake_sensor_commands:=false",
-            " ",
-            "headless_mode:=true",
-            " ",
-            "sim_gazebo:=false",
-            " ",
-            "sim_ignition:=false",
-            " ",
-        ]
-    )
+    robot_description_command = [
+        xacro_executable,
+        " ",
+        urdf_file,
+        " ",
+        "robot_ip:=0.0.0.0",
+        " ",
+        "joint_limit_params:=",
+        joint_limit_params,
+        " ",
+        "kinematics_params:=",
+        kinematics_params_file,
+        " ",
+        "physical_params:=",
+        physical_params,
+        " ",
+        "visual_params:=",
+        visual_params,
+        " ",
+        "safety_limits:=true",
+        " ",
+        "safety_pos_margin:=0.15",
+        " ",
+        "safety_k_position:=20",
+        " ",
+        "ur_type:=",
+        ur_type,
+        " ",
+        "tf_prefix:=",
+        tf_prefix,
+        " ",
+        "use_fake_hardware:=",
+        use_fake_hardware,
+        " ",
+        "fake_sensor_commands:=false",
+        " ",
+        "headless_mode:=true",
+        " ",
+        "sim_gazebo:=false",
+        " ",
+        "sim_ignition:=false",
+        " ",
+    ]
+    if mode_value == "arm":
+        robot_description_command.extend(["name:=ur", " "])
+    else:
+        robot_description_command.extend(["simulation:=false", " "])
+
+    robot_description_content = Command(robot_description_command)
     robot_description = {
         "robot_description": ParameterValue(robot_description_content, value_type=str)
     }
@@ -96,7 +121,8 @@ def launch_setup(context, *args, **kwargs):
             " ",
             srdf_file,
             " ",
-            "name:=ur",
+            "name:=",
+            robot_name,
             " ",
             "tf_prefix:=",
             tf_prefix,
@@ -109,9 +135,11 @@ def launch_setup(context, *args, **kwargs):
         )
     }
 
-    robot_description_kinematics = PathJoinSubstitution(
-        [FindPackageShare("arm_control"), "config", "moveit", "kinematics.yaml"]
-    )
+    kinematics_yaml = load_yaml("arm_control", os.path.join("config", "moveit", "kinematics.yaml"))
+    robot_description_kinematics = {
+        "robot_description_kinematics": kinematics_yaml
+    }
+    rviz_kinematics = kinematics_yaml
     robot_description_planning = {
         "robot_description_planning": load_yaml(
             "arm_control", os.path.join("config", "moveit", "joint_limits.yaml")
@@ -136,12 +164,6 @@ def launch_setup(context, *args, **kwargs):
     )
 
     controllers_yaml = load_yaml("arm_control", os.path.join("config", "moveit", "controllers.yaml"))
-    if (
-        context.perform_substitution(use_fake_hardware).lower() == "true"
-        or context.perform_substitution(use_sim_time).lower() == "true"
-    ):
-        controllers_yaml["scaled_joint_trajectory_controller"]["default"] = False
-        controllers_yaml["joint_trajectory_controller"]["default"] = True
 
     controller_namespace = "/arm"
     namespaced_controllers_yaml = {"controller_names": []}
@@ -208,6 +230,7 @@ def launch_setup(context, *args, **kwargs):
             robot_description,
             robot_description_semantic,
             {"publish_robot_description_semantic": publish_robot_description_semantic},
+            rviz_kinematics,
             ompl_planning_pipeline_config,
             {"default_planning_pipeline": "move_group"},
             {"move_group.planning_plugin": "ompl_interface/OMPLPlanner"},
@@ -223,6 +246,12 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument("ur_type", default_value="ur10e"),
+            DeclareLaunchArgument(
+                "mode",
+                default_value="arm",
+                description="Launch mode full|arm",
+                choices=["full", "arm"],
+            ),
             DeclareLaunchArgument("tf_prefix", default_value="arm_"),
             DeclareLaunchArgument("use_fake_hardware", default_value="false"),
             DeclareLaunchArgument("use_sim_time", default_value="false"),
