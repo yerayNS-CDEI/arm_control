@@ -182,7 +182,7 @@ def generate_launch_description():
             'mode': mode,
             'tf_prefix': tf_prefix,
             'use_fake_hardware': use_fake_hardware,
-            'use_sim_time': simulation,
+            'use_sim_time': PythonExpression(["'false' if '", simulation, "' == 'false' or '", hybrid_sim, "' == 'true' else 'true'"]),
             'launch_rviz': launch_rviz,
         }.items(),
         condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'moveit'"])),
