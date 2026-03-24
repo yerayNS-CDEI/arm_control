@@ -133,6 +133,11 @@ class RobotControlUI(QMainWindow):
         self.arm_sim_mode_combo.addItems(['false', 'true'])
         self.arm_sim_mode_combo.currentTextChanged.connect(self._update_init_box_state)
         arm_sim_param_layout.addWidget(self.arm_sim_mode_combo)
+        arm_sim_param_layout.addWidget(QLabel("URsim:"))
+        self.arm_hybrid_sim_combo = QComboBox()
+        self.arm_hybrid_sim_combo.addItems(['false', 'true'])
+        self.arm_hybrid_sim_combo.setCurrentText('true')
+        arm_sim_param_layout.addWidget(self.arm_hybrid_sim_combo)
         arm_sim_param_layout.addStretch()
         arm_tab_layout.addLayout(arm_sim_param_layout)
         
@@ -149,7 +154,7 @@ class RobotControlUI(QMainWindow):
         control_layout.addWidget(QLabel("System Control:"))
         self.btn_general_launch = QPushButton("Start Arm")
         self.btn_general_launch.clicked.connect(self.toggle_arm_launch)
-        self.btn_general_launch.setToolTip("robot_ip=192.168.56.101 when hybrid_sim=true, else 192.168.1.102")
+        self.btn_general_launch.setToolTip("robot_ip=192.168.56.101 when URsim=true, else 192.168.1.102")
         control_layout.addWidget(self.btn_general_launch)
  
         # RQT Joint Controller button
@@ -172,7 +177,7 @@ class RobotControlUI(QMainWindow):
  
         btn_send_position = QPushButton("Send Position")
         btn_send_position.clicked.connect(self.send_position_command)
-        btn_send_position.setToolTip("Uses /arm/send_position when hybrid_sim=true, otherwise /send_position")
+        btn_send_position.setToolTip("Uses /send_position for the Arm Control launch")
         position_sender_layout.addWidget(btn_send_position)
         control_layout.addLayout(position_sender_layout)
  
@@ -1319,8 +1324,8 @@ class RobotControlUI(QMainWindow):
     
     def toggle_arm_launch(self):
         sim_mode = self.arm_sim_mode_combo.currentText()
-        hybrid_sim = 'true' if self._is_hybrid_sim_enabled() else 'false'
-        robot_ip = self._get_robot_ip_for_arm_launch()
+        hybrid_sim = 'true' if self._is_hybrid_sim_enabled(context='arm') else 'false'
+        robot_ip = self._get_robot_ip_for_launch(context='arm')
         self._toggle_process('arm_launch', self.btn_general_launch, 'Arm',
                             'ros2', ['launch', 'arm_control', 'arm.launch.py',
                                     f'robot_ip:={robot_ip}',
@@ -2166,7 +2171,8 @@ class RobotControlUI(QMainWindow):
         if status_text is None:
             status_text = self.status_text
 
-        desired_host = self._get_robot_ip_for_arm_launch()
+        context = 'full' if status_text is self.full_control_status_text else 'arm'
+        desired_host = self._get_robot_ip_for_launch(context=context)
         if self.robot_host != desired_host:
             if self.robot_socket:
                 try:
@@ -2711,6 +2717,7 @@ class RobotControlUI(QMainWindow):
             position_name=position_name,
             status_text=self.status_text,
             output_handler=self.handle_output,
+            ui_context='arm',
         )
 
     def send_full_control_position_command(self):
@@ -2720,10 +2727,16 @@ class RobotControlUI(QMainWindow):
             position_name=position_name,
             status_text=self.full_control_status_text,
             output_handler=self.handle_full_control_output,
+            ui_context='full',
         )
 
-    def _is_hybrid_sim_enabled(self):
-        """Return True when Full Control hybrid simulation mode is selected."""
+    def _is_hybrid_sim_enabled(self, context='full'):
+        """Return True when the requested tab is using hybrid / URSim mode."""
+        if context == 'arm':
+            if not hasattr(self, "arm_hybrid_sim_combo"):
+                return False
+            return self.arm_hybrid_sim_combo.currentText() == 'true'
+
         if not hasattr(self, "full_control_hybrid_sim_combo"):
             return False
         return self.full_control_hybrid_sim_combo.currentText() == 'true'
@@ -2740,22 +2753,28 @@ class RobotControlUI(QMainWindow):
             return '/arm/planned_trajectory'
         return '/planned_trajectory'
 
-    def _get_robot_ip_for_arm_launch(self):
-        """Pick robot_ip based on hybrid_sim selection."""
-        if self._is_hybrid_sim_enabled():
+    def _get_robot_ip_for_launch(self, context='arm'):
+        """Pick robot_ip based on the tab's hybrid/URSim selector."""
+        if self._is_hybrid_sim_enabled(context=context):
             return '192.168.56.101'
         return '192.168.1.102'
 
-    def _get_send_position_service_name(self):
-        """Pick service namespace based on hybrid_sim selection."""
-        if self._is_hybrid_sim_enabled():
+    def _get_robot_ip_for_arm_launch(self):
+        """Backward-compatible arm launch helper."""
+        return self._get_robot_ip_for_launch(context='arm')
+
+    def _get_send_position_service_name(self, context='arm'):
+        """Pick service namespace based on the active tab."""
+        if context == 'arm':
+            return '/send_position'
+        if self._is_hybrid_sim_enabled(context=context):
             return '/arm/send_position'
         return '/send_position'
 
-    def _send_position_service_call(self, position_name, status_text, output_handler):
+    def _send_position_service_call(self, position_name, status_text, output_handler, ui_context='arm'):
         """Execute ros2 service call for the selected send_position service and stream output."""
         payload = f"{{position_name: '{position_name}'}}"
-        service_name = self._get_send_position_service_name()
+        service_name = self._get_send_position_service_name(context=ui_context)
         ros2_args = [
             'service',
             'call',
