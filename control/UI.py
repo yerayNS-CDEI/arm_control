@@ -802,6 +802,12 @@ class RobotControlUI(QMainWindow):
         full_control_position_layout.addWidget(btn_full_control_send_position)
         full_control_mapping_layout.addLayout(full_control_position_layout)
 
+        # Reset Planner button
+        btn_reset_planner = QPushButton("Reset Planner")
+        btn_reset_planner.clicked.connect(self.reset_planner)
+        btn_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
+        full_control_mapping_layout.addWidget(btn_reset_planner)
+
         full_control_mapping_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_mapping_box)
 
@@ -2772,6 +2778,55 @@ class RobotControlUI(QMainWindow):
             status_text=self.full_control_status_text,
             output_handler=self.handle_full_control_output,
         )
+
+    def reset_planner(self):
+        """Reset the planner by publishing to /planner/reset topic"""
+        process_key = 'reset_planner'
+        
+        # Clean up existing process if any
+        if process_key in self.process_map:
+            existing_process = self.process_map[process_key]
+            if existing_process.state() == QProcess.Running:
+                existing_process.kill()
+                existing_process.waitForFinished(1000)
+            del self.process_map[process_key]
+        
+        # Create and start the process
+        process = QProcess()
+        command = 'ros2'
+        args = ['topic', 'pub', '--once', '/planner/reset', 'std_msgs/msg/Bool', '{data: true}']
+        
+        # Connect output to full control status text
+        process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
+        process.readyReadStandardError.connect(lambda: self.handle_full_control_output(process))
+        process.finished.connect(lambda: self._cleanup_reset_planner(process_key))
+        
+        # Start the process
+        process.start(command, args)
+        self.process_map[process_key] = process
+        
+        # Log to status
+        self._append_to_text_widget(
+            self.full_control_status_text,
+            f"<span style='color: #58a6ff;'>[Reset Planner]</span> Publishing reset to /planner/reset..."
+        )
+    
+    def _cleanup_reset_planner(self, process_key):
+        """Clean up reset planner process"""
+        if process_key in self.process_map:
+            process = self.process_map[process_key]
+            exit_code = process.exitCode()
+            if exit_code == 0:
+                self._append_to_text_widget(
+                    self.full_control_status_text,
+                    f"<span style='color: #3fb950;'>[Reset Planner]</span> Successfully reset planner."
+                )
+            else:
+                self._append_to_text_widget(
+                    self.full_control_status_text,
+                    f"<span style='color: #f85149;'>[Reset Planner]</span> Command failed with exit code {exit_code}."
+                )
+            del self.process_map[process_key]
 
     def _is_hybrid_sim_enabled(self):
         """Return True when Full Control hybrid simulation mode is selected."""
