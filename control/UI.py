@@ -136,8 +136,15 @@ class RobotControlUI(QMainWindow):
         self.arm_sim_mode_combo = QComboBox()
         self.arm_sim_mode_combo.addItems(['false', 'true'])
         self.arm_sim_mode_combo.currentTextChanged.connect(self._update_init_box_state)
+        self.arm_sim_mode_combo.currentTextChanged.connect(self._update_headless_visibility)
         arm_sim_param_layout.addWidget(self.arm_sim_mode_combo)
-        arm_sim_param_layout.addWidget(QLabel("URsim:"))
+        arm_sim_param_layout.addWidget(QLabel("Planner Backend:"))
+        self.arm_planner_backend_combo = QComboBox()
+        self.arm_planner_backend_combo.addItems(['moveit', 'legacy'])
+        self.arm_planner_backend_combo.setCurrentText('legacy')
+        arm_sim_param_layout.addWidget(self.arm_planner_backend_combo)
+        self.arm_hybrid_sim_label = QLabel("URsim:")
+        arm_sim_param_layout.addWidget(self.arm_hybrid_sim_label)
         self.arm_hybrid_sim_combo = QComboBox()
         self.arm_hybrid_sim_combo.addItems(['false', 'true'])
         self.arm_hybrid_sim_combo.setCurrentText('true')
@@ -675,6 +682,11 @@ class RobotControlUI(QMainWindow):
         self.full_control_hybrid_sim_combo.currentTextChanged.connect(self._on_full_control_hybrid_changed)
         full_control_sim_param_layout.addWidget(self.full_control_hybrid_sim_label)
         full_control_sim_param_layout.addWidget(self.full_control_hybrid_sim_combo)
+        full_control_sim_param_layout.addWidget(QLabel("Planner Backend:"))
+        self.full_control_planner_backend_combo = QComboBox()
+        self.full_control_planner_backend_combo.addItems(['moveit', 'legacy'])
+        self.full_control_planner_backend_combo.setCurrentText('legacy')
+        full_control_sim_param_layout.addWidget(self.full_control_planner_backend_combo)
         self.full_control_headless_label = QLabel("Headless:")
         self.full_control_headless_combo = QComboBox()
         self.full_control_headless_combo.addItems(['false', 'true'])
@@ -777,7 +789,7 @@ class RobotControlUI(QMainWindow):
                 hybrid_sim_combo=self.full_control_hybrid_sim_combo,
             )
         )
-        self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=full controller_type:=<type> hybrid_sim:=<true/false> headless:=<true/false>")
+        self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=full controller_type:=<type> hybrid_sim:=<true/false> planner_backend:=<moveit|legacy> headless:=<true/false>")
         full_control_mapping_layout.addWidget(self.btn_full_control_localization)
 
         self.btn_full_control_nav2 = QPushButton("Launch Nav2")
@@ -1091,7 +1103,16 @@ class RobotControlUI(QMainWindow):
             self.full_control_init_box.setEnabled(not should_disable)
 
     def _update_headless_visibility(self):
-        """Show headless selectors only when simulation mode is true."""
+        """Show simulation-only selectors only when simulation mode is true."""
+        arm_sim_mode = self.arm_sim_mode_combo.currentText() if hasattr(self, "arm_sim_mode_combo") else 'false'
+        arm_visible = (arm_sim_mode == 'true')
+        if hasattr(self, "arm_hybrid_sim_combo") and not arm_visible:
+            self.arm_hybrid_sim_combo.setCurrentText('false')
+        if hasattr(self, "arm_hybrid_sim_label"):
+            self.arm_hybrid_sim_label.setVisible(arm_visible)
+        if hasattr(self, "arm_hybrid_sim_combo"):
+            self.arm_hybrid_sim_combo.setVisible(arm_visible)
+
         base_sim_mode = self.sim_mode_combo.currentText() if hasattr(self, "sim_mode_combo") else 'false'
         base_visible = (base_sim_mode == 'true')
         if hasattr(self, "base_headless_label"):
@@ -1356,13 +1377,20 @@ class RobotControlUI(QMainWindow):
         sim_mode = self.arm_sim_mode_combo.currentText()
         hybrid_sim = 'true' if self._is_hybrid_sim_enabled(context='arm') else 'false'
         robot_ip = self._get_robot_ip_for_launch(context='arm')
+        planner_backend = self._get_planner_backend(context='arm')
+        namespace_arm = self._get_namespace_for_arm_launch(planner_backend)
+        launch_args = [
+            'launch', 'arm_control', 'arm.launch.py',
+            f'robot_ip:={robot_ip}',
+            f'sim:={sim_mode}',
+            f'hybrid_sim:={hybrid_sim}',
+            f'planner_backend:={planner_backend}',
+            'mode:=arm',
+        ]
+        if namespace_arm:
+            launch_args.append(f'namespace_arm:={namespace_arm}')
         self._toggle_process('arm_launch', self.btn_general_launch, 'Arm',
-                            'ros2', ['launch', 'arm_control', 'arm.launch.py',
-                                    f'robot_ip:={robot_ip}',
-                                    f'sim:={sim_mode}',
-                                    f'hybrid_sim:={hybrid_sim}',
-                                    'mode:=arm',
-                                ])
+                            'ros2', launch_args)
         
         # Update tab states
         self._update_tab_states_for_arm()
@@ -1498,6 +1526,9 @@ class RobotControlUI(QMainWindow):
         ]
         if mode == 'full':
             localization_args.append(f'hybrid_sim:={hybrid_sim}')
+            localization_args.append(
+                f'planner_backend:={self._get_planner_backend(context="full")}'
+            )
         localization_args.append(f'headless:={headless}')
 
         self._toggle_base_process(process_key, button, display_name, 'ros2', localization_args)
@@ -2864,6 +2895,21 @@ class RobotControlUI(QMainWindow):
         if self._is_hybrid_sim_enabled(context=context):
             return '192.168.56.101'
         return '192.168.1.102'
+
+    def _get_planner_backend(self, context='arm'):
+        """Pick planner_backend from the requested tab."""
+        if context == 'full':
+            if hasattr(self, 'full_control_planner_backend_combo'):
+                return self.full_control_planner_backend_combo.currentText()
+            return 'legacy'
+
+        if hasattr(self, 'arm_planner_backend_combo'):
+            return self.arm_planner_backend_combo.currentText()
+        return 'legacy'
+
+    def _get_namespace_for_arm_launch(self, planner_backend):
+        """Use /arm namespace for MoveIt for now; legacy stays in the root namespace."""
+        return 'arm' if planner_backend == 'moveit' else ''
 
     def _get_robot_ip_for_arm_launch(self):
         """Backward-compatible arm launch helper."""
