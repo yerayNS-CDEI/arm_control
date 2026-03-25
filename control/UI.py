@@ -624,12 +624,12 @@ class RobotControlUI(QMainWindow):
         
         btn_read_joints = QPushButton("Read Current Joint Positions")
         btn_read_joints.clicked.connect(self.read_joint_positions)
-        btn_read_joints.setToolTip("Reads /arm/joint_states when hybrid_sim=true, else /joint_states")
+        btn_read_joints.setToolTip("Reads /arm/joint_states only for the Full Control hybrid launch, otherwise /joint_states")
         button_layout.addWidget(btn_read_joints)
         
         self.btn_publish_joints = QPushButton("Publish Joint Trajectory")
         self.btn_publish_joints.clicked.connect(self.publish_joint_trajectory)
-        self.btn_publish_joints.setToolTip("Publishes to /arm/planned_trajectory when hybrid_sim=true, else /planned_trajectory")
+        self.btn_publish_joints.setToolTip("Publishes to /arm/planned_trajectory only for the Full Control hybrid launch, otherwise /planned_trajectory")
         self.btn_publish_joints.setEnabled(False)  # Disabled until positions are read
         button_layout.addWidget(self.btn_publish_joints)
         
@@ -2926,15 +2926,15 @@ class RobotControlUI(QMainWindow):
             return False
         return self.full_control_hybrid_sim_combo.currentText() == 'true'
 
-    def _get_joint_states_topic_for_ui(self, context='full'):
-        """Pick the joint_states topic based on hybrid_sim for the given context ('arm' or 'full')."""
-        if self._is_hybrid_sim_enabled(context=context):
+    def _get_joint_states_topic_for_ui(self):
+        """Pick the joint_states topic for slider updates/readback."""
+        if self._full_control_uses_arm_namespace():
             return '/arm/joint_states'
         return '/joint_states'
 
-    def _get_planned_trajectory_topic_for_ui(self, context='full'):
-        """Pick the planned_trajectory topic based on hybrid_sim for the given context ('arm' or 'full')."""
-        if self._is_hybrid_sim_enabled(context=context):
+    def _get_planned_trajectory_topic_for_ui(self):
+        """Pick the planned_trajectory topic for Joint Control publishing."""
+        if self._full_control_uses_arm_namespace():
             return '/arm/planned_trajectory'
         return '/planned_trajectory'
 
@@ -2956,8 +2956,17 @@ class RobotControlUI(QMainWindow):
         return 'legacy'
 
     def _get_namespace_for_arm_launch(self, planner_backend):
-        """Use /arm namespace for MoveIt for now; legacy stays in the root namespace."""
-        return 'arm' if planner_backend == 'moveit' else ''
+        """Arm launches now stay in the root namespace for both backends."""
+        return ''
+
+    def _full_control_uses_arm_namespace(self):
+        """Only the Full Control hybrid launch keeps the arm stack under /arm."""
+        return (
+            hasattr(self, 'full_control_sim_mode_combo') and
+            hasattr(self, 'full_control_hybrid_sim_combo') and
+            self.full_control_sim_mode_combo.currentText() == 'true' and
+            self.full_control_hybrid_sim_combo.currentText() == 'true'
+        )
 
     def _get_robot_ip_for_arm_launch(self):
         """Backward-compatible arm launch helper."""
