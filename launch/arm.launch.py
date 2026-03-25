@@ -210,6 +210,7 @@ def generate_launch_description():
         launch_arguments={
             'ur_type': ur_type,
             'mode': effective_moveit_mode,
+            'namespace_arm': namespace_arm,
             'tf_prefix': tf_prefix,
             'use_fake_hardware': use_fake_hardware,
             'use_sim_time': effective_moveit_use_sim_time,
