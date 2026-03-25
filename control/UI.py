@@ -148,6 +148,7 @@ class RobotControlUI(QMainWindow):
         self.arm_hybrid_sim_combo = QComboBox()
         self.arm_hybrid_sim_combo.addItems(['false', 'true'])
         self.arm_hybrid_sim_combo.setCurrentText('true')
+        self.arm_hybrid_sim_combo.currentTextChanged.connect(self._update_init_box_state)
         arm_sim_param_layout.addWidget(self.arm_hybrid_sim_combo)
         arm_sim_param_layout.addStretch()
         arm_tab_layout.addLayout(arm_sim_param_layout)
@@ -1201,15 +1202,11 @@ class RobotControlUI(QMainWindow):
 
 
     def _update_init_box_state(self):
-        """Enable/disable Initialization box based on simulation mode"""
+        """Disable Arm initialization only when sim=true and URsim=false."""
         sim_mode = self.arm_sim_mode_combo.currentText()
-        
-        if sim_mode == 'true':
-            # Disable in simulation mode (robot dashboard commands don't work in sim)
-            self.init_box.setEnabled(False)
-        else:
-            # Enable in real robot mode
-            self.init_box.setEnabled(True)
+        hybrid_mode = self.arm_hybrid_sim_combo.currentText() if hasattr(self, "arm_hybrid_sim_combo") else 'false'
+        should_disable = (sim_mode == 'true' and hybrid_mode == 'false')
+        self.init_box.setEnabled(not should_disable)
 
     def _update_tab_states_for_arm(self):
         """Update tab states based on arm control processes"""
