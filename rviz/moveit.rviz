@@ -68,7 +68,22 @@ Visualization Manager:
         Color Enabled: true
         Interrupt Display: true
         Links:
+          A_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
           All Links Enabled: true
+          B_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          C_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
           Expand Joint Details: false
           Expand Link Details: false
           Expand Tree: false
@@ -104,26 +119,6 @@ Visualization Manager:
             Alpha: 1
             Show Axes: false
             Show Trail: false
-          arm_plate_link:
-            Alpha: 1
-            Show Axes: false
-            Show Trail: false
-            Value: true
-          arm_sensor_A_sensor_link:
-            Alpha: 1
-            Show Axes: false
-            Show Trail: false
-            Value: true
-          arm_sensor_B_sensor_link:
-            Alpha: 1
-            Show Axes: false
-            Show Trail: false
-            Value: true
-          arm_sensor_C_sensor_link:
-            Alpha: 1
-            Show Axes: false
-            Show Trail: false
-            Value: true
           arm_shoulder_link:
             Alpha: 1
             Show Axes: false
@@ -153,10 +148,92 @@ Visualization Manager:
             Show Axes: false
             Show Trail: false
             Value: true
-          world:
+          base_footprint:
             Alpha: 1
             Show Axes: false
             Show Trail: false
+          base_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          camera_color_optical_frame:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+          camera_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          column_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          drivewhl_l_joint_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          drivewhl_r_joint_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          front_sick:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          front_sick_scan:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+          os_sensor_mount:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          plate_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          rear_sick:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          rear_sick_scan:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+          turret_caster_bl:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          turret_caster_br:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          turret_caster_fl:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          turret_caster_fr:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          turret_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
         Loop Animation: false
         Robot Alpha: 0.5
         Robot Color: 150; 50; 150
@@ -182,7 +259,7 @@ Visualization Manager:
         Joint Violation Color: 255; 0; 255
         Planning Group: arm_manipulator
         Query Goal State: true
-        Query Start State: true
+        Query Start State: false
         Show Workspace: false
         Start State Alpha: 0.3499999940395355
         Start State Color: 0; 255; 0
@@ -198,7 +275,22 @@ Visualization Manager:
       Scene Robot:
         Attached Body Color: 150; 50; 150
         Links:
+          A_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
           All Links Enabled: true
+          B_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          C_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
           Expand Joint Details: false
           Expand Link Details: false
           Expand Tree: false
@@ -234,26 +326,6 @@ Visualization Manager:
             Alpha: 1
             Show Axes: false
             Show Trail: false
-          arm_plate_link:
-            Alpha: 1
-            Show Axes: false
-            Show Trail: false
-            Value: true
-          arm_sensor_A_sensor_link:
-            Alpha: 1
-            Show Axes: false
-            Show Trail: false
-            Value: true
-          arm_sensor_B_sensor_link:
-            Alpha: 1
-            Show Axes: false
-            Show Trail: false
-            Value: true
-          arm_sensor_C_sensor_link:
-            Alpha: 1
-            Show Axes: false
-            Show Trail: false
-            Value: true
           arm_shoulder_link:
             Alpha: 1
             Show Axes: false
@@ -283,10 +355,92 @@ Visualization Manager:
             Show Axes: false
             Show Trail: false
             Value: true
-          world:
+          base_footprint:
             Alpha: 1
             Show Axes: false
             Show Trail: false
+          base_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          camera_color_optical_frame:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+          camera_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          column_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          drivewhl_l_joint_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          drivewhl_r_joint_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          front_sick:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          front_sick_scan:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+          os_sensor_mount:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          plate_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          rear_sick:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          rear_sick_scan:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+          turret_caster_bl:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          turret_caster_br:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          turret_caster_fl:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          turret_caster_fr:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
+          turret_link:
+            Alpha: 1
+            Show Axes: false
+            Show Trail: false
+            Value: true
         Robot Alpha: 1
         Show Robot Collision: false
         Show Robot Visual: true
@@ -352,10 +506,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.2653985619544983
+      Pitch: 0.08539857715368271
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 2.3653948307037354
+      Yaw: 2.415395498275757
     Saved: ~
 Window Geometry:
   Displays:

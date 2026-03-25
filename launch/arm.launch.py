@@ -72,6 +72,18 @@ def generate_launch_description():
         description='Launch mode full|arm',
         choices=['full', 'arm'],
     )
+    moveit_mode_arg = DeclareLaunchArgument(
+        'moveit_mode',
+        default_value='auto',
+        description='MoveIt robot mode auto|full|arm',
+        choices=['auto', 'full', 'arm'],
+    )
+    moveit_use_sim_time_arg = DeclareLaunchArgument(
+        'moveit_use_sim_time',
+        default_value='auto',
+        description='MoveIt clock source auto|true|false',
+        choices=['auto', 'true', 'false'],
+    )
     controllers_file_arg = DeclareLaunchArgument(
         'controllers_file',
         default_value='mobile_manipulator_controllers.yaml',
@@ -103,6 +115,8 @@ def generate_launch_description():
     simulation = LaunchConfiguration('sim')
     hybrid_sim = LaunchConfiguration('hybrid_sim')
     mode = LaunchConfiguration('mode')
+    moveit_mode = LaunchConfiguration('moveit_mode')
+    moveit_use_sim_time = LaunchConfiguration('moveit_use_sim_time')
     controllers_file = LaunchConfiguration('controllers_file')
     namespace_arm = LaunchConfiguration('namespace_arm')
     planner_backend = LaunchConfiguration('planner_backend')
@@ -113,6 +127,22 @@ def generate_launch_description():
 
     joint_controller_type = PythonExpression(
         ["'scaled_joint_trajectory_controller' if '", planner_backend, "' == 'moveit' else 'joint_trajectory_controller'"]
+    )
+    effective_moveit_mode = PythonExpression(
+        ["'", moveit_mode, "' if '", moveit_mode, "' != 'auto' else '", mode, "'"]
+    )
+    effective_moveit_use_sim_time = PythonExpression(
+        [
+            "'",
+            moveit_use_sim_time,
+            "' if '",
+            moveit_use_sim_time,
+            "' != 'auto' else ('false' if '",
+            simulation,
+            "' == 'false' or '",
+            hybrid_sim,
+            "' == 'true' else 'true')",
+        ]
     )
     inverted_sim = NotSubstitution(simulation)
 
@@ -179,10 +209,10 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(moveit_launch),
         launch_arguments={
             'ur_type': ur_type,
-            'mode': mode,
+            'mode': effective_moveit_mode,
             'tf_prefix': tf_prefix,
             'use_fake_hardware': use_fake_hardware,
-            'use_sim_time': PythonExpression(["'false' if '", simulation, "' == 'false' or '", hybrid_sim, "' == 'true' else 'true'"]),
+            'use_sim_time': effective_moveit_use_sim_time,
             'launch_rviz': launch_rviz,
         }.items(),
         condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'moveit'"])),
@@ -198,7 +228,8 @@ def generate_launch_description():
                 'group_name': 'arm_manipulator',
                 'end_effector_link': 'arm_tool0',
                 'planning_frame': 'arm_base',
-                'mode': mode,
+                'mode': effective_moveit_mode,
+                'use_sim_time': ParameterValue(effective_moveit_use_sim_time, value_type=bool),
                 'enable_wall_scene_sync': ParameterValue(enable_wall_scene_sync, value_type=bool),
             }
         ],
@@ -216,6 +247,8 @@ def generate_launch_description():
             simulation_arg,
             hybrid_sim_arg,
             mode_arg,
+            moveit_mode_arg,
+            moveit_use_sim_time_arg,
             controllers_file_arg,
             namespace_arm_arg,
             planner_backend_arg,
