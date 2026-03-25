@@ -13,6 +13,7 @@ from ur_moveit_config.launch_common import load_yaml
 def launch_setup(context, *args, **kwargs):
     ur_type = LaunchConfiguration("ur_type")
     mode = LaunchConfiguration("mode")
+    namespace_arm = LaunchConfiguration("namespace_arm")
     tf_prefix = LaunchConfiguration("tf_prefix")
     use_fake_hardware = LaunchConfiguration("use_fake_hardware")
     use_sim_time = LaunchConfiguration("use_sim_time")
@@ -24,6 +25,11 @@ def launch_setup(context, *args, **kwargs):
     warehouse_sqlite_path = LaunchConfiguration("warehouse_sqlite_path")
 
     mode_value = context.perform_substitution(mode).strip().lower()
+    arm_namespace_value = context.perform_substitution(namespace_arm).strip().strip("/")
+    controller_namespace = f"/{arm_namespace_value}" if arm_namespace_value else ""
+    joint_states_topic = (
+        f"{controller_namespace}/joint_states" if controller_namespace else "/joint_states"
+    )
 
     xacro_executable = PathJoinSubstitution([FindExecutable(name="xacro")])
     if mode_value == "full":
@@ -165,10 +171,11 @@ def launch_setup(context, *args, **kwargs):
 
     controllers_yaml = load_yaml("arm_control", os.path.join("config", "moveit", "controllers.yaml"))
 
-    controller_namespace = "/arm"
     namespaced_controllers_yaml = {"controller_names": []}
     for controller_name in controllers_yaml["controller_names"]:
-        namespaced_name = f"{controller_namespace}/{controller_name}"
+        namespaced_name = (
+            f"{controller_namespace}/{controller_name}" if controller_namespace else controller_name
+        )
         namespaced_controllers_yaml["controller_names"].append(namespaced_name)
         namespaced_controllers_yaml[namespaced_name] = controllers_yaml[controller_name]
 
@@ -216,7 +223,7 @@ def launch_setup(context, *args, **kwargs):
         executable="move_group",
         output="screen",
         parameters=common_parameters,
-        remappings=[('joint_states', '/arm/joint_states')],
+        remappings=[('joint_states', joint_states_topic)],
     )
 
     rviz_node = Node(
@@ -252,6 +259,7 @@ def generate_launch_description():
                 description="Launch mode full|arm",
                 choices=["full", "arm"],
             ),
+            DeclareLaunchArgument("namespace_arm", default_value=""),
             DeclareLaunchArgument("tf_prefix", default_value="arm_"),
             DeclareLaunchArgument("use_fake_hardware", default_value="false"),
             DeclareLaunchArgument("use_sim_time", default_value="false"),

@@ -41,9 +41,11 @@ class RobotControlUI(QMainWindow):
  
         self.node = rclpy.create_node('robot_control_ui')
         self.goal_publisher = self.node.create_publisher(Pose, '/arm/goal_pose', 10)
-        self.emergency_stop_publisher = self.node.create_publisher(Bool, '/arm/emergency_stop', qos)
+        self.emergency_stop_publisher = self.node.create_publisher(Bool, '/emergency_stop', qos)
         self.distance_sensor_publisher = self.node.create_publisher(Float32MultiArray, '/arm/distance_sensors', 10)
-        self.emergency_stop_subscriber = self.node.create_subscription(Bool, '/arm/emergency_stop', self._on_emergency_stop_state, qos)
+        self.emergency_stop_subscriber = self.node.create_subscription(Bool, '/emergency_stop', self._on_emergency_stop_state, qos)
+        # Persistent publishers for emergency stop topics (keyed by topic name), created on demand
+        self._emergency_stop_publishers = {}
         self.arm_joint_names = [
             'arm_shoulder_pan_joint',
             'arm_shoulder_lift_joint',
@@ -136,7 +138,21 @@ class RobotControlUI(QMainWindow):
         self.arm_sim_mode_combo = QComboBox()
         self.arm_sim_mode_combo.addItems(['false', 'true'])
         self.arm_sim_mode_combo.currentTextChanged.connect(self._update_init_box_state)
+        self.arm_sim_mode_combo.currentTextChanged.connect(self._update_headless_visibility)
         arm_sim_param_layout.addWidget(self.arm_sim_mode_combo)
+        arm_sim_param_layout.addWidget(QLabel("Planner Backend:"))
+        self.arm_planner_backend_combo = QComboBox()
+        self.arm_planner_backend_combo.addItems(['moveit', 'legacy'])
+        self.arm_planner_backend_combo.setCurrentText('legacy')
+        self.arm_planner_backend_combo.currentTextChanged.connect(self._update_arm_planner_constraints)
+        arm_sim_param_layout.addWidget(self.arm_planner_backend_combo)
+        self.arm_hybrid_sim_label = QLabel("URsim:")
+        arm_sim_param_layout.addWidget(self.arm_hybrid_sim_label)
+        self.arm_hybrid_sim_combo = QComboBox()
+        self.arm_hybrid_sim_combo.addItems(['false', 'true'])
+        self.arm_hybrid_sim_combo.setCurrentText('true')
+        self.arm_hybrid_sim_combo.currentTextChanged.connect(self._update_init_box_state)
+        arm_sim_param_layout.addWidget(self.arm_hybrid_sim_combo)
         arm_sim_param_layout.addStretch()
         arm_tab_layout.addLayout(arm_sim_param_layout)
         
@@ -153,7 +169,7 @@ class RobotControlUI(QMainWindow):
         control_layout.addWidget(QLabel("System Control:"))
         self.btn_general_launch = QPushButton("Start Arm")
         self.btn_general_launch.clicked.connect(self.toggle_arm_launch)
-        self.btn_general_launch.setToolTip("robot_ip=192.168.56.101 when hybrid_sim=true, else 192.168.1.102")
+        self.btn_general_launch.setToolTip("robot_ip=192.168.56.101 when URsim=true, else 192.168.1.102")
         control_layout.addWidget(self.btn_general_launch)
  
         # RQT Joint Controller button
@@ -176,9 +192,15 @@ class RobotControlUI(QMainWindow):
  
         btn_send_position = QPushButton("Send Position")
         btn_send_position.clicked.connect(self.send_position_command)
-        btn_send_position.setToolTip("Uses /arm/send_position when hybrid_sim=true, otherwise /send_position")
+        btn_send_position.setToolTip("Uses /send_position for the Arm Control launch")
         position_sender_layout.addWidget(btn_send_position)
         control_layout.addLayout(position_sender_layout)
+ 
+        # Reset Planner button
+        btn_arm_reset_planner = QPushButton("Reset Planner")
+        btn_arm_reset_planner.clicked.connect(self.reset_planner_arm)
+        btn_arm_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
+        control_layout.addWidget(btn_arm_reset_planner)
  
         # List Controllers button
         btn_list_controllers = QPushButton("List Controllers")
@@ -192,8 +214,8 @@ class RobotControlUI(QMainWindow):
         self.btn_emergency_stop = QPushButton("EMERGENCY STOP (Click to Activate)")
         self.btn_emergency_stop.setCheckable(True)
         self.btn_emergency_stop.setStyleSheet("background-color: red; color: white; font-weight: bold;")
-        self.btn_emergency_stop.clicked.connect(self.emergency_stop)
-        self.btn_emergency_stop.setToolTip("Toggle emergency stop on /arm/emergency_stop and cancel trajectory goals when activating")
+        self.btn_emergency_stop.clicked.connect(lambda: self.emergency_stop(context='arm'))
+        self.btn_emergency_stop.setToolTip("Toggle emergency stop on /emergency_stop and cancel trajectory goals when activating")
         goal_layout.addWidget(self.btn_emergency_stop)
         control_layout.addLayout(goal_layout)
  
@@ -602,12 +624,12 @@ class RobotControlUI(QMainWindow):
         
         btn_read_joints = QPushButton("Read Current Joint Positions")
         btn_read_joints.clicked.connect(self.read_joint_positions)
-        btn_read_joints.setToolTip("Reads /arm/joint_states when hybrid_sim=true, else /joint_states")
+        btn_read_joints.setToolTip("Reads /arm/joint_states only for the Full Control hybrid launch, otherwise /joint_states")
         button_layout.addWidget(btn_read_joints)
         
         self.btn_publish_joints = QPushButton("Publish Joint Trajectory")
         self.btn_publish_joints.clicked.connect(self.publish_joint_trajectory)
-        self.btn_publish_joints.setToolTip("Publishes to /arm/planned_trajectory when hybrid_sim=true, else /planned_trajectory")
+        self.btn_publish_joints.setToolTip("Publishes to /arm/planned_trajectory only for the Full Control hybrid launch, otherwise /planned_trajectory")
         self.btn_publish_joints.setEnabled(False)  # Disabled until positions are read
         button_layout.addWidget(self.btn_publish_joints)
         
@@ -663,6 +685,12 @@ class RobotControlUI(QMainWindow):
         self.full_control_controller_type_combo = QComboBox()
         self.full_control_controller_type_combo.addItems(['omni', 'diff'])
         full_control_sim_param_layout.addWidget(self.full_control_controller_type_combo)
+        full_control_sim_param_layout.addWidget(QLabel("Planner Backend:"))
+        self.full_control_planner_backend_combo = QComboBox()
+        self.full_control_planner_backend_combo.addItems(['moveit', 'legacy'])
+        self.full_control_planner_backend_combo.setCurrentText('legacy')
+        self.full_control_planner_backend_combo.currentTextChanged.connect(self._update_full_control_planner_constraints)
+        full_control_sim_param_layout.addWidget(self.full_control_planner_backend_combo)
         self.full_control_hybrid_sim_label = QLabel("Hybrid Sim:")
         self.full_control_hybrid_sim_combo = QComboBox()
         self.full_control_hybrid_sim_combo.addItems(['false', 'true'])
@@ -772,7 +800,7 @@ class RobotControlUI(QMainWindow):
                 hybrid_sim_combo=self.full_control_hybrid_sim_combo,
             )
         )
-        self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=full controller_type:=<type> hybrid_sim:=<true/false> headless:=<true/false>")
+        self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=full controller_type:=<type> hybrid_sim:=<true/false> planner_backend:=<moveit|legacy> headless:=<true/false>")
         full_control_mapping_layout.addWidget(self.btn_full_control_localization)
 
         self.btn_full_control_nav2 = QPushButton("Launch Nav2")
@@ -807,6 +835,15 @@ class RobotControlUI(QMainWindow):
         btn_reset_planner.clicked.connect(self.reset_planner)
         btn_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
         full_control_mapping_layout.addWidget(btn_reset_planner)
+
+        # Emergency stop button for Full Control tab
+        full_control_mapping_layout.addWidget(QLabel(""))  # Spacer
+        self.btn_full_control_emergency_stop = QPushButton("EMERGENCY STOP (Click to Activate)")
+        self.btn_full_control_emergency_stop.setCheckable(True)
+        self.btn_full_control_emergency_stop.setStyleSheet("background-color: red; color: white; font-weight: bold;")
+        self.btn_full_control_emergency_stop.clicked.connect(lambda: self.emergency_stop(context='full'))
+        self.btn_full_control_emergency_stop.setToolTip("Toggle emergency stop and cancel trajectory goals when activating\nUses /arm/emergency_stop when simulation=true AND hybrid_sim=true, otherwise /emergency_stop")
+        full_control_mapping_layout.addWidget(self.btn_full_control_emergency_stop)
 
         full_control_mapping_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_mapping_box)
@@ -1077,6 +1114,30 @@ class RobotControlUI(QMainWindow):
         self._update_full_control_init_box_state()
         self._update_headless_visibility()
 
+    def _update_arm_planner_constraints(self):
+        """Lock/unlock URSim selector based on Arm tab planner backend selection."""
+        planner = self._get_planner_backend(context='arm')
+        if hasattr(self, 'arm_hybrid_sim_combo'):
+            if planner == 'moveit':
+                self.arm_hybrid_sim_combo.setCurrentText('true')
+                self.arm_hybrid_sim_combo.setEnabled(False)
+            else:
+                self.arm_hybrid_sim_combo.setEnabled(True)
+        self._update_headless_visibility()
+        self._update_init_box_state()
+
+    def _update_full_control_planner_constraints(self):
+        """Lock/unlock Hybrid Sim selector based on Full Control planner backend selection."""
+        planner = self._get_planner_backend(context='full')
+        if hasattr(self, 'full_control_hybrid_sim_combo'):
+            if planner == 'moveit':
+                self.full_control_hybrid_sim_combo.setCurrentText('true')
+                self.full_control_hybrid_sim_combo.setEnabled(False)
+            else:
+                self.full_control_hybrid_sim_combo.setEnabled(True)
+        self._update_full_control_init_box_state()
+        self._update_headless_visibility()
+
     def _update_full_control_init_box_state(self):
         """Disable Full Control initialization only when sim=true and hybrid_sim=false."""
         full_sim_mode = self.full_control_sim_mode_combo.currentText() if hasattr(self, "full_control_sim_mode_combo") else 'false'
@@ -1086,7 +1147,18 @@ class RobotControlUI(QMainWindow):
             self.full_control_init_box.setEnabled(not should_disable)
 
     def _update_headless_visibility(self):
-        """Show headless selectors only when simulation mode is true."""
+        """Show simulation-only selectors only when simulation mode is true."""
+        arm_sim_mode = self.arm_sim_mode_combo.currentText() if hasattr(self, "arm_sim_mode_combo") else 'false'
+        arm_planner = self._get_planner_backend(context='arm')
+        # URSim selector is always visible when planner_backend is moveit (must be locked true)
+        arm_ursim_visible = (arm_sim_mode == 'true') or (arm_planner == 'moveit')
+        if hasattr(self, "arm_hybrid_sim_combo") and not arm_ursim_visible:
+            self.arm_hybrid_sim_combo.setCurrentText('false')
+        if hasattr(self, "arm_hybrid_sim_label"):
+            self.arm_hybrid_sim_label.setVisible(arm_ursim_visible)
+        if hasattr(self, "arm_hybrid_sim_combo"):
+            self.arm_hybrid_sim_combo.setVisible(arm_ursim_visible)
+
         base_sim_mode = self.sim_mode_combo.currentText() if hasattr(self, "sim_mode_combo") else 'false'
         base_visible = (base_sim_mode == 'true')
         if hasattr(self, "base_headless_label"):
@@ -1160,15 +1232,11 @@ class RobotControlUI(QMainWindow):
 
 
     def _update_init_box_state(self):
-        """Enable/disable Initialization box based on simulation mode"""
+        """Disable Arm initialization only when sim=true and URsim=false."""
         sim_mode = self.arm_sim_mode_combo.currentText()
-        
-        if sim_mode == 'true':
-            # Disable in simulation mode (robot dashboard commands don't work in sim)
-            self.init_box.setEnabled(False)
-        else:
-            # Enable in real robot mode
-            self.init_box.setEnabled(True)
+        hybrid_mode = self.arm_hybrid_sim_combo.currentText() if hasattr(self, "arm_hybrid_sim_combo") else 'false'
+        should_disable = (sim_mode == 'true' and hybrid_mode == 'false')
+        self.init_box.setEnabled(not should_disable)
 
     def _update_tab_states_for_arm(self):
         """Update tab states based on arm control processes"""
@@ -1193,9 +1261,11 @@ class RobotControlUI(QMainWindow):
 
     def _on_joint_states(self, msg, source_topic=None):
         """Update live joint sliders in Arm and Full Control tabs from joint states topics."""
-        active_topic = self._get_joint_states_topic_for_ui()
-        if source_topic is not None and source_topic != active_topic:
-            return
+        if source_topic is not None:
+            arm_topic = self._get_joint_states_topic_for_ui(context='arm')
+            full_topic = self._get_joint_states_topic_for_ui(context='full')
+            if source_topic not in (arm_topic, full_topic):
+                return
 
         if not msg.name or not msg.position:
             return
@@ -1349,15 +1419,22 @@ class RobotControlUI(QMainWindow):
     
     def toggle_arm_launch(self):
         sim_mode = self.arm_sim_mode_combo.currentText()
-        hybrid_sim = 'true' if self._is_hybrid_sim_enabled() else 'false'
-        robot_ip = self._get_robot_ip_for_arm_launch()
+        hybrid_sim = 'true' if self._is_hybrid_sim_enabled(context='arm') else 'false'
+        robot_ip = self._get_robot_ip_for_launch(context='arm')
+        planner_backend = self._get_planner_backend(context='arm')
+        namespace_arm = self._get_namespace_for_arm_launch(planner_backend)
+        launch_args = [
+            'launch', 'arm_control', 'arm.launch.py',
+            f'robot_ip:={robot_ip}',
+            f'sim:={sim_mode}',
+            f'hybrid_sim:={hybrid_sim}',
+            f'planner_backend:={planner_backend}',
+            'mode:=arm',
+        ]
+        if namespace_arm:
+            launch_args.append(f'namespace_arm:={namespace_arm}')
         self._toggle_process('arm_launch', self.btn_general_launch, 'Arm',
-                            'ros2', ['launch', 'arm_control', 'arm.launch.py',
-                                    f'robot_ip:={robot_ip}',
-                                    f'sim:={sim_mode}',
-                                    f'hybrid_sim:={hybrid_sim}',
-                                    'mode:=arm',
-                                ])
+                            'ros2', launch_args)
         
         # Update tab states
         self._update_tab_states_for_arm()
@@ -1493,6 +1570,9 @@ class RobotControlUI(QMainWindow):
         ]
         if mode == 'full':
             localization_args.append(f'hybrid_sim:={hybrid_sim}')
+            localization_args.append(
+                f'planner_backend:={self._get_planner_backend(context="full")}'
+            )
         localization_args.append(f'headless:={headless}')
 
         self._toggle_base_process(process_key, button, display_name, 'ros2', localization_args)
@@ -2196,7 +2276,8 @@ class RobotControlUI(QMainWindow):
         if status_text is None:
             status_text = self.status_text
 
-        desired_host = self._get_robot_ip_for_arm_launch()
+        context = 'full' if status_text is self.full_control_status_text else 'arm'
+        desired_host = self._get_robot_ip_for_launch(context=context)
         if self.robot_host != desired_host:
             if self.robot_socket:
                 try:
@@ -2768,6 +2849,7 @@ class RobotControlUI(QMainWindow):
             position_name=position_name,
             status_text=self.status_text,
             output_handler=self.handle_output,
+            ui_context='arm',
         )
 
     def send_full_control_position_command(self):
@@ -2777,12 +2859,19 @@ class RobotControlUI(QMainWindow):
             position_name=position_name,
             status_text=self.full_control_status_text,
             output_handler=self.handle_full_control_output,
+            ui_context='full',
         )
 
+    def reset_planner_arm(self):
+        """Reset the planner from Arm Control tab"""
+        self._reset_planner_generic('reset_planner_arm', self.status_text, self.handle_output)
+    
     def reset_planner(self):
-        """Reset the planner by publishing to /planner/reset topic"""
-        process_key = 'reset_planner'
-        
+        """Reset the planner from Full Control tab"""
+        self._reset_planner_generic('reset_planner_full', self.full_control_status_text, self.handle_full_control_output)
+    
+    def _reset_planner_generic(self, process_key, status_text_widget, output_handler):
+        """Generic method to reset the planner by publishing to /planner/reset topic"""
         # Clean up existing process if any
         if process_key in self.process_map:
             existing_process = self.process_map[process_key]
@@ -2796,72 +2885,136 @@ class RobotControlUI(QMainWindow):
         command = 'ros2'
         args = ['topic', 'pub', '--once', '/planner/reset', 'std_msgs/msg/Bool', '{data: true}']
         
-        # Connect output to full control status text
-        process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
-        process.readyReadStandardError.connect(lambda: self.handle_full_control_output(process))
-        process.finished.connect(lambda: self._cleanup_reset_planner(process_key))
+        # Display command in bold green
+        cmd_str = command + ' ' + ' '.join(args)
+        self._append_to_text_widget(status_text_widget, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+        
+        # Connect output handler
+        process.readyReadStandardOutput.connect(lambda: output_handler(process))
+        process.readyReadStandardError.connect(lambda: output_handler(process))
+        process.finished.connect(lambda: self._cleanup_reset_planner(process_key, status_text_widget))
         
         # Start the process
         process.start(command, args)
         self.process_map[process_key] = process
-        
-        # Log to status
-        self._append_to_text_widget(
-            self.full_control_status_text,
-            f"<span style='color: #58a6ff;'>[Reset Planner]</span> Publishing reset to /planner/reset..."
-        )
     
-    def _cleanup_reset_planner(self, process_key):
+    def _cleanup_reset_planner(self, process_key, status_text_widget):
         """Clean up reset planner process"""
         if process_key in self.process_map:
             process = self.process_map[process_key]
             exit_code = process.exitCode()
             if exit_code == 0:
                 self._append_to_text_widget(
-                    self.full_control_status_text,
+                    status_text_widget,
                     f"<span style='color: #3fb950;'>[Reset Planner]</span> Successfully reset planner."
                 )
             else:
                 self._append_to_text_widget(
-                    self.full_control_status_text,
+                    status_text_widget,
                     f"<span style='color: #f85149;'>[Reset Planner]</span> Command failed with exit code {exit_code}."
                 )
             del self.process_map[process_key]
 
-    def _is_hybrid_sim_enabled(self):
-        """Return True when Full Control hybrid simulation mode is selected."""
+    def _is_hybrid_sim_enabled(self, context='full'):
+        """Return True when the requested tab is using hybrid / URSim mode."""
+        if context == 'arm':
+            if not hasattr(self, "arm_hybrid_sim_combo"):
+                return False
+            return self.arm_hybrid_sim_combo.currentText() == 'true'
+
         if not hasattr(self, "full_control_hybrid_sim_combo"):
             return False
         return self.full_control_hybrid_sim_combo.currentText() == 'true'
 
     def _get_joint_states_topic_for_ui(self):
-        """Pick the joint_states topic for slider updates/readback based on hybrid_sim."""
-        if self._is_hybrid_sim_enabled():
+        """Pick the joint_states topic for slider updates/readback."""
+        if self._full_control_uses_arm_namespace():
             return '/arm/joint_states'
         return '/joint_states'
 
     def _get_planned_trajectory_topic_for_ui(self):
-        """Pick the planned_trajectory topic for Joint Control publishing based on hybrid_sim."""
-        if self._is_hybrid_sim_enabled():
+        """Pick the planned_trajectory topic for Joint Control publishing."""
+        if self._full_control_uses_arm_namespace():
             return '/arm/planned_trajectory'
         return '/planned_trajectory'
 
-    def _get_robot_ip_for_arm_launch(self):
-        """Pick robot_ip based on hybrid_sim selection."""
-        if self._is_hybrid_sim_enabled():
+    def _get_robot_ip_for_launch(self, context='arm'):
+        """Pick robot_ip based on the tab's hybrid/URSim selector."""
+        if self._is_hybrid_sim_enabled(context=context):
             return '192.168.56.101'
         return '192.168.1.102'
 
-    def _get_send_position_service_name(self):
-        """Pick service namespace based on hybrid_sim selection."""
-        if self._is_hybrid_sim_enabled():
+    def _get_planner_backend(self, context='arm'):
+        """Pick planner_backend from the requested tab."""
+        if context == 'full':
+            if hasattr(self, 'full_control_planner_backend_combo'):
+                return self.full_control_planner_backend_combo.currentText()
+            return 'legacy'
+
+        if hasattr(self, 'arm_planner_backend_combo'):
+            return self.arm_planner_backend_combo.currentText()
+        return 'legacy'
+
+    def _get_namespace_for_arm_launch(self, planner_backend):
+        """Arm launches now stay in the root namespace for both backends."""
+        return ''
+
+    def _full_control_uses_arm_namespace(self):
+        """Only the Full Control hybrid launch keeps the arm stack under /arm."""
+        return (
+            hasattr(self, 'full_control_sim_mode_combo') and
+            hasattr(self, 'full_control_hybrid_sim_combo') and
+            self.full_control_sim_mode_combo.currentText() == 'true' and
+            self.full_control_hybrid_sim_combo.currentText() == 'true'
+        )
+
+    def _get_robot_ip_for_arm_launch(self):
+        """Backward-compatible arm launch helper."""
+        return self._get_robot_ip_for_launch(context='arm')
+
+    def _get_emergency_stop_topic_for_ui(self, context='arm'):
+        """Pick the emergency_stop topic based on context and simulation settings."""
+        if context == 'arm':
+            planner_backend = self._get_planner_backend(context='arm')
+            if planner_backend == 'moveit':
+                return '/arm/emergency_stop'
+            return '/emergency_stop'
+        # Full Control tab uses namespace when both simulation and hybrid_sim are true
+        if (hasattr(self, 'full_control_sim_mode_combo') and 
+            hasattr(self, 'full_control_hybrid_sim_combo') and
+            self.full_control_sim_mode_combo.currentText() == 'true' and
+            self.full_control_hybrid_sim_combo.currentText() == 'true'):
+            return '/arm/emergency_stop'
+        return '/emergency_stop'
+
+    def _get_status_text_for_context(self, context='arm'):
+        """Get the appropriate status text widget based on context."""
+        if context == 'full':
+            return self.full_control_status_text
+        return self.status_text
+
+    def _get_emergency_stop_button_for_context(self, context='arm'):
+        """Get the appropriate emergency stop button based on context."""
+        if context == 'full' and hasattr(self, 'btn_full_control_emergency_stop'):
+            return self.btn_full_control_emergency_stop
+        return self.btn_emergency_stop
+
+    def _get_send_position_service_name(self, context='arm'):
+        """Pick send_position service name based on the active tab and planner backend."""
+        if context == 'arm':
+            planner_backend = self._get_planner_backend(context='arm')
+            namespace = self._get_namespace_for_arm_launch(planner_backend)
+            if namespace:
+                return f'/{namespace}/send_position'
+            return '/send_position'
+        if self._is_hybrid_sim_enabled(context=context):
             return '/arm/send_position'
         return '/send_position'
 
-    def _send_position_service_call(self, position_name, status_text, output_handler):
+    def _send_position_service_call(self, position_name, status_text, output_handler, ui_context='arm'):
         """Execute ros2 service call for the selected send_position service and stream output."""
         payload = f"{{position_name: '{position_name}'}}"
-        service_name = self._get_send_position_service_name()
+        service_name = self._get_send_position_service_name(context=ui_context)
         ros2_args = [
             'service',
             'call',
@@ -2900,22 +3053,23 @@ class RobotControlUI(QMainWindow):
                 f"<span style='color: #c69026;'>⚠ Position '{position_name}' request finished with exit code {exit_code}</span>"
             )
  
-    def emergency_stop(self):
+    def emergency_stop(self, context='arm'):
         """Toggle emergency stop state (latched)."""
-        self.set_emergency_stop_state(not self.emergency_stop_active, source="ui")
+        self.set_emergency_stop_state(not self.emergency_stop_active, source="ui", context=context)
             
     def _on_emergency_stop_state(self, msg: Bool):
         """Sync UI with the latched /arm/emergency_stop state (even if published externally)."""
-        self.set_emergency_stop_state(bool(msg.data), source="topic")
+        self.set_emergency_stop_state(bool(msg.data), source="topic", context='arm')
 
-    def set_emergency_stop_state(self, active: bool, source: str = "ui"):
+    def set_emergency_stop_state(self, active: bool, source: str = "ui", context: str = "arm"):
         """
         Centralized state setter.
 
         Behavior (matches old behavior):
-        - Only publishes to /arm/emergency_stop when source == "ui"
+        - Only publishes to emergency_stop topic when source == "ui"
         - Only publishes when the state actually changes
         - Topic callbacks only update UI (no re-publish), preventing feedback loops
+        - Topic namespace depends on context and simulation settings
         """
         # If no change, do nothing (prevents repeated publishes / UI churn)
         if active == getattr(self, "emergency_stop_active", False):
@@ -2923,69 +3077,104 @@ class RobotControlUI(QMainWindow):
 
         # Update internal state + UI
         self.emergency_stop_active = active
-        self._update_emergency_stop_button_ui()
+        self._update_emergency_stop_button_ui(context=context)
         # QApplication.processEvents()
 
         # If this came from the topic, do not publish or trigger side effects
         if source != "ui":
             return
 
+        # Get the appropriate status text widget for this context
+        status_text = self._get_status_text_for_context(context)
+
         if not rclpy.ok():
-            self.status_text.append("<span style='color: #c69026;'>⚠ ROS context invalid - cannot set emergency stop</span>")
+            status_text.append("<span style='color: #c69026;'>⚠ ROS context invalid - cannot set emergency stop</span>")
             return
+
+        # Determine the correct topic based on context and simulation settings
+        emergency_stop_topic = self._get_emergency_stop_topic_for_ui(context)
+
+        # Display the command being executed in green color
+        action_str = "true" if active else "false"
+        cmd_str = f'ros2 topic pub --once {emergency_stop_topic} std_msgs/msg/Bool "{{data: {action_str}}}"'
+        self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
 
         # Publish only on user-triggered change
         try:
             stop_msg = Bool()
             stop_msg.data = active
-            self.emergency_stop_publisher.publish(stop_msg)
+
+            # Get or create a persistent publisher for the determined topic
+            publisher = self._emergency_stop_publishers.get(emergency_stop_topic)
+            if publisher is None:
+                qos_profile = QoSProfile(
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=10,
+                )
+                publisher = self.node.create_publisher(Bool, emergency_stop_topic, qos_profile)
+                self._emergency_stop_publishers[emergency_stop_topic] = publisher
+
+            publisher.publish(stop_msg)
+
         except Exception as e:
-            self.status_text.append(f"<span style='color: #f47067;'>❌ Failed to publish /arm/emergency_stop: {e}</span>")
+            status_text.append(f"<span style='color: #f47067;'>❌ Failed to publish {emergency_stop_topic}: {e}</span>")
             return
 
         # User-triggered side-effects only
         try:
             if active:
-                self.status_text.append("<span style='color: #c69026; font-weight: bold;'>⚠ EMERGENCY STOP - Published stop signal</span>")
+                status_text.append("<span style='color: #c69026; font-weight: bold;'>⚠ EMERGENCY STOP - Published stop signal</span>")
 
                 if self.current_goal_handle is not None:
                     self.current_goal_handle.cancel_goal_async()
-                    self.status_text.append("<span style='color: #c69026;'>⚠ Canceling current trajectory goal...</span>")
+                    status_text.append("<span style='color: #c69026;'>⚠ Canceling current trajectory goal...</span>")
                     self.current_goal_handle = None
 
-                response = self._send_robot_command('stop')
+                response = self._send_robot_command('stop', status_text=status_text)
                 if response:
-                    self.status_text.append("<span style='color: #c69026; font-weight: bold;'>⚠ Robot protective stop triggered</span>")
+                    status_text.append("<span style='color: #c69026; font-weight: bold;'>⚠ Robot protective stop triggered</span>")
 
             else:
-                self.status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ EMERGENCY STOP RELEASED - Published release signal</span>")
+                status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ EMERGENCY STOP RELEASED - Published release signal</span>")
 
-                self._send_robot_command('close safety popup')
-                response = self._send_robot_command('unlock protective stop')
+                self._send_robot_command('close safety popup', status_text=status_text)
+                response = self._send_robot_command('unlock protective stop', status_text=status_text)
                 if response:
-                    self.status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ Robot protective stop released (requested)</span>")
+                    status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ Robot protective stop released (requested)</span>")
                     
-                    play_resp = self._send_robot_command('play')
+                    play_resp = self._send_robot_command('play', status_text=status_text)
                     if play_resp:
-                        self.status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ Robot program started (play)</span>")
+                        status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ Robot program started (play)</span>")
                     
         except Exception as e:
-            self.status_text.append(f"<span style='color: #f47067;'>❌ Error while applying emergency stop state: {e}</span>")
+            status_text.append(f"<span style='color: #f47067;'>❌ Error while applying emergency stop state: {e}</span>")
 
 
-    def _update_emergency_stop_button_ui(self):
-        """Update button label + color according to emergency stop state."""
-        if not hasattr(self, "btn_emergency_stop"):
-            return
-
+    def _update_emergency_stop_button_ui(self, context='arm'):
+        """Update button label + color according to emergency stop state.
+        Updates both buttons to keep them in sync."""
         if self.emergency_stop_active:
-            self.btn_emergency_stop.setText("EMERGENCY STOP ACTIVE (Click to Release)")
-            self.btn_emergency_stop.setStyleSheet("background-color: #8b0000; color: white; font-weight: bold;")
-            self.btn_emergency_stop.setChecked(True)
+            text = "EMERGENCY STOP ACTIVE (Click to Release)"
+            style = "background-color: #8b0000; color: white; font-weight: bold;"
+            checked = True
         else:
-            self.btn_emergency_stop.setText("EMERGENCY STOP (Click to Activate)")
-            self.btn_emergency_stop.setStyleSheet("background-color: red; color: white; font-weight: bold;")
-            self.btn_emergency_stop.setChecked(False)
+            text = "EMERGENCY STOP (Click to Activate)"
+            style = "background-color: red; color: white; font-weight: bold;"
+            checked = False
+
+        # Update Arm Control button
+        if hasattr(self, "btn_emergency_stop"):
+            self.btn_emergency_stop.setText(text)
+            self.btn_emergency_stop.setStyleSheet(style)
+            self.btn_emergency_stop.setChecked(checked)
+
+        # Update Full Control button
+        if hasattr(self, "btn_full_control_emergency_stop"):
+            self.btn_full_control_emergency_stop.setText(text)
+            self.btn_full_control_emergency_stop.setStyleSheet(style)
+            self.btn_full_control_emergency_stop.setChecked(checked)
  
     def closeEvent(self, event):
         self.timer.stop()

@@ -35,6 +35,10 @@ def launch_setup(context, *args, **kwargs):
     # My arguments
     mode = LaunchConfiguration("mode")
 
+    stack_launch_rviz_enabled = (
+        context.perform_substitution(stack_launch_rviz).strip().lower() == "true"
+    )
+
     initial_joint_controllers = PathJoinSubstitution(
         [FindPackageShare("navi_wall"), "config", controllers_file]
     )
@@ -116,7 +120,6 @@ def launch_setup(context, *args, **kwargs):
         name="rviz2",
         output="log",
         arguments=["-d", rviz_config_file],
-        condition=IfCondition(stack_launch_rviz),
     )
 
     joint_state_broadcaster_spawner = Node(
@@ -131,7 +134,6 @@ def launch_setup(context, *args, **kwargs):
             target_action=joint_state_broadcaster_spawner,
             on_exit=[rviz_node],
         ),
-        condition=IfCondition(stack_launch_rviz),
     )
 
     # There may be other controllers of the joints, but this is the initially-started one
@@ -209,13 +211,15 @@ def launch_setup(context, *args, **kwargs):
         set_ign_resource_path,
         robot_state_publisher_node,
         joint_state_broadcaster_spawner,
-        delay_rviz_after_joint_state_broadcaster_spawner,
         initial_joint_controller_spawner_stopped,
         initial_joint_controller_spawner_started,
         gazebo,
         bridge,
         gazebo_spawn_robot,
     ]
+
+    if stack_launch_rviz_enabled:
+        nodes_to_start.append(delay_rviz_after_joint_state_broadcaster_spawner)
 
     return nodes_to_start
 
