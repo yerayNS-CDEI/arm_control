@@ -44,6 +44,8 @@ class RobotControlUI(QMainWindow):
         self.emergency_stop_publisher = self.node.create_publisher(Bool, '/emergency_stop', qos)
         self.distance_sensor_publisher = self.node.create_publisher(Float32MultiArray, '/arm/distance_sensors', 10)
         self.emergency_stop_subscriber = self.node.create_subscription(Bool, '/emergency_stop', self._on_emergency_stop_state, qos)
+        # Persistent publishers for emergency stop topics (keyed by topic name), created on demand
+        self._emergency_stop_publishers = {}
         self.arm_joint_names = [
             'arm_shoulder_pan_joint',
             'arm_shoulder_lift_joint',
@@ -142,6 +144,7 @@ class RobotControlUI(QMainWindow):
         self.arm_planner_backend_combo = QComboBox()
         self.arm_planner_backend_combo.addItems(['moveit', 'legacy'])
         self.arm_planner_backend_combo.setCurrentText('legacy')
+        self.arm_planner_backend_combo.currentTextChanged.connect(self._update_arm_planner_constraints)
         arm_sim_param_layout.addWidget(self.arm_planner_backend_combo)
         self.arm_hybrid_sim_label = QLabel("URsim:")
         arm_sim_param_layout.addWidget(self.arm_hybrid_sim_label)
@@ -686,6 +689,7 @@ class RobotControlUI(QMainWindow):
         self.full_control_planner_backend_combo = QComboBox()
         self.full_control_planner_backend_combo.addItems(['moveit', 'legacy'])
         self.full_control_planner_backend_combo.setCurrentText('legacy')
+        self.full_control_planner_backend_combo.currentTextChanged.connect(self._update_full_control_planner_constraints)
         full_control_sim_param_layout.addWidget(self.full_control_planner_backend_combo)
         self.full_control_hybrid_sim_label = QLabel("Hybrid Sim:")
         self.full_control_hybrid_sim_combo = QComboBox()
@@ -1110,6 +1114,30 @@ class RobotControlUI(QMainWindow):
         self._update_full_control_init_box_state()
         self._update_headless_visibility()
 
+    def _update_arm_planner_constraints(self):
+        """Lock/unlock URSim selector based on Arm tab planner backend selection."""
+        planner = self._get_planner_backend(context='arm')
+        if hasattr(self, 'arm_hybrid_sim_combo'):
+            if planner == 'moveit':
+                self.arm_hybrid_sim_combo.setCurrentText('true')
+                self.arm_hybrid_sim_combo.setEnabled(False)
+            else:
+                self.arm_hybrid_sim_combo.setEnabled(True)
+        self._update_headless_visibility()
+        self._update_init_box_state()
+
+    def _update_full_control_planner_constraints(self):
+        """Lock/unlock Hybrid Sim selector based on Full Control planner backend selection."""
+        planner = self._get_planner_backend(context='full')
+        if hasattr(self, 'full_control_hybrid_sim_combo'):
+            if planner == 'moveit':
+                self.full_control_hybrid_sim_combo.setCurrentText('true')
+                self.full_control_hybrid_sim_combo.setEnabled(False)
+            else:
+                self.full_control_hybrid_sim_combo.setEnabled(True)
+        self._update_full_control_init_box_state()
+        self._update_headless_visibility()
+
     def _update_full_control_init_box_state(self):
         """Disable Full Control initialization only when sim=true and hybrid_sim=false."""
         full_sim_mode = self.full_control_sim_mode_combo.currentText() if hasattr(self, "full_control_sim_mode_combo") else 'false'
@@ -1121,13 +1149,15 @@ class RobotControlUI(QMainWindow):
     def _update_headless_visibility(self):
         """Show simulation-only selectors only when simulation mode is true."""
         arm_sim_mode = self.arm_sim_mode_combo.currentText() if hasattr(self, "arm_sim_mode_combo") else 'false'
-        arm_visible = (arm_sim_mode == 'true')
-        if hasattr(self, "arm_hybrid_sim_combo") and not arm_visible:
+        arm_planner = self._get_planner_backend(context='arm')
+        # URSim selector is always visible when planner_backend is moveit (must be locked true)
+        arm_ursim_visible = (arm_sim_mode == 'true') or (arm_planner == 'moveit')
+        if hasattr(self, "arm_hybrid_sim_combo") and not arm_ursim_visible:
             self.arm_hybrid_sim_combo.setCurrentText('false')
         if hasattr(self, "arm_hybrid_sim_label"):
-            self.arm_hybrid_sim_label.setVisible(arm_visible)
+            self.arm_hybrid_sim_label.setVisible(arm_ursim_visible)
         if hasattr(self, "arm_hybrid_sim_combo"):
-            self.arm_hybrid_sim_combo.setVisible(arm_visible)
+            self.arm_hybrid_sim_combo.setVisible(arm_ursim_visible)
 
         base_sim_mode = self.sim_mode_combo.currentText() if hasattr(self, "sim_mode_combo") else 'false'
         base_visible = (base_sim_mode == 'true')
@@ -1231,9 +1261,11 @@ class RobotControlUI(QMainWindow):
 
     def _on_joint_states(self, msg, source_topic=None):
         """Update live joint sliders in Arm and Full Control tabs from joint states topics."""
-        active_topic = self._get_joint_states_topic_for_ui()
-        if source_topic is not None and source_topic != active_topic:
-            return
+        if source_topic is not None:
+            arm_topic = self._get_joint_states_topic_for_ui(context='arm')
+            full_topic = self._get_joint_states_topic_for_ui(context='full')
+            if source_topic not in (arm_topic, full_topic):
+                return
 
         if not msg.name or not msg.position:
             return
@@ -2894,15 +2926,15 @@ class RobotControlUI(QMainWindow):
             return False
         return self.full_control_hybrid_sim_combo.currentText() == 'true'
 
-    def _get_joint_states_topic_for_ui(self):
-        """Pick the joint_states topic for slider updates/readback based on hybrid_sim."""
-        if self._is_hybrid_sim_enabled():
+    def _get_joint_states_topic_for_ui(self, context='full'):
+        """Pick the joint_states topic based on hybrid_sim for the given context ('arm' or 'full')."""
+        if self._is_hybrid_sim_enabled(context=context):
             return '/arm/joint_states'
         return '/joint_states'
 
-    def _get_planned_trajectory_topic_for_ui(self):
-        """Pick the planned_trajectory topic for Joint Control publishing based on hybrid_sim."""
-        if self._is_hybrid_sim_enabled():
+    def _get_planned_trajectory_topic_for_ui(self, context='full'):
+        """Pick the planned_trajectory topic based on hybrid_sim for the given context ('arm' or 'full')."""
+        if self._is_hybrid_sim_enabled(context=context):
             return '/arm/planned_trajectory'
         return '/planned_trajectory'
 
@@ -2934,7 +2966,9 @@ class RobotControlUI(QMainWindow):
     def _get_emergency_stop_topic_for_ui(self, context='arm'):
         """Pick the emergency_stop topic based on context and simulation settings."""
         if context == 'arm':
-            # Arm Control tab uses no namespace
+            planner_backend = self._get_planner_backend(context='arm')
+            if planner_backend == 'moveit':
+                return '/arm/emergency_stop'
             return '/emergency_stop'
         # Full Control tab uses namespace when both simulation and hybrid_sim are true
         if (hasattr(self, 'full_control_sim_mode_combo') and 
@@ -2957,8 +2991,12 @@ class RobotControlUI(QMainWindow):
         return self.btn_emergency_stop
 
     def _get_send_position_service_name(self, context='arm'):
-        """Pick service namespace based on the active tab."""
+        """Pick send_position service name based on the active tab and planner backend."""
         if context == 'arm':
+            planner_backend = self._get_planner_backend(context='arm')
+            namespace = self._get_namespace_for_arm_launch(planner_backend)
+            if namespace:
+                return f'/{namespace}/send_position'
             return '/send_position'
         if self._is_hybrid_sim_enabled(context=context):
             return '/arm/send_position'
@@ -3056,13 +3094,21 @@ class RobotControlUI(QMainWindow):
         try:
             stop_msg = Bool()
             stop_msg.data = active
-            
-            # Create a temporary publisher for the determined topic
-            temp_publisher = self.node.create_publisher(Bool, emergency_stop_topic, 10)
-            temp_publisher.publish(stop_msg)
-            # Clean up the temporary publisher after a short delay
-            QTimer.singleShot(100, lambda: self.node.destroy_publisher(temp_publisher))
-            
+
+            # Get or create a persistent publisher for the determined topic
+            publisher = self._emergency_stop_publishers.get(emergency_stop_topic)
+            if publisher is None:
+                qos_profile = QoSProfile(
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=10,
+                )
+                publisher = self.node.create_publisher(Bool, emergency_stop_topic, qos_profile)
+                self._emergency_stop_publishers[emergency_stop_topic] = publisher
+
+            publisher.publish(stop_msg)
+
         except Exception as e:
             status_text.append(f"<span style='color: #f47067;'>❌ Failed to publish {emergency_stop_topic}: {e}</span>")
             return
