@@ -428,7 +428,7 @@
       <collision>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
-          <cylinder radius="${ee_cylinder_radius}" length="${ee_cylinder_length}"/>
+          <cylinder radius="${ee_cylinder_radius + 0.01}" length="${ee_cylinder_length}"/>
         </geometry>
       </collision>
     </link>
