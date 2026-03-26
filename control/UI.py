@@ -1091,6 +1091,7 @@ class RobotControlUI(QMainWindow):
         self.ARM_TAB_INDEX = 1
         self.JOINT_TAB_INDEX = 2
         self.FULL_CONTROL_TAB_INDEX = 3
+        self._active_planner_context = 'arm'
         self._update_init_box_state()
         self._update_full_control_init_box_state()
         self._update_headless_visibility()
@@ -1136,7 +1137,7 @@ class RobotControlUI(QMainWindow):
         if hasattr(self, 'btn_arm_reset_planner'):
             self.btn_arm_reset_planner.setEnabled(planner != 'moveit')
 
-        # Update Joint Control tab state based on both backends
+        # Update Joint Control tab state based on the active planner tab
         self._update_joint_control_tab_state()
 
         self._update_headless_visibility()
@@ -1156,19 +1157,28 @@ class RobotControlUI(QMainWindow):
         if hasattr(self, 'btn_full_control_reset_planner'):
             self.btn_full_control_reset_planner.setEnabled(planner != 'moveit')
 
-        # Update Joint Control tab state based on both backends
+        # Update Joint Control tab state based on the active planner tab
         self._update_joint_control_tab_state()
 
         self._update_full_control_init_box_state()
         self._update_headless_visibility()
 
-    def _update_joint_control_tab_state(self):
-        """Disable Joint Control tab when moveit is selected in either Arm or Full Control tab."""
-        arm_planner = self._get_planner_backend(context='arm')
-        full_planner = self._get_planner_backend(context='full')
+    def _get_active_planner_context(self):
+        """Use the currently open planner tab, falling back to the last Arm/Full tab visited."""
+        if hasattr(self, 'tabs'):
+            current_index = self.tabs.currentIndex()
+            if hasattr(self, 'ARM_TAB_INDEX') and current_index == self.ARM_TAB_INDEX:
+                self._active_planner_context = 'arm'
+            elif hasattr(self, 'FULL_CONTROL_TAB_INDEX') and current_index == self.FULL_CONTROL_TAB_INDEX:
+                self._active_planner_context = 'full'
 
-        # Disable tab if either backend is moveit
-        is_moveit_active = (arm_planner == 'moveit' or full_planner == 'moveit')
+        return getattr(self, '_active_planner_context', 'arm')
+
+    def _update_joint_control_tab_state(self):
+        """Disable Joint Control only when moveit is selected in the active planner tab."""
+        planner_context = self._get_active_planner_context()
+        planner_backend = self._get_planner_backend(context=planner_context)
+        is_moveit_active = (planner_backend == 'moveit')
 
         if hasattr(self, 'tabs') and hasattr(self, 'JOINT_TAB_INDEX'):
             self.tabs.setTabEnabled(self.JOINT_TAB_INDEX, not is_moveit_active)
@@ -1339,6 +1349,8 @@ class RobotControlUI(QMainWindow):
     
     def _on_tab_changed(self, index, tabs):
         """Handle tab change - check joint states when Joint Control tab is activated"""
+        self._update_joint_control_tab_state()
+
         # Check if the Joint Control tab (index 2) is now active
         if index == 2 and tabs.tabText(index) == "Joint Control":
             # Disable controls first for safety
