@@ -53,6 +53,7 @@
    <!-- End-effector cylinder parameters -->
    <xacro:arg name="ee_cylinder_length" default="0.15"/>
    <xacro:arg name="ee_cylinder_radius" default="0.035"/>
+   <xacro:arg name="sensors_offset" default="0.05"/>
 
    <!-- initial position for simulations (Fake Hardware, Gazebo, Ignition) -->
    <xacro:arg name="initial_positions_file" default="$(find arm_control)/config/initial_positions.yaml"/>
@@ -131,13 +132,15 @@
      arm_dyn_scale="$(arg arm_dyn_scale)"
      ee_cylinder_length="$(arg ee_cylinder_length)"
      ee_cylinder_radius="$(arg ee_cylinder_radius)"
+     sensors_offset="$(arg sensors_offset)"
      >
      <origin xyz="0 0 0" rpy="0 0 0" />          <!-- position robot in the world -->
    </xacro:ur_robot>
 
    <xacro:sensor_plate
-     parent_link="$(arg tf_prefix)tool0"
-     tf_prefix="$(arg tf_prefix)"/>
+     parent_link="$(arg tf_prefix)ee_cylinder_link"
+     tf_prefix="$(arg tf_prefix)"
+     ee_cylinder_length="$(arg ee_cylinder_length)"/>
 
    <xacro:if value="$(arg sim_gazebo)">
     <!-- Gazebo Ignition/Gazebo Sim plugins (sim_gazebo now uses Gazebo Ignition, not Classic) -->
