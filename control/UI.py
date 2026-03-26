@@ -197,10 +197,10 @@ class RobotControlUI(QMainWindow):
         control_layout.addLayout(position_sender_layout)
  
         # Reset Planner button
-        btn_arm_reset_planner = QPushButton("Reset Planner")
-        btn_arm_reset_planner.clicked.connect(self.reset_planner_arm)
-        btn_arm_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
-        control_layout.addWidget(btn_arm_reset_planner)
+        self.btn_arm_reset_planner = QPushButton("Reset Planner")
+        self.btn_arm_reset_planner.clicked.connect(self.reset_planner_arm)
+        self.btn_arm_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
+        control_layout.addWidget(self.btn_arm_reset_planner)
  
         # List Controllers button
         btn_list_controllers = QPushButton("List Controllers")
@@ -632,6 +632,12 @@ class RobotControlUI(QMainWindow):
         self.btn_publish_joints.setToolTip("Publishes to /arm/planned_trajectory only for the Full Control hybrid launch, otherwise /planned_trajectory")
         self.btn_publish_joints.setEnabled(False)  # Disabled until positions are read
         button_layout.addWidget(self.btn_publish_joints)
+
+        # Reset Planner button for Joint Control tab
+        self.btn_joint_reset_planner = QPushButton("Reset Planner")
+        self.btn_joint_reset_planner.clicked.connect(self.reset_planner_joint)
+        self.btn_joint_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
+        button_layout.addWidget(self.btn_joint_reset_planner)
         
         joint_control_layout.addLayout(button_layout)
         
@@ -831,10 +837,10 @@ class RobotControlUI(QMainWindow):
         full_control_mapping_layout.addLayout(full_control_position_layout)
 
         # Reset Planner button
-        btn_reset_planner = QPushButton("Reset Planner")
-        btn_reset_planner.clicked.connect(self.reset_planner)
-        btn_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
-        full_control_mapping_layout.addWidget(btn_reset_planner)
+        self.btn_full_control_reset_planner = QPushButton("Reset Planner")
+        self.btn_full_control_reset_planner.clicked.connect(self.reset_planner)
+        self.btn_full_control_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
+        full_control_mapping_layout.addWidget(self.btn_full_control_reset_planner)
 
         # Emergency stop button for Full Control tab
         full_control_mapping_layout.addWidget(QLabel(""))  # Spacer
@@ -1088,6 +1094,8 @@ class RobotControlUI(QMainWindow):
         self._update_init_box_state()
         self._update_full_control_init_box_state()
         self._update_headless_visibility()
+        self._update_arm_planner_constraints()
+        self._update_full_control_planner_constraints()
         
         # Initial topics list refresh
         QTimer.singleShot(1000, self.refresh_topics_list)  # Delay 1s to ensure ROS is ready
@@ -1123,6 +1131,14 @@ class RobotControlUI(QMainWindow):
                 self.arm_hybrid_sim_combo.setEnabled(False)
             else:
                 self.arm_hybrid_sim_combo.setEnabled(True)
+
+        # Disable Reset Planner button when backend is moveit
+        if hasattr(self, 'btn_arm_reset_planner'):
+            self.btn_arm_reset_planner.setEnabled(planner != 'moveit')
+
+        # Update Joint Control tab state based on both backends
+        self._update_joint_control_tab_state()
+
         self._update_headless_visibility()
         self._update_init_box_state()
 
@@ -1135,8 +1151,27 @@ class RobotControlUI(QMainWindow):
                 self.full_control_hybrid_sim_combo.setEnabled(False)
             else:
                 self.full_control_hybrid_sim_combo.setEnabled(True)
+
+        # Disable Reset Planner button when backend is moveit
+        if hasattr(self, 'btn_full_control_reset_planner'):
+            self.btn_full_control_reset_planner.setEnabled(planner != 'moveit')
+
+        # Update Joint Control tab state based on both backends
+        self._update_joint_control_tab_state()
+
         self._update_full_control_init_box_state()
         self._update_headless_visibility()
+
+    def _update_joint_control_tab_state(self):
+        """Disable Joint Control tab when moveit is selected in either Arm or Full Control tab."""
+        arm_planner = self._get_planner_backend(context='arm')
+        full_planner = self._get_planner_backend(context='full')
+
+        # Disable tab if either backend is moveit
+        is_moveit_active = (arm_planner == 'moveit' or full_planner == 'moveit')
+
+        if hasattr(self, 'tabs') and hasattr(self, 'JOINT_TAB_INDEX'):
+            self.tabs.setTabEnabled(self.JOINT_TAB_INDEX, not is_moveit_active)
 
     def _update_full_control_init_box_state(self):
         """Disable Full Control initialization only when sim=true and hybrid_sim=false."""
@@ -2179,12 +2214,28 @@ class RobotControlUI(QMainWindow):
                 # Skip expected shutdown messages
                 if 'process has died' in line and 'exit code -9' in line:
                     continue
-                
+
                 # Convert ANSI color codes to HTML
                 html_line = self._ansi_to_html(line)
-                
+
                 # Use insertHtml to properly render HTML entities
                 self._append_to_text_widget(self.full_control_status_text, html_line)
+
+    def handle_joint_output(self, process):
+        """Handle output for joint control processes (outputs to joint_status_text)"""
+        output = process.readAllStandardOutput().data().decode()
+        if output:
+            lines = output.split('\n')
+            for line in lines:
+                # Skip expected shutdown messages
+                if 'process has died' in line and 'exit code -9' in line:
+                    continue
+
+                # Convert ANSI color codes to HTML
+                html_line = self._ansi_to_html(line)
+
+                # Use insertHtml to properly render HTML entities
+                self._append_to_text_widget(self.joint_status_text, html_line)
  
     def _on_process_finished(self, process_key, button, name):
         """Handle when a process finishes unexpectedly"""
@@ -2865,10 +2916,14 @@ class RobotControlUI(QMainWindow):
     def reset_planner_arm(self):
         """Reset the planner from Arm Control tab"""
         self._reset_planner_generic('reset_planner_arm', self.status_text, self.handle_output)
-    
+
     def reset_planner(self):
         """Reset the planner from Full Control tab"""
         self._reset_planner_generic('reset_planner_full', self.full_control_status_text, self.handle_full_control_output)
+
+    def reset_planner_joint(self):
+        """Reset the planner from Joint Control tab"""
+        self._reset_planner_generic('reset_planner_joint', self.joint_status_text, self.handle_joint_output)
     
     def _reset_planner_generic(self, process_key, status_text_widget, output_handler):
         """Generic method to reset the planner by publishing to /planner/reset topic"""
