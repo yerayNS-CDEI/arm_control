@@ -79,12 +79,12 @@ def launch_setup(context, *args, **kwargs):
     # Evaluate mode in context
     mode_value = mode.perform(context)
     
-    if mode_value == 'arm':
+    if mode.perform(context).strip() == "arm":
         description_file = "ur.urdf.xacro"
         description_file_path = PathJoinSubstitution(
             [FindPackageShare("arm_control"), "urdf", description_file]
         )
-    elif mode_value == 'full':
+    elif mode.perform(context).strip() == "full":
         description_file = "mobile_manipulator.urdf.xacro"
         description_file_path = PathJoinSubstitution(
             [FindPackageShare("navi_wall"), "navi_wall_description/description", description_file]
