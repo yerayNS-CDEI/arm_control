@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
@@ -12,6 +12,56 @@ from launch.substitutions import (
 from launch_ros.actions import Node, PushRosNamespace
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+def launch_moveit_planner_node(context, *args, **kwargs):
+    """Evaluate substitutions at launch time to set moveit_planner_node parameters."""
+    moveit_mode = context.launch_configurations.get('moveit_mode', 'auto')
+    mode = context.launch_configurations.get('mode', 'arm')
+    moveit_use_sim_time = context.launch_configurations.get('moveit_use_sim_time', 'auto')
+    simulation = context.launch_configurations.get('sim', 'false')
+    hybrid_sim = context.launch_configurations.get('hybrid_sim', 'false')
+    enable_wall_scene_sync = context.launch_configurations.get('enable_wall_scene_sync', 'false')
+    planner_backend = context.launch_configurations.get('planner_backend', 'legacy')
+    
+    # Only launch if planner_backend is 'moveit'
+    if planner_backend != 'moveit':
+        return []
+    
+    # Evaluate effective_moveit_mode: use moveit_mode if not 'auto', else use mode
+    effective_mode = moveit_mode if moveit_mode != 'auto' else mode
+        
+    # Evaluate enable_base_collision: False if effective_mode is 'full', else True
+    enable_base_collision = False if effective_mode == 'full' else True
+    
+    # Evaluate use_sim_time
+    if moveit_use_sim_time != 'auto':
+        use_sim_time = moveit_use_sim_time == 'true'
+    else:
+        use_sim_time = not (simulation == 'false' or hybrid_sim == 'true')
+    
+    # Convert enable_wall_scene_sync to bool
+    wall_scene_sync = enable_wall_scene_sync == 'true'
+    
+    moveit_planner_node = Node(
+        package='arm_control',
+        executable='moveit_planner_node',
+        name='moveit_planner_node',
+        output='screen',
+        parameters=[
+            {
+                'group_name': 'arm_manipulator',
+                'end_effector_link': 'arm_tool0',
+                'planning_frame': 'arm_base',
+                'mode': effective_mode,
+                'use_sim_time': use_sim_time,
+                'enable_wall_scene_sync': wall_scene_sync,
+                'enable_base_collision': enable_base_collision,
+            }
+        ],
+    )
+    
+    return [moveit_planner_node]
 
 
 def generate_launch_description():
@@ -128,6 +178,9 @@ def generate_launch_description():
     joint_controller_type = PythonExpression(
         ["'scaled_joint_trajectory_controller' if '", planner_backend, "' == 'moveit' else 'joint_trajectory_controller'"]
     )
+    # Determine the effective mode for MoveIt (used for moveit_include launch args)
+    # - If moveit_mode is explicitly set (!= 'auto'), use it
+    # - Otherwise, fall back to the general mode parameter
     effective_moveit_mode = PythonExpression(
         ["'", moveit_mode, "' if '", moveit_mode, "' != 'auto' else '", mode, "'"]
     )
@@ -219,23 +272,7 @@ def generate_launch_description():
         condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'moveit'"])),
     )
 
-    moveit_planner_node = Node(
-        package='arm_control',
-        executable='moveit_planner_node',
-        name='moveit_planner_node',
-        output='screen',
-        parameters=[
-            {
-                'group_name': 'arm_manipulator',
-                'end_effector_link': 'arm_tool0',
-                'planning_frame': 'arm_base',
-                'mode': effective_moveit_mode,
-                'use_sim_time': ParameterValue(effective_moveit_use_sim_time, value_type=bool),
-                'enable_wall_scene_sync': ParameterValue(enable_wall_scene_sync, value_type=bool),
-            }
-        ],
-        condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'moveit'"])),
-    )
+    moveit_planner_node_opaque = OpaqueFunction(function=launch_moveit_planner_node)
 
     return LaunchDescription(
         [
@@ -256,6 +293,6 @@ def generate_launch_description():
             enable_wall_scene_sync_arg,
             arm_group,
             moveit_include,
-            moveit_planner_node,
+            moveit_planner_node_opaque,
         ]
     )

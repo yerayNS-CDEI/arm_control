@@ -96,14 +96,30 @@ class MoveItPlannerNode(Node):
             self.get_parameter('base_footprint_z_limits').value
         )
 
-        if self.mode == 'full' and self.enable_base_collision:
+        self.get_logger().info(
+            f"MoveIt planner configuration: mode='{self.mode}', "
+            f"enable_base_collision={self.enable_base_collision}"
+        )
+
+        if self.mode == 'full':
+            if self.enable_base_collision:
+                self.get_logger().info(
+                    'Full mode detected with enable_base_collision=True; '
+                    'disabling legacy synthetic mobile-base collision objects '
+                    'because the full robot URDF already contains the mounted base geometry.'
+                )
+                self.enable_base_collision = False
+                self.enable_base_column_collision = False
+                self.enable_base_footprint_collision = False
+            else:
+                self.get_logger().info(
+                    'Full mode detected with enable_base_collision already False; '
+                    'using URDF geometry for collision checking (no synthetic objects).'
+                )
+        else:
             self.get_logger().info(
-                'Full mode detected; disabling legacy synthetic mobile-base collision objects '
-                'because the full robot URDF already contains the mounted base geometry.'
+                f"Arm-only mode detected; enable_base_collision={self.enable_base_collision}"
             )
-            self.enable_base_collision = False
-            self.enable_base_column_collision = False
-            self.enable_base_footprint_collision = False
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
