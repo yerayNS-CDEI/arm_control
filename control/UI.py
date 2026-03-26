@@ -2583,7 +2583,7 @@ class RobotControlUI(QMainWindow):
         """Read current joint positions from the active joint_states topic and populate input fields."""
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
-        joint_states_topic = self._get_joint_states_topic_for_ui()
+        joint_states_topic = self._get_joint_states_topic_for_ui(context='full')
         
         # Display command in bold green (only if not silent)
         if not silent:
@@ -2926,9 +2926,18 @@ class RobotControlUI(QMainWindow):
             return False
         return self.full_control_hybrid_sim_combo.currentText() == 'true'
 
-    def _get_joint_states_topic_for_ui(self):
-        """Pick the joint_states topic for slider updates/readback."""
-        if self._full_control_uses_arm_namespace():
+    def _get_joint_states_topic_for_ui(self, context='arm'):
+        """Pick the joint_states topic for slider updates/readback based on context and simulation settings."""
+        if context == 'arm':
+            planner_backend = self._get_planner_backend(context='arm')
+            if planner_backend == 'moveit':
+                return '/arm/joint_states'
+            return '/joint_states'
+        # Full Control tab uses namespace when both simulation and hybrid_sim are true
+        if (hasattr(self, 'full_control_sim_mode_combo') and
+            hasattr(self, 'full_control_hybrid_sim_combo') and
+            self.full_control_sim_mode_combo.currentText() == 'true' and
+            self.full_control_hybrid_sim_combo.currentText() == 'true'):
             return '/arm/joint_states'
         return '/joint_states'
 
