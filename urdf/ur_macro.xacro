@@ -46,7 +46,8 @@
     keep_alive_count:=2
     arm_dyn_scale:=0.003
     ee_cylinder_length:=0.15
-    ee_cylinder_radius:=0.035"
+    ee_cylinder_radius:=0.035
+    sensors_offset:=0.05"
 
     >
 
@@ -443,11 +444,11 @@
 
     <!-- ROS-Industrial 'tool0' frame - all-zeros tool frame -->
     <link name="${tf_prefix}tool0"/>
-    <joint name="${tf_prefix}flange-tool0" type="fixed">
+    <joint name="${tf_prefix}ee_cylinder-tool0" type="fixed">
       <!-- default toolframe - X+ left, Y+ up, Z+ front -->
       <!-- Full cylinder length offset along flange X (= cylinder length along tool0 Z) -->
-      <origin xyz="${ee_cylinder_length} 0 0" rpy="${pi/2.0} 0 ${pi/2.0}"/>
-      <parent link="${tf_prefix}flange"/>
+      <origin xyz="0 0 ${sensors_offset + ee_cylinder_length / 2.0}" rpy="0 0 ${pi/2.0}"/>
+      <parent link="${tf_prefix}ee_cylinder_link"/>
       <child link="${tf_prefix}tool0"/>
     </joint>
 
