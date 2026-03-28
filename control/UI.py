@@ -139,6 +139,7 @@ class RobotControlUI(QMainWindow):
         self.arm_sim_mode_combo.addItems(['false', 'true'])
         self.arm_sim_mode_combo.currentTextChanged.connect(self._update_init_box_state)
         self.arm_sim_mode_combo.currentTextChanged.connect(self._update_headless_visibility)
+        self.arm_sim_mode_combo.currentTextChanged.connect(self._update_arm_planner_constraints)
         arm_sim_param_layout.addWidget(self.arm_sim_mode_combo)
         arm_sim_param_layout.addWidget(QLabel("Planner Backend:"))
         self.arm_planner_backend_combo = QComboBox()
@@ -152,7 +153,11 @@ class RobotControlUI(QMainWindow):
         self.arm_hybrid_sim_combo.addItems(['false', 'true'])
         self.arm_hybrid_sim_combo.setCurrentText('true')
         self.arm_hybrid_sim_combo.currentTextChanged.connect(self._update_init_box_state)
+        self.arm_hybrid_sim_combo.currentTextChanged.connect(self._update_arm_planner_constraints)
         arm_sim_param_layout.addWidget(self.arm_hybrid_sim_combo)
+        self.arm_moveit_status_label = QLabel("")
+        self.arm_moveit_status_label.setStyleSheet("color: #0066cc; font-style: italic;")
+        arm_sim_param_layout.addWidget(self.arm_moveit_status_label)
         arm_sim_param_layout.addStretch()
         arm_tab_layout.addLayout(arm_sim_param_layout)
         
@@ -1124,14 +1129,31 @@ class RobotControlUI(QMainWindow):
         self._update_headless_visibility()
 
     def _update_arm_planner_constraints(self):
-        """Lock/unlock URSim selector based on Arm tab planner backend selection."""
+        """Lock/unlock URSim selector based on Arm tab planner backend selection and simulation mode."""
         planner = self._get_planner_backend(context='arm')
         if hasattr(self, 'arm_hybrid_sim_combo'):
             if planner == 'moveit':
-                self.arm_hybrid_sim_combo.setCurrentText('true')
+                # Get current simulation mode
+                sim_mode = self.arm_sim_mode_combo.currentText()
+                # When MoveIt is chosen:
+                # - If simulation is true -> URsim blocked to true
+                # - If simulation is false -> URsim blocked to false (for real robot)
+                ursim_value = 'true' if sim_mode == 'true' else 'false'
+                self.arm_hybrid_sim_combo.setCurrentText(ursim_value)
                 self.arm_hybrid_sim_combo.setEnabled(False)
+
+                # Update status label based on simulation mode
+                if hasattr(self, 'arm_moveit_status_label'):
+                    if sim_mode == 'true':
+                        self.arm_moveit_status_label.setText("Running moveit on URsim [moveit in gazebo not implemented yet]")
+                    else:
+                        self.arm_moveit_status_label.setText("Running moveit in Real Robot")
+                    self.arm_moveit_status_label.setVisible(True)
             else:
                 self.arm_hybrid_sim_combo.setEnabled(True)
+                # Hide status label when not using MoveIt
+                if hasattr(self, 'arm_moveit_status_label'):
+                    self.arm_moveit_status_label.setVisible(False)
 
         # Disable Reset Planner button when backend is moveit
         if hasattr(self, 'btn_arm_reset_planner'):
