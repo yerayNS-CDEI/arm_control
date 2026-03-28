@@ -51,8 +51,8 @@
   <disable_collisions link1="$(arg tf_prefix)ee_cylinder_link" link2="$(arg tf_prefix)wrist_3_link" reason="Never" />
   <disable_collisions link1="$(arg tf_prefix)tool0" link2="$(arg tf_prefix)plate_link" reason="Adjacent" />
   <disable_collisions link1="$(arg tf_prefix)ee_cylinder_link" link2="$(arg tf_prefix)plate_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)plate_link" link2="A_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)plate_link" link2="B_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)plate_link" link2="C_link" reason="Adjacent" />
+  <disable_collisions link1="$(arg tf_prefix)plate_link" link2="$(arg tf_prefix)sensor_A_link" reason="Adjacent" />
+  <disable_collisions link1="$(arg tf_prefix)plate_link" link2="$(arg tf_prefix)sensor_B_link" reason="Adjacent" />
+  <disable_collisions link1="$(arg tf_prefix)plate_link" link2="$(arg tf_prefix)sensor_C_link" reason="Adjacent" />
 
 </robot>

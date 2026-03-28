@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
-from collections import deque
 import math
+import time
+from collections import deque
 from typing import List, Optional, Sequence, Tuple
 
 import rclpy
@@ -137,6 +138,7 @@ class MoveItPlannerNode(Node):
         self._active_wall_object_ids = set()
         self._scene_dirty = self.enable_planning_scene_obstacles
         self._scene_request_in_flight = False
+        self._scene_request_started_at = None
         self._last_logged_wall_panel_count = None
 
         self._action_client = ActionClient(self, MoveGroup, 'move_action')
@@ -411,7 +413,20 @@ class MoveItPlannerNode(Node):
     def maybe_apply_planning_scene(self):
         if not self.enable_planning_scene_obstacles:
             return
-        if not self._scene_dirty or self._scene_request_in_flight:
+        if not self._scene_dirty:
+            return
+        if self._scene_request_in_flight:
+            if (
+                self._scene_request_started_at is not None
+                and (time.monotonic() - self._scene_request_started_at) > 2.0
+            ):
+                self._scene_request_in_flight = False
+                self._scene_request_started_at = None
+                self.get_logger().warn(
+                    'Timed out waiting for ApplyPlanningScene response; retrying scene sync.'
+                )
+            return
+        if not self._action_client.server_is_ready():
             return
         if not self._planning_scene_client.service_is_ready():
             return
@@ -420,11 +435,13 @@ class MoveItPlannerNode(Node):
         request.scene = self.build_planning_scene_diff()
 
         self._scene_request_in_flight = True
+        self._scene_request_started_at = time.monotonic()
         future = self._planning_scene_client.call_async(request)
         future.add_done_callback(self.apply_planning_scene_done_callback)
 
     def apply_planning_scene_done_callback(self, future):
         self._scene_request_in_flight = False
+        self._scene_request_started_at = None
 
         try:
             response = future.result()
