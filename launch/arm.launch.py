@@ -19,6 +19,15 @@ def launch_moveit_planner_node(context, *args, **kwargs):
     moveit_mode = context.launch_configurations.get('moveit_mode', 'auto')
     mode = context.launch_configurations.get('mode', 'arm')
     moveit_use_sim_time = context.launch_configurations.get('moveit_use_sim_time', 'auto')
+    moveit_planning_pipeline = context.launch_configurations.get(
+        'moveit_planning_pipeline', 'pilz_industrial_motion_planner'
+    )
+    moveit_pose_planner_id = context.launch_configurations.get(
+        'moveit_pose_planner_id', 'PTP'
+    )
+    moveit_joint_planner_id = context.launch_configurations.get(
+        'moveit_joint_planner_id', 'PTP'
+    )
     simulation = context.launch_configurations.get('sim', 'false')
     hybrid_sim = context.launch_configurations.get('hybrid_sim', 'false')
     enable_wall_scene_sync = context.launch_configurations.get('enable_wall_scene_sync', 'false')
@@ -55,6 +64,9 @@ def launch_moveit_planner_node(context, *args, **kwargs):
                 'planning_frame': 'arm_base',
                 'mode': effective_mode,
                 'use_sim_time': use_sim_time,
+                'planning_pipeline': moveit_planning_pipeline,
+                'pose_planner_id': moveit_pose_planner_id,
+                'joint_planner_id': moveit_joint_planner_id,
                 'enable_wall_scene_sync': wall_scene_sync,
                 'enable_base_collision': enable_base_collision,
             }
@@ -133,6 +145,21 @@ def generate_launch_description():
         default_value='auto',
         description='MoveIt clock source auto|true|false',
         choices=['auto', 'true', 'false'],
+    )
+    moveit_planning_pipeline_arg = DeclareLaunchArgument(
+        'moveit_planning_pipeline',
+        default_value='pilz_industrial_motion_planner',
+        description='MoveIt pipeline for the custom planner node (move_group or pilz_industrial_motion_planner)',
+    )
+    moveit_pose_planner_id_arg = DeclareLaunchArgument(
+        'moveit_pose_planner_id',
+        default_value='PTP',
+        description='Planner id for pose goals in the custom MoveIt planner node',
+    )
+    moveit_joint_planner_id_arg = DeclareLaunchArgument(
+        'moveit_joint_planner_id',
+        default_value='PTP',
+        description='Planner id for joint goals in the custom MoveIt planner node',
     )
     controllers_file_arg = DeclareLaunchArgument(
         'controllers_file',
@@ -287,6 +314,9 @@ def generate_launch_description():
             mode_arg,
             moveit_mode_arg,
             moveit_use_sim_time_arg,
+            moveit_planning_pipeline_arg,
+            moveit_pose_planner_id_arg,
+            moveit_joint_planner_id_arg,
             controllers_file_arg,
             namespace_arm_arg,
             planner_backend_arg,

@@ -142,15 +142,15 @@ def launch_setup(context, *args, **kwargs):
     }
 
     kinematics_yaml = load_yaml("arm_control", os.path.join("config", "moveit", "kinematics.yaml"))
-    robot_description_kinematics = {
-        "robot_description_kinematics": kinematics_yaml
-    }
+    robot_description_kinematics = {"robot_description_kinematics": kinematics_yaml}
     rviz_kinematics = kinematics_yaml
-    robot_description_planning = {
-        "robot_description_planning": load_yaml(
-            "arm_control", os.path.join("config", "moveit", "joint_limits.yaml")
-        )
-    }
+    robot_description_planning_data = load_yaml(
+        "arm_control", os.path.join("config", "moveit", "joint_limits.yaml")
+    )
+    robot_description_planning_data.update(
+        load_yaml("arm_control", os.path.join("config", "moveit", "pilz_cartesian_limits.yaml"))
+    )
+    robot_description_planning = {"robot_description_planning": robot_description_planning_data}
 
     ompl_planning_pipeline_config = {
         "move_group": {
@@ -168,6 +168,19 @@ def launch_setup(context, *args, **kwargs):
     ompl_planning_pipeline_config["move_group"].update(
         load_yaml("arm_control", os.path.join("config", "moveit", "ompl_planning.yaml"))
     )
+    pilz_planning_pipeline_config = {
+        "pilz_industrial_motion_planner": load_yaml(
+            "arm_control",
+            os.path.join("config", "moveit", "pilz_industrial_motion_planner_planning.yaml"),
+        )
+    }
+    pilz_capabilities = pilz_planning_pipeline_config["pilz_industrial_motion_planner"].get(
+        "capabilities", ""
+    )
+    planning_pipeline_settings = {
+        "planning_pipelines": ["move_group", "pilz_industrial_motion_planner"],
+        "default_planning_pipeline": "move_group",
+    }
 
     controllers_yaml = load_yaml("arm_control", os.path.join("config", "moveit", "controllers.yaml"))
 
@@ -210,7 +223,10 @@ def launch_setup(context, *args, **kwargs):
         {"publish_robot_description_semantic": publish_robot_description_semantic},
         robot_description_kinematics,
         robot_description_planning,
+        planning_pipeline_settings,
         ompl_planning_pipeline_config,
+        pilz_planning_pipeline_config,
+        {"capabilities": pilz_capabilities},
         trajectory_execution,
         moveit_controllers,
         planning_scene_monitor_parameters,
@@ -238,8 +254,9 @@ def launch_setup(context, *args, **kwargs):
             robot_description_semantic,
             {"publish_robot_description_semantic": publish_robot_description_semantic},
             rviz_kinematics,
+            planning_pipeline_settings,
             ompl_planning_pipeline_config,
-            {"default_planning_pipeline": "move_group"},
+            pilz_planning_pipeline_config,
             {"move_group.planning_plugin": "ompl_interface/OMPLPlanner"},
             warehouse_ros_config,
             {"use_sim_time": use_sim_time},
