@@ -18,6 +18,8 @@ def launch_setup(context, *args, **kwargs):
     use_fake_hardware = LaunchConfiguration("use_fake_hardware")
     use_sim_time = LaunchConfiguration("use_sim_time")
     launch_rviz = LaunchConfiguration("launch_rviz")
+    rviz_config_file = LaunchConfiguration("rviz_config_file")
+    joint_states_topic_override = LaunchConfiguration("joint_states_topic")
     publish_robot_description_semantic = LaunchConfiguration(
         "publish_robot_description_semantic"
     )
@@ -27,9 +29,11 @@ def launch_setup(context, *args, **kwargs):
     mode_value = context.perform_substitution(mode).strip().lower()
     arm_namespace_value = context.perform_substitution(namespace_arm).strip().strip("/")
     controller_namespace = f"/{arm_namespace_value}" if arm_namespace_value else ""
-    joint_states_topic = (
-        f"{controller_namespace}/joint_states" if controller_namespace else "/joint_states"
-    )
+    joint_states_topic = context.perform_substitution(joint_states_topic_override).strip()
+    if not joint_states_topic:
+        joint_states_topic = (
+            f"{controller_namespace}/joint_states" if controller_namespace else "/joint_states"
+        )
 
     xacro_executable = PathJoinSubstitution([FindExecutable(name="xacro")])
     if mode_value == "full":
@@ -56,7 +60,7 @@ def launch_setup(context, *args, **kwargs):
         raise RuntimeError(
             f"Mode not recognized: '{mode_value}'. Please select 'full' or 'arm'."
         )
-    rviz_file = PathJoinSubstitution([FindPackageShare("arm_control"), "rviz", "moveit.rviz"])
+    rviz_file = rviz_config_file
 
     joint_limit_params = PathJoinSubstitution(
         [FindPackageShare("ur_description"), "config", ur_type, "joint_limits.yaml"]
@@ -281,6 +285,13 @@ def generate_launch_description():
             DeclareLaunchArgument("use_fake_hardware", default_value="false"),
             DeclareLaunchArgument("use_sim_time", default_value="false"),
             DeclareLaunchArgument("launch_rviz", default_value="true"),
+            DeclareLaunchArgument("joint_states_topic", default_value=""),
+            DeclareLaunchArgument(
+                "rviz_config_file",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("arm_control"), "rviz", "moveit.rviz"]
+                ),
+            ),
             DeclareLaunchArgument(
                 "publish_robot_description_semantic",
                 default_value="true",

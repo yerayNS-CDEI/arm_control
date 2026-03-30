@@ -71,6 +71,7 @@ install(CODE "
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/example_move.py \${LIB_DIR}/example_move)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/exhaustive_scan_node.py \${LIB_DIR}/exhaustive_scan_node)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/freedrive_control.py \${LIB_DIR}/freedrive_control)
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/joint_state_merger_node.py \${LIB_DIR}/joint_state_merger_node)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/position_sender_node.py \${LIB_DIR}/position_sender_node)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/script_command_client_example.py \${LIB_DIR}/script_command_client_example)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/script_command_service_node.py \${LIB_DIR}/script_command_service_node)

@@ -110,6 +110,13 @@ def generate_launch_description():
         default_value='true',
         description='Open RViz from child launch files',
     )
+    rviz_config_file_arg = DeclareLaunchArgument(
+        'rviz_config_file',
+        default_value=PathJoinSubstitution(
+            [FindPackageShare('arm_control'), 'rviz', 'moveit.rviz']
+        ),
+        description='RViz config file for the MoveIt RViz instance',
+    )
     ur_type_arg = DeclareLaunchArgument(
         'ur_type',
         default_value='ur10e',
@@ -161,6 +168,11 @@ def generate_launch_description():
         default_value='PTP',
         description='Planner id for joint goals in the custom MoveIt planner node',
     )
+    moveit_joint_states_topic_arg = DeclareLaunchArgument(
+        'moveit_joint_states_topic',
+        default_value='',
+        description='Optional joint_states topic override for MoveIt',
+    )
     controllers_file_arg = DeclareLaunchArgument(
         'controllers_file',
         default_value='mobile_manipulator_controllers.yaml',
@@ -188,12 +200,14 @@ def generate_launch_description():
     tf_prefix = LaunchConfiguration('tf_prefix')
     prefix = LaunchConfiguration('prefix')
     launch_rviz = LaunchConfiguration('launch_rviz')
+    rviz_config_file = LaunchConfiguration('rviz_config_file')
     ur_type = LaunchConfiguration('ur_type')
     simulation = LaunchConfiguration('sim')
     hybrid_sim = LaunchConfiguration('hybrid_sim')
     mode = LaunchConfiguration('mode')
     moveit_mode = LaunchConfiguration('moveit_mode')
     moveit_use_sim_time = LaunchConfiguration('moveit_use_sim_time')
+    moveit_joint_states_topic = LaunchConfiguration('moveit_joint_states_topic')
     controllers_file = LaunchConfiguration('controllers_file')
     namespace_arm = LaunchConfiguration('namespace_arm')
     planner_backend = LaunchConfiguration('planner_backend')
@@ -295,6 +309,8 @@ def generate_launch_description():
             'use_fake_hardware': use_fake_hardware,
             'use_sim_time': effective_moveit_use_sim_time,
             'launch_rviz': launch_rviz,
+            'rviz_config_file': rviz_config_file,
+            'joint_states_topic': moveit_joint_states_topic,
         }.items(),
         condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'moveit'"])),
     )
@@ -308,6 +324,7 @@ def generate_launch_description():
             tf_prefix_arg,
             prefix_arg,
             launch_rviz_arg,
+            rviz_config_file_arg,
             ur_type_arg,
             simulation_arg,
             hybrid_sim_arg,
@@ -317,6 +334,7 @@ def generate_launch_description():
             moveit_planning_pipeline_arg,
             moveit_pose_planner_id_arg,
             moveit_joint_planner_id_arg,
+            moveit_joint_states_topic_arg,
             controllers_file_arg,
             namespace_arm_arg,
             planner_backend_arg,
