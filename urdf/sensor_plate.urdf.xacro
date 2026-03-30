@@ -2,8 +2,8 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <!-- Macro for single ultrasonic sensor -->
-  <xacro:macro name="ultrasonic_sensor" params="parent_link sensor_name *origin">
-    <link name="${sensor_name}_link">
+  <xacro:macro name="ultrasonic_sensor" params="parent_link tf_prefix sensor_name *origin">
+    <link name="${tf_prefix}${sensor_name}_link">
       <visual>
         <origin xyz="0 0 0" rpy="-1.57 1.57 0"/>
         <geometry>
@@ -27,19 +27,19 @@
       </inertial>
     </link>
     
-    <joint name="${parent_link}_to_${sensor_name}" type="fixed">
+    <joint name="${tf_prefix}${sensor_name}_joint" type="fixed">
       <parent link="${parent_link}"/>
-      <child link="${sensor_name}_link"/>
+      <child link="${tf_prefix}${sensor_name}_link"/>
       <xacro:insert_block name="origin"/>
     </joint>
     
-    <gazebo reference="${sensor_name}_link">
+    <gazebo reference="${tf_prefix}${sensor_name}_link">
       <sensor name="${sensor_name}_sensor" type="gpu_lidar">
         <always_on>true</always_on>
         <update_rate>20</update_rate>
         <visualize>true</visualize>
         <topic>/distance_sensors/${sensor_name}</topic>
-        <gz_frame_id>${sensor_name}_link</gz_frame_id>
+        <gz_frame_id>${tf_prefix}${sensor_name}_link</gz_frame_id>
         <lidar>
           <scan>
             <horizontal>
@@ -99,15 +99,15 @@
     </joint>
 
     <!-- Three ultrasonic sensors -->
-    <xacro:ultrasonic_sensor parent_link="${tf_prefix}plate_link" sensor_name="A">
+    <xacro:ultrasonic_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_A">
       <origin xyz="-0.15 -0.15 0.005" rpy="0 -1.5708 0"/>
     </xacro:ultrasonic_sensor>
     
-    <xacro:ultrasonic_sensor parent_link="${tf_prefix}plate_link" sensor_name="B">
+    <xacro:ultrasonic_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_B">
       <origin xyz="0.15 -0.15 0.005" rpy="0 -1.5708 0"/>
     </xacro:ultrasonic_sensor>
     
-    <xacro:ultrasonic_sensor parent_link="${tf_prefix}plate_link" sensor_name="C">
+    <xacro:ultrasonic_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_C">
       <origin xyz="0 0.15 0.005" rpy="0 -1.5708 0"/>
     </xacro:ultrasonic_sensor>
   </xacro:macro>
