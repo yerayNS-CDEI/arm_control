@@ -147,6 +147,21 @@ class RobotControlUI(QMainWindow):
         self.arm_planner_backend_combo.setCurrentText('legacy')
         self.arm_planner_backend_combo.currentTextChanged.connect(self._update_arm_planner_constraints)
         arm_sim_param_layout.addWidget(self.arm_planner_backend_combo)
+        self.arm_moveit_pipeline_label = QLabel("MoveIt Pipeline:")
+        arm_sim_param_layout.addWidget(self.arm_moveit_pipeline_label)
+        self.arm_moveit_pipeline_combo = QComboBox()
+        self.arm_moveit_pipeline_combo.addItems(['pilz_industrial_motion_planner', 'move_group'])
+        self.arm_moveit_pipeline_combo.setCurrentText('pilz_industrial_motion_planner')
+        self.arm_moveit_pipeline_combo.currentTextChanged.connect(
+            self._update_moveit_option_visibility
+        )
+        arm_sim_param_layout.addWidget(self.arm_moveit_pipeline_combo)
+        self.arm_moveit_planner_id_label = QLabel("Planner ID:")
+        arm_sim_param_layout.addWidget(self.arm_moveit_planner_id_label)
+        self.arm_moveit_planner_id_combo = QComboBox()
+        self.arm_moveit_planner_id_combo.addItems(['PTP', 'LIN'])
+        self.arm_moveit_planner_id_combo.setCurrentText('PTP')
+        arm_sim_param_layout.addWidget(self.arm_moveit_planner_id_combo)
         self.arm_hybrid_sim_label = QLabel("URsim:")
         arm_sim_param_layout.addWidget(self.arm_hybrid_sim_label)
         self.arm_hybrid_sim_combo = QComboBox()
@@ -412,7 +427,7 @@ class RobotControlUI(QMainWindow):
         self.base_headless_label = QLabel("Headless:")
         self.base_headless_combo = QComboBox()
         self.base_headless_combo.addItems(['false', 'true'])
-        self.base_headless_combo.setCurrentText('false')
+        self.base_headless_combo.setCurrentText('true')
         sim_param_layout.addWidget(self.base_headless_label)
         sim_param_layout.addWidget(self.base_headless_combo)
         sim_param_layout.addStretch()
@@ -702,6 +717,21 @@ class RobotControlUI(QMainWindow):
         self.full_control_planner_backend_combo.setCurrentText('legacy')
         self.full_control_planner_backend_combo.currentTextChanged.connect(self._update_full_control_planner_constraints)
         full_control_sim_param_layout.addWidget(self.full_control_planner_backend_combo)
+        self.full_control_moveit_pipeline_label = QLabel("MoveIt Pipeline:")
+        full_control_sim_param_layout.addWidget(self.full_control_moveit_pipeline_label)
+        self.full_control_moveit_pipeline_combo = QComboBox()
+        self.full_control_moveit_pipeline_combo.addItems(['pilz_industrial_motion_planner', 'move_group'])
+        self.full_control_moveit_pipeline_combo.setCurrentText('pilz_industrial_motion_planner')
+        self.full_control_moveit_pipeline_combo.currentTextChanged.connect(
+            self._update_moveit_option_visibility
+        )
+        full_control_sim_param_layout.addWidget(self.full_control_moveit_pipeline_combo)
+        self.full_control_moveit_planner_id_label = QLabel("Planner ID:")
+        full_control_sim_param_layout.addWidget(self.full_control_moveit_planner_id_label)
+        self.full_control_moveit_planner_id_combo = QComboBox()
+        self.full_control_moveit_planner_id_combo.addItems(['PTP', 'LIN'])
+        self.full_control_moveit_planner_id_combo.setCurrentText('PTP')
+        full_control_sim_param_layout.addWidget(self.full_control_moveit_planner_id_combo)
         self.full_control_hybrid_sim_label = QLabel("Hybrid Sim:")
         self.full_control_hybrid_sim_combo = QComboBox()
         self.full_control_hybrid_sim_combo.addItems(['false', 'true'])
@@ -712,7 +742,7 @@ class RobotControlUI(QMainWindow):
         self.full_control_headless_label = QLabel("Headless:")
         self.full_control_headless_combo = QComboBox()
         self.full_control_headless_combo.addItems(['false', 'true'])
-        self.full_control_headless_combo.setCurrentText('false')
+        self.full_control_headless_combo.setCurrentText('true')
         full_control_sim_param_layout.addWidget(self.full_control_headless_label)
         full_control_sim_param_layout.addWidget(self.full_control_headless_combo)
         full_control_sim_param_layout.addStretch()
@@ -811,7 +841,7 @@ class RobotControlUI(QMainWindow):
                 hybrid_sim_combo=self.full_control_hybrid_sim_combo,
             )
         )
-        self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=full controller_type:=<type> hybrid_sim:=<true/false> planner_backend:=<moveit|legacy> headless:=<true/false>")
+        self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=full controller_type:=<type> hybrid_sim:=<true/false> planner_backend:=<moveit|legacy> [moveit_planning_pipeline:=<...> moveit_pose_planner_id:=<...>] headless:=<true/false>")
         full_control_mapping_layout.addWidget(self.btn_full_control_localization)
 
         self.btn_full_control_nav2 = QPushButton("Launch Nav2")
@@ -1162,6 +1192,7 @@ class RobotControlUI(QMainWindow):
         # Update Joint Control tab state based on the active planner tab
         self._update_joint_control_tab_state()
 
+        self._update_moveit_option_visibility()
         self._update_headless_visibility()
         self._update_init_box_state()
 
@@ -1182,8 +1213,48 @@ class RobotControlUI(QMainWindow):
         # Update Joint Control tab state based on the active planner tab
         self._update_joint_control_tab_state()
 
+        self._update_moveit_option_visibility()
         self._update_full_control_init_box_state()
         self._update_headless_visibility()
+
+    def _update_moveit_option_visibility(self):
+        """Show MoveIt pipeline/planner selectors only when they are relevant."""
+        arm_backend_is_moveit = self._get_planner_backend(context='arm') == 'moveit'
+        arm_pipeline_is_pilz = (
+            hasattr(self, 'arm_moveit_pipeline_combo')
+            and self.arm_moveit_pipeline_combo.currentText() == 'pilz_industrial_motion_planner'
+        )
+        if hasattr(self, 'arm_moveit_pipeline_label'):
+            self.arm_moveit_pipeline_label.setVisible(arm_backend_is_moveit)
+        if hasattr(self, 'arm_moveit_pipeline_combo'):
+            self.arm_moveit_pipeline_combo.setVisible(arm_backend_is_moveit)
+        if hasattr(self, 'arm_moveit_planner_id_label'):
+            self.arm_moveit_planner_id_label.setVisible(
+                arm_backend_is_moveit and arm_pipeline_is_pilz
+            )
+        if hasattr(self, 'arm_moveit_planner_id_combo'):
+            self.arm_moveit_planner_id_combo.setVisible(
+                arm_backend_is_moveit and arm_pipeline_is_pilz
+            )
+
+        full_backend_is_moveit = self._get_planner_backend(context='full') == 'moveit'
+        full_pipeline_is_pilz = (
+            hasattr(self, 'full_control_moveit_pipeline_combo')
+            and self.full_control_moveit_pipeline_combo.currentText()
+            == 'pilz_industrial_motion_planner'
+        )
+        if hasattr(self, 'full_control_moveit_pipeline_label'):
+            self.full_control_moveit_pipeline_label.setVisible(full_backend_is_moveit)
+        if hasattr(self, 'full_control_moveit_pipeline_combo'):
+            self.full_control_moveit_pipeline_combo.setVisible(full_backend_is_moveit)
+        if hasattr(self, 'full_control_moveit_planner_id_label'):
+            self.full_control_moveit_planner_id_label.setVisible(
+                full_backend_is_moveit and full_pipeline_is_pilz
+            )
+        if hasattr(self, 'full_control_moveit_planner_id_combo'):
+            self.full_control_moveit_planner_id_combo.setVisible(
+                full_backend_is_moveit and full_pipeline_is_pilz
+            )
 
     def _get_active_planner_context(self):
         """Use the currently open planner tab, falling back to the last Arm/Full tab visited."""
@@ -1500,6 +1571,7 @@ class RobotControlUI(QMainWindow):
             f'planner_backend:={planner_backend}',
             'mode:=arm',
         ]
+        launch_args.extend(self._get_moveit_launch_args(context='arm'))
         if namespace_arm:
             launch_args.append(f'namespace_arm:={namespace_arm}')
         self._toggle_process('arm_launch', self.btn_general_launch, 'Arm',
@@ -1639,9 +1711,8 @@ class RobotControlUI(QMainWindow):
         ]
         if mode == 'full':
             localization_args.append(f'hybrid_sim:={hybrid_sim}')
-            localization_args.append(
-                f'planner_backend:={self._get_planner_backend(context="full")}'
-            )
+            localization_args.append(f'planner_backend:={self._get_planner_backend(context="full")}')
+            localization_args.extend(self._get_moveit_launch_args(context='full'))
         localization_args.append(f'headless:={headless}')
 
         self._toggle_base_process(process_key, button, display_name, 'ros2', localization_args)
@@ -3052,6 +3123,42 @@ class RobotControlUI(QMainWindow):
         if hasattr(self, 'arm_planner_backend_combo'):
             return self.arm_planner_backend_combo.currentText()
         return 'legacy'
+
+    def _get_moveit_planning_pipeline(self, context='arm'):
+        """Pick the MoveIt planning pipeline from the requested tab."""
+        if context == 'full':
+            if hasattr(self, 'full_control_moveit_pipeline_combo'):
+                return self.full_control_moveit_pipeline_combo.currentText()
+        elif hasattr(self, 'arm_moveit_pipeline_combo'):
+            return self.arm_moveit_pipeline_combo.currentText()
+        return 'pilz_industrial_motion_planner'
+
+    def _get_moveit_planner_id(self, context='arm'):
+        """Pick the MoveIt planner id from the requested tab."""
+        if context == 'full':
+            if hasattr(self, 'full_control_moveit_planner_id_combo'):
+                return self.full_control_moveit_planner_id_combo.currentText()
+        elif hasattr(self, 'arm_moveit_planner_id_combo'):
+            return self.arm_moveit_planner_id_combo.currentText()
+        return 'PTP'
+
+    def _get_moveit_launch_args(self, context='arm'):
+        """Build launch arguments for the selected MoveIt pipeline and planner id."""
+        if self._get_planner_backend(context=context) != 'moveit':
+            return []
+
+        planning_pipeline = self._get_moveit_planning_pipeline(context=context)
+        moveit_args = [f'moveit_planning_pipeline:={planning_pipeline}']
+
+        if planning_pipeline == 'pilz_industrial_motion_planner':
+            pose_planner_id = self._get_moveit_planner_id(context=context)
+            moveit_args.append(f'moveit_pose_planner_id:={pose_planner_id}')
+            moveit_args.append('moveit_joint_planner_id:=PTP')
+        else:
+            moveit_args.append('moveit_pose_planner_id:=RRTConnectkConfigDefault')
+            moveit_args.append('moveit_joint_planner_id:=RRTConnectkConfigDefault')
+
+        return moveit_args
 
     def _get_namespace_for_arm_launch(self, planner_backend):
         """Arm launches now stay in the root namespace for both backends."""

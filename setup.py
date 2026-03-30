@@ -27,6 +27,7 @@ setup(
             'example_move = control.example_move:main',
             'exhaustive_scan_node = control.exhaustive_scan_node:main',
             'freedrive_control = control.freedrive_control:main',
+            'joint_state_merger_node = control.joint_state_merger_node:main',
             'position_sender_node = control.position_sender_node:main',
             'publisher_joint_trajectory_planned = control.publisher_joint_trajectory_planned:main',
             'remote_DASHBOARD = control.remote_DASHBOARD:main',

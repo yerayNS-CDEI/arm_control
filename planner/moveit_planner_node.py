@@ -40,6 +40,9 @@ class MoveItPlannerNode(Node):
         self.declare_parameter('end_effector_link', 'arm_tool0')
         self.declare_parameter('planning_frame', 'arm_base')
         self.declare_parameter('mode', 'arm')
+        self.declare_parameter('planning_pipeline', 'pilz_industrial_motion_planner')
+        self.declare_parameter('pose_planner_id', 'PTP')
+        self.declare_parameter('joint_planner_id', 'PTP')
         self.declare_parameter('planning_time', 5.0)
         self.declare_parameter('planning_attempts', 5)
         self.declare_parameter('position_tolerance', 0.002)
@@ -67,6 +70,9 @@ class MoveItPlannerNode(Node):
         self.end_effector_link = self.get_parameter('end_effector_link').value
         self.planning_frame = self.get_parameter('planning_frame').value
         self.mode = str(self.get_parameter('mode').value).strip().lower()
+        self.planning_pipeline = str(self.get_parameter('planning_pipeline').value).strip()
+        self.pose_planner_id = str(self.get_parameter('pose_planner_id').value).strip()
+        self.joint_planner_id = str(self.get_parameter('joint_planner_id').value).strip()
         self.planning_time = float(self.get_parameter('planning_time').value)
         self.planning_attempts = int(self.get_parameter('planning_attempts').value)
         self.position_tolerance = float(self.get_parameter('position_tolerance').value)
@@ -99,6 +105,9 @@ class MoveItPlannerNode(Node):
 
         self.get_logger().info(
             f"MoveIt planner configuration: mode='{self.mode}', "
+            f"pipeline='{self.planning_pipeline or 'default'}', "
+            f"pose_planner_id='{self.pose_planner_id or 'default'}', "
+            f"joint_planner_id='{self.joint_planner_id or 'default'}', "
             f"enable_base_collision={self.enable_base_collision}"
         )
 
@@ -238,6 +247,7 @@ class MoveItPlannerNode(Node):
         self.execution_complete = False
 
         goal_msg = MoveGroup.Goal()
+        self.configure_request_planner(goal_msg.request, goal_type='pose')
         goal_msg.request.group_name = self.group_name
         goal_msg.request.num_planning_attempts = self.planning_attempts
         goal_msg.request.allowed_planning_time = self.planning_time
@@ -270,6 +280,7 @@ class MoveItPlannerNode(Node):
         self.execution_complete = False
 
         goal_msg = MoveGroup.Goal()
+        self.configure_request_planner(goal_msg.request, goal_type='joint')
         goal_msg.request.group_name = self.group_name
         goal_msg.request.num_planning_attempts = self.planning_attempts
         goal_msg.request.allowed_planning_time = self.planning_time
@@ -287,6 +298,14 @@ class MoveItPlannerNode(Node):
         self.get_logger().info('Sending MoveIt joint-space planning+execution goal...')
         future = self._action_client.send_goal_async(goal_msg)
         future.add_done_callback(self.goal_response_callback)
+
+    def configure_request_planner(self, request, goal_type: str):
+        if self.planning_pipeline:
+            request.pipeline_id = self.planning_pipeline
+
+        planner_id = self.pose_planner_id if goal_type == 'pose' else self.joint_planner_id
+        if planner_id:
+            request.planner_id = planner_id
 
     def build_goal_constraints(self, pose: Pose, frame_id: str) -> Constraints:
         constraints = Constraints()
