@@ -73,7 +73,7 @@
       <visual>
         <origin xyz="0 0 0" rpy="-1.57 0 3.14159"/>
         <geometry>
-          <mesh filename="package://navi_wall/navi_wall_description/meshes/sensor_plate.stl" scale="0.001 0.001 0.001"/>
+          <mesh filename="package://navi_wall/navi_wall_description/meshes/sensor_plate.STL" scale="0.001 0.001 0.001"/>
         </geometry>
         <material name="plate_aluminum">
           <color rgba="0.9 0.9 0.9 1.0"/>
@@ -82,7 +82,7 @@
       <collision>
         <origin xyz="0 0 0" rpy="-1.57 0 3.14159"/>
         <geometry>
-          <mesh filename="package://navi_wall/navi_wall_description/meshes/sensor_plate.stl" scale="0.001 0.001 0.001"/>
+          <mesh filename="package://navi_wall/navi_wall_description/meshes/sensor_plate.STL" scale="0.001 0.001 0.001"/>
         </geometry>
       </collision>
       <inertial>
