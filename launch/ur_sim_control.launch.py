@@ -104,6 +104,10 @@ def launch_setup(context, *args, **kwargs):
             " ",
             "initial_positions_file:=",
             initial_positions_file_abs,
+            " ",
+            "simulation:=true",
+            " ",
+            "use_mock_hardware:=true",
         ]
     )
     robot_description = {"robot_description": ParameterValue(value=robot_description_content, value_type=str)}

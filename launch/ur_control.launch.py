@@ -191,6 +191,8 @@ def launch_setup(context, *args, **kwargs):
             "simulation:=",
             base_simulation,  # Inverted back for base (true when parent was true)
             " ",
+            "use_mock_hardware:=false",
+            " ",
             "sim_gazebo:=false",  # Arm never in Gazebo Classic
             " ",
             "sim_ignition:=false",  # Arm always connects to URSim/real, never simulated
