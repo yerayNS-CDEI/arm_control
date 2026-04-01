@@ -43,8 +43,9 @@ def launch_setup(context, *args, **kwargs):
         [FindPackageShare("navi_wall"), "config", controllers_file]
     )
 
-    # Get package share directory for resource path
-    pkg_share = FindPackageShare("arm_control").find("arm_control")
+    # Get package share directories for Gazebo resource lookup.
+    arm_pkg_share = FindPackageShare("arm_control").find("arm_control")
+    navi_wall_pkg_share = FindPackageShare("navi_wall").find("navi_wall")
 
     initial_positions_file_abs = PathJoinSubstitution(
         [FindPackageShare("arm_control"), "config", initial_positions_file]
@@ -103,6 +104,10 @@ def launch_setup(context, *args, **kwargs):
             " ",
             "initial_positions_file:=",
             initial_positions_file_abs,
+            " ",
+            "simulation:=true",
+            " ",
+            "use_mock_hardware:=true",
         ]
     )
     robot_description = {"robot_description": ParameterValue(value=robot_description_content, value_type=str)}
@@ -195,20 +200,30 @@ def launch_setup(context, *args, **kwargs):
     )
 
     # Set GZ_SIM_RESOURCE_PATH so Gazebo can find package:// URIs for meshes
-    set_gz_resource_path = AppendEnvironmentVariable(
+    set_gz_arm_resource_path = AppendEnvironmentVariable(
         name='GZ_SIM_RESOURCE_PATH',
-        value=os.path.dirname(pkg_share),
+        value=os.path.dirname(arm_pkg_share),
+    )
+    set_gz_navi_wall_resource_path = AppendEnvironmentVariable(
+        name='GZ_SIM_RESOURCE_PATH',
+        value=os.path.dirname(navi_wall_pkg_share),
     )
 
     # Also set IGN_GAZEBO_RESOURCE_PATH for backwards compatibility
-    set_ign_resource_path = AppendEnvironmentVariable(
+    set_ign_arm_resource_path = AppendEnvironmentVariable(
         name='IGN_GAZEBO_RESOURCE_PATH',
-        value=os.path.dirname(pkg_share),
+        value=os.path.dirname(arm_pkg_share),
+    )
+    set_ign_navi_wall_resource_path = AppendEnvironmentVariable(
+        name='IGN_GAZEBO_RESOURCE_PATH',
+        value=os.path.dirname(navi_wall_pkg_share),
     )
 
     nodes_to_start = [
-        set_gz_resource_path,
-        set_ign_resource_path,
+        set_gz_arm_resource_path,
+        set_gz_navi_wall_resource_path,
+        set_ign_arm_resource_path,
+        set_ign_navi_wall_resource_path,
         robot_state_publisher_node,
         joint_state_broadcaster_spawner,
         initial_joint_controller_spawner_stopped,
