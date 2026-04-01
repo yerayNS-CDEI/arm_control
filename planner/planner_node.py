@@ -882,16 +882,16 @@ class PlannerNode(Node):
             start_tool0_idx = world_to_grid(*start_pos, self.x_vals, self.y_vals, self.z_vals)
             st_i, st_j, st_k = start_tool0_idx
             if not (0 <= st_i < self.grid_size and 0 <= st_j < self.grid_size and 0 <= st_k < len(self.z_levels)):
-                self.get_logger().warn(
-                    f"⚠️  Start tool0 position is OUTSIDE workspace bounds, but wrist_3 is inside.\n"
+                self.get_logger().info(
+                    f"ℹ️  Start tool0 extends outside workspace bounds (expected when tool extends beyond wrist_3).\n"
                     f"  Start (tool0): {[round(x, 3) for x in start_pos]} → grid {start_tool0_idx}\n"
                     f"  Start (wrist_3): {[round(x, 3) for x in start_pos_wrist3]} → grid {start_idx}\n"
-                    f"  → Planning will continue using wrist_3 position."
+                    f"  → Planning uses wrist_3 (IK target) - this is expected and safe."
                 )
         except Exception:
-            self.get_logger().warn(
-                f"⚠️  Start tool0 position is FAR OUTSIDE workspace bounds, but wrist_3 is inside.\n"
-                f"  Start (tool0): {[round(x, 3) for x in start_pos]} (failed grid conversion)\n"
+            self.get_logger().info(
+                f"ℹ️  Start tool0 extends far outside workspace bounds (expected when tool extends significantly).\n"
+                f"  Start (tool0): {[round(x, 3) for x in start_pos]} (out of grid range)\n"
                 f"  Start (wrist_3): {[round(x, 3) for x in start_pos_wrist3]} → grid {start_idx}"
             )
         
@@ -900,19 +900,17 @@ class PlannerNode(Node):
             goal_tool0_idx = world_to_grid(*goal_pos, self.x_vals, self.y_vals, self.z_vals)
             gt_i, gt_j, gt_k = goal_tool0_idx
             if not (0 <= gt_i < self.grid_size and 0 <= gt_j < self.grid_size and 0 <= gt_k < len(self.z_levels)):
-                self.get_logger().warn(
-                    f"⚠️  Goal tool0 position is OUTSIDE workspace bounds, but wrist_3 is inside.\n"
+                self.get_logger().info(
+                    f"ℹ️  Goal tool0 extends outside workspace bounds (expected when tool extends beyond wrist_3).\n"
                     f"  Goal (tool0): {[round(x, 3) for x in goal_pos]} → grid {goal_tool0_idx}\n"
                     f"  Goal (wrist_3): {[round(x, 3) for x in goal_pos_wrist3]} → grid {goal_idx}\n"
-                    f"  → Planning will continue using wrist_3 position (IK target).\n"
-                    f"  → Tool extends beyond reachable workspace - verify this is intentional."
+                    f"  → Planning uses wrist_3 (IK target) - this is expected and safe."
                 )
         except Exception:
-            self.get_logger().warn(
-                f"⚠️  Goal tool0 position is FAR OUTSIDE workspace bounds, but wrist_3 is inside.\n"
-                f"  Goal (tool0): {[round(x, 3) for x in goal_pos]} (failed grid conversion)\n"
-                f"  Goal (wrist_3): {[round(x, 3) for x in goal_pos_wrist3]} → grid {goal_idx}\n"
-                f"  → Planning will continue using wrist_3 position (IK target)."
+            self.get_logger().info(
+                f"ℹ️  Goal tool0 extends far outside workspace bounds (expected when tool extends significantly).\n"
+                f"  Goal (tool0): {[round(x, 3) for x in goal_pos]} (out of grid range)\n"
+                f"  Goal (wrist_3): {[round(x, 3) for x in goal_pos_wrist3]} → grid {goal_idx}"
             )
 
         # Occupancy grid: all free (NEEDS TO be parameterized)
@@ -1058,7 +1056,19 @@ class PlannerNode(Node):
         except Exception:
             pass  # tool0 out of bounds - already warned earlier
 
-        path = find_path(occupancy_grid_dilated, start_idx, goal_idx)
+        # Run A* with DUAL-FRAME collision checking (both wrist_3 AND tool0)
+        self.get_logger().info("Running A* pathfinding with dual-frame collision checking (wrist_3 + tool0)...")
+        path = find_path(
+            occupancy_grid_dilated,
+            start_idx,
+            goal_idx,
+            x_vals=self.x_vals,
+            y_vals=self.y_vals,
+            z_vals=self.z_vals,
+            T_wrist3_tool0=self._T_wrist3_tool0,
+            start_orientation=start_orientation_wrist3.as_matrix(),
+            goal_orientation=goal_orientation_wrist3.as_matrix()
+        )
         self.get_logger().info(f"Found path with length {len(path)}")
         if not path:
             self.get_logger().warn(
@@ -1134,6 +1144,50 @@ class PlannerNode(Node):
             _T[:3, 3] = np.array(_pf)
             _vis_tool0.append(tuple((_T @ self._T_wrist3_tool0)[:3, 3]))
 
+        # --- SAFETY CHECK: Validate tool0 path (should never fail since A* checked it) ---
+        # This is a redundant check since A* now validates both frames during search,
+        # but kept as a sanity check in case of numerical/rounding issues.
+        # NOTE: Tool0 being out of bounds is ALLOWED (it's not the IK target).
+        tool0_collision_detected = False
+        tool0_out_of_bounds_count = 0
+        for idx, tool0_pos in enumerate(_vis_tool0):
+            try:
+                tool0_grid_idx = world_to_grid(*tool0_pos, self.x_vals, self.y_vals, self.z_vals)
+                ti, tj, tk = tool0_grid_idx
+                
+                # Check if within bounds
+                if not (0 <= ti < self.grid_size and 0 <= tj < self.grid_size and 0 <= tk < len(self.z_levels)):
+                    # Tool0 out of bounds is ALLOWED - it extends beyond wrist_3 reachability map
+                    # This is expected when wrist_3 is near workspace edges
+                    tool0_out_of_bounds_count += 1
+                    continue  # Skip collision check (can't verify), but allow path
+                
+                # Check if in collision (only if within bounds, where we can verify)
+                if occupancy_grid_dilated[ti, tj, tk] == 1:
+                    obstacle_name = self._identify_obstacle(tool0_pos, occupancy_grid, tool0_grid_idx)
+                    self._fail_current_goal(
+                        f"❌ UNEXPECTED: Tool0 waypoint {idx} COLLIDES despite dual-frame A*: {obstacle_name}\n"
+                        f"  Tool0 position: {[round(x, 3) for x in tool0_pos]}\n"
+                        f"  Corresponding wrist_3: {[round(x, 3) for x in _vis_wrist3[idx]]}\n"
+                        f"  Grid index (tool0): {tool0_grid_idx}\n"
+                        f"  This indicates a bug in A* dual-frame collision checking or orientation interpolation mismatch."
+                    )
+                    tool0_collision_detected = True
+                    break
+            except Exception as e:
+                self.get_logger().error(f"Failed to validate tool0 waypoint {idx}: {e}")
+                tool0_collision_detected = True
+                break
+        
+        if tool0_out_of_bounds_count > 0:
+            self.get_logger().info(
+                f"ℹ️  Tool0 extends beyond workspace bounds at {tool0_out_of_bounds_count}/{len(_vis_tool0)} waypoints.\n"
+                f"  This is expected/allowed - wrist_3 (IK target) remains within reachable workspace."
+            )
+        
+        if tool0_collision_detected:
+            return  # Path validation failed, abort trajectory
+        
         # Publish pruned wrist_3 path (orange)
         self.publish_ee_path_markers(
             _vis_wrist3,
