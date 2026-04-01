@@ -53,7 +53,7 @@
    <!-- End-effector cylinder parameters -->
    <xacro:arg name="ee_cylinder_length" default="0.15"/>
    <xacro:arg name="ee_cylinder_radius" default="0.035"/>
-   <xacro:arg name="sensors_offset" default="0.05"/>
+   <xacro:arg name="sensors_offset" default="0.15"/>
 
    <!-- initial position for simulations (Fake Hardware, Gazebo, Ignition) -->
    <xacro:arg name="initial_positions_file" default="$(find arm_control)/config/initial_positions.yaml"/>
