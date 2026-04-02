@@ -1057,6 +1057,7 @@ class PlannerNode(Node):
             pass  # tool0 out of bounds - already warned earlier
 
         # Run A* with DUAL-FRAME collision checking (both wrist_3 AND tool0)
+        # All obstacles (including cylinder) block both frames for safety
         self.get_logger().info("Running A* pathfinding with dual-frame collision checking (wrist_3 + tool0)...")
         path = find_path(
             occupancy_grid_dilated,
@@ -1067,7 +1068,10 @@ class PlannerNode(Node):
             z_vals=self.z_vals,
             T_wrist3_tool0=self._T_wrist3_tool0,
             start_orientation=start_orientation_wrist3.as_matrix(),
-            goal_orientation=goal_orientation_wrist3.as_matrix()
+            goal_orientation=goal_orientation_wrist3.as_matrix(),
+            cylinder_center_xy=self.cyl_center_xy,
+            cylinder_radius=self.cyl_radius,
+            cylinder_z_range=(self.z_min, self.z_max)
         )
         self.get_logger().info(f"Found path with length {len(path)}")
         if not path:
@@ -1085,6 +1089,9 @@ class PlannerNode(Node):
         # Convert path to world coordinates
         path_world_raw = [grid_to_world(i, j, k, self.x_vals, self.y_vals, self.z_vals) for i, j, k in path]
         self.get_logger().info(f"Raw path waypoints (pre-prune): {path_world_raw}")
+        
+        # Keep grid indices for distance-based orientation calculation (matches A*)
+        path_grid_indices = path  # Store grid indices before pruning
         
         # Debug: publish raw path (pre-prune)
         self.publish_ee_path_markers(
@@ -1107,27 +1114,50 @@ class PlannerNode(Node):
             self.get_logger().warn("Path pruned to empty. Falling back to direct goal IK.")
         
         # Interpolate orientations along the (possibly pruned) path (wrist_3 orientations)
+        # CRITICAL: Use DISTANCE-BASED interpolation to match A* orientation computation
+        # (A* uses Euclidean distance in GRID SPACE from start, not waypoint index)
+        # We use the UNPRUNED path distances to match A* exactly, then subset for pruned path
+        
+        # First, compute orientations for ALL waypoints in the unpruned path (matches A* validation)
+        start_idx_array = np.array(start_idx, dtype=float)
+        goal_idx_array = np.array(goal_idx, dtype=float)
+        max_dist_grid = np.linalg.norm(goal_idx_array - start_idx_array)  # Distance in grid index space
+        
+        key_rots = R.from_quat([start_orientation_wrist3.as_quat(), goal_orientation_wrist3.as_quat()])
+        slerp = Slerp([0, 1], key_rots)
+        
+        # Compute orientation for each waypoint in UNPRUNED path using grid-space distances
+        unpruned_orientations = []
+        for grid_idx in path_grid_indices:
+            dist_from_start_grid = np.linalg.norm(np.array(grid_idx, dtype=float) - start_idx_array)
+            progress = min(dist_from_start_grid / max_dist_grid, 1.0) if max_dist_grid > 0 else 0.0
+            orientation = slerp([progress])[0].as_matrix()
+            unpruned_orientations.append(orientation)
+        
+        # Match pruned waypoints to their unpruned counterparts to get consistent orientations
         if path_len == 0:
             # No waypoint orientations needed; we will only use the goal orientation
-            interp_rots = R.from_quat([goal_orientation_wrist3.as_quat()])
-            interp_rot_matrices = interp_rots.as_matrix()
-
-        elif path_len == 1:
-            # Single waypoint: use midpoint orientation (t=0.5) so it is truly intermediate
-            key_rots = R.from_quat([start_orientation_wrist3.as_quat(), goal_orientation_wrist3.as_quat()])
-            slerp = Slerp([0, 1], key_rots)
-            interp_rots = slerp([0.5])
-            interp_rot_matrices = interp_rots.as_matrix()
-
+            interp_rot_matrices = np.array([goal_orientation_wrist3.as_matrix()])
         else:
-            key_rots = R.from_quat([start_orientation_wrist3.as_quat(), goal_orientation_wrist3.as_quat()])
-            slerp = Slerp([0, 1], key_rots)
-            # Exclude t=0 (start) and t=1 (goal) so every waypoint has a strictly
-            # intermediate orientation; the actual start/goal orientations are handled
-            # by the current robot pose and the explicit final IK step respectively.
-            times = np.linspace(0, 1, path_len + 2)[1:-1]
-            interp_rots = slerp(times)
-            interp_rot_matrices = interp_rots.as_matrix()
+            # Find which unpruned waypoints correspond to pruned waypoints
+            # Match by finding closest unpruned position to each pruned position
+            interp_rot_matrices = []
+            for pruned_pos in path_world:
+                # Find closest unpruned waypoint (should be exact match unless floating point drift)
+                min_dist = float('inf')
+                best_idx = 0
+                for i, unpruned_pos in enumerate(path_world_raw):
+                    dist = np.linalg.norm(np.array(pruned_pos) - np.array(unpruned_pos))
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_idx = i
+                interp_rot_matrices.append(unpruned_orientations[best_idx])
+            interp_rot_matrices = np.array(interp_rot_matrices)
+            
+            self.get_logger().info(
+                f"Orientation interpolation: using {len(interp_rot_matrices)} orientations "
+                f"from unpruned path (A*-consistent) for {path_len} pruned waypoints"
+            )
 
         # Build full path lists for visualization (waypoints + final goal)
         if path_len == 0:
@@ -1165,11 +1195,26 @@ class PlannerNode(Node):
                 # Check if in collision (only if within bounds, where we can verify)
                 if occupancy_grid_dilated[ti, tj, tk] == 1:
                     obstacle_name = self._identify_obstacle(tool0_pos, occupancy_grid, tool0_grid_idx)
+                    
+                    # Compute what A* would have seen for debugging
+                    if idx < len(path_grid_indices):
+                        grid_idx_for_waypoint = path_grid_indices[idx]
+                        dist_from_start_grid = np.linalg.norm(
+                            np.array(grid_idx_for_waypoint, dtype=float) - np.array(start_idx, dtype=float)
+                        )
+                        max_dist_grid = np.linalg.norm(
+                            np.array(goal_idx, dtype=float) - np.array(start_idx, dtype=float)
+                        )
+                        a_star_progress = min(dist_from_start_grid / max_dist_grid, 1.0) if max_dist_grid > 0 else 0.0
+                    else:
+                        a_star_progress = 1.0  # Goal
+                    
                     self._fail_current_goal(
                         f"❌ UNEXPECTED: Tool0 waypoint {idx} COLLIDES despite dual-frame A*: {obstacle_name}\n"
                         f"  Tool0 position: {[round(x, 3) for x in tool0_pos]}\n"
                         f"  Corresponding wrist_3: {[round(x, 3) for x in _vis_wrist3[idx]]}\n"
                         f"  Grid index (tool0): {tool0_grid_idx}\n"
+                        f"  A* progress metric: {a_star_progress:.4f}\n"
                         f"  This indicates a bug in A* dual-frame collision checking or orientation interpolation mismatch."
                     )
                     tool0_collision_detected = True
@@ -1214,10 +1259,6 @@ class PlannerNode(Node):
             line_width=0.01,
             sphere_diam=0.02
         )
-
-        # Convert to Euler angles
-        interpolated_euler_angles = interp_rots.as_euler('xyz', degrees=True)
-        # print("Interpolated Euler angles:\n", interpolated_euler_angles)
 
         # Plan joint values
         # home_position = np.array([0.0, -1.2, -2.3, -1.2, 1.57, 0.0])

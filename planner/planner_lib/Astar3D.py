@@ -137,15 +137,18 @@ def check_dual_frame_collision(
     y_vals: np.ndarray,
     z_vals: np.ndarray,
     T_wrist3_tool0: np.ndarray,
-    orientation_matrix: np.ndarray
+    orientation_matrix: np.ndarray,
+    cylinder_center_xy: Tuple[float, float] = None,
+    cylinder_radius: float = None,
+    cylinder_z_range: Tuple[float, float] = None
 ) -> bool:
     """
     Check if both wrist_3 AND tool0 frames are collision-free at a given wrist_3 position.
     
     IMPORTANT CONSTRAINT LOGIC:
     - Wrist_3 MUST be in bounds (it's the IK target, must be in reachable workspace)
-    - Wrist_3 MUST be collision-free
-    - Tool0 MUST be collision-free IF it's within grid bounds
+    - Wrist_3 MUST be collision-free (including ALL obstacles)
+    - Tool0 MUST be collision-free IF it's within grid bounds (including ALL obstacles)
     - Tool0 CAN extend outside grid bounds (it's not the IK target, just a rigid offset)
     
     This allows the arm to utilize its full reachability map (wrist_3 at edges)
@@ -157,6 +160,9 @@ def check_dual_frame_collision(
         x_vals, y_vals, z_vals: World coordinate arrays for grid (defines reachable workspace)
         T_wrist3_tool0: 4x4 transform from wrist_3 to tool0
         orientation_matrix: 3x3 rotation matrix at this position
+        cylinder_center_xy: (x, y) center of cylinder obstacle (optional, currently unused)
+        cylinder_radius: Radius of cylinder (optional, currently unused)
+        cylinder_z_range: (z_min, z_max) of cylinder (optional, currently unused)
     
     Returns:
         True if collision-free, False if collision detected or wrist_3 out of bounds
@@ -204,12 +210,22 @@ def get_valid_neighbors_dual_frame(
     y_vals: np.ndarray = None,
     z_vals: np.ndarray = None,
     T_wrist3_tool0: np.ndarray = None,
-    orientation_matrix: np.ndarray = None
+    slerp = None,
+    start_idx: Tuple[int, int, int] = None,
+    max_dist_grid: float = None,
+    cylinder_center_xy: Tuple[float, float] = None,
+    cylinder_radius: float = None,
+    cylinder_z_range: Tuple[float, float] = None
 ) -> List[Tuple[int, int, int]]:
     """
     Get all valid neighboring positions checking both wrist_3 and tool0 frames.
     
     If dual-frame params are None, falls back to wrist_3-only checking (original behavior).
+    
+    Args:
+        slerp: Scipy Slerp object for orientation interpolation (instead of orientation_matrix)
+        start_idx: Start grid indices for distance calculation
+        max_dist_grid: Maximum distance from start to goal in grid space
     """
     x, y, z = position
     rows, cols, depth = grid.shape
@@ -233,7 +249,7 @@ def get_valid_neighbors_dual_frame(
     
     # If dual-frame checking is disabled, use original logic
     if (x_vals is None or y_vals is None or z_vals is None or 
-        T_wrist3_tool0 is None or orientation_matrix is None):
+        T_wrist3_tool0 is None or slerp is None or start_idx is None or max_dist_grid is None):
         return [
             (nx, ny, nz) for nx, ny, nz in possible_moves
             if 0 <= nx < rows and 0 <= ny < cols and 0 <= nz < depth
@@ -241,11 +257,21 @@ def get_valid_neighbors_dual_frame(
         ]
     
     # Dual-frame checking: validate both wrist_3 AND tool0
+    # CRITICAL: Each neighbor gets its OWN orientation based on its distance from start
     valid_neighbors = []
+    start_idx_array = np.array(start_idx, dtype=float)
+    
     for nx, ny, nz in possible_moves:
+        # Compute orientation specifically for this neighbor
+        neighbor_idx_array = np.array([nx, ny, nz], dtype=float)
+        dist_from_start_grid = np.linalg.norm(neighbor_idx_array - start_idx_array)
+        progress = min(dist_from_start_grid / max_dist_grid, 1.0) if max_dist_grid > 0 else 0.0
+        neighbor_orientation = slerp([progress])[0].as_matrix()
+        
         if check_dual_frame_collision(
             (nx, ny, nz), grid, x_vals, y_vals, z_vals,
-            T_wrist3_tool0, orientation_matrix
+            T_wrist3_tool0, neighbor_orientation,
+            cylinder_center_xy, cylinder_radius, cylinder_z_range
         ):
             valid_neighbors.append((nx, ny, nz))
     
@@ -259,7 +285,10 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
               z_vals: np.ndarray = None,
               T_wrist3_tool0: np.ndarray = None,
               start_orientation: np.ndarray = None,
-              goal_orientation: np.ndarray = None) -> List[Tuple[int, int, int]]:
+              goal_orientation: np.ndarray = None,
+              cylinder_center_xy: Tuple[float, float] = None,
+              cylinder_radius: float = None,
+              cylinder_z_range: Tuple[float, float] = None) -> List[Tuple[int, int, int]]:
     """
     Find the optimal path using A* algorithm.
     
@@ -271,6 +300,9 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
         T_wrist3_tool0: 4x4 transform from wrist_3 to tool0 (optional)
         start_orientation: 3x3 rotation matrix at start (optional)
         goal_orientation: 3x3 rotation matrix at goal (optional)
+        cylinder_center_xy: (x, y) center of cylinder (optional, reserved for future use)
+        cylinder_radius: Radius of cylinder (optional, reserved for future use)
+        cylinder_z_range: (z_min, z_max) of cylinder (optional, reserved for future use)
     
     Returns:
         List of grid positions representing the optimal path
@@ -278,6 +310,7 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
     Note:
         If dual-frame params are provided, A* will check collision for BOTH
         wrist_3 and tool0 at each node. Otherwise, only wrist_3 is checked.
+        All obstacles (including cylinder) block both wrist_3 and tool0.
     """
     # Determine if dual-frame checking is enabled
     dual_frame_enabled = (
@@ -292,8 +325,11 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
         goal_rot = R.from_matrix(goal_orientation)
         slerp = Slerp([0, 1], R.from_quat([start_rot.as_quat(), goal_rot.as_quat()]))
         
-        # Compute diagonal distance for progress estimation
-        max_dist = calculate_heuristic(start, goal)
+        # Compute diagonal distance for progress estimation (in grid index space)
+        max_dist_grid = calculate_heuristic(start, goal)
+    else:
+        slerp = None
+        max_dist_grid = None
     
     # Initialize start node
     start_node = create_node(
@@ -318,19 +354,12 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
             
         closed_set.add(current_pos)
         
-        # Compute orientation at current position (for dual-frame checking)
-        if dual_frame_enabled:
-            # Estimate progress along path (0 at start, 1 at goal)
-            dist_from_start = calculate_heuristic(start, current_pos)
-            progress = min(dist_from_start / max_dist, 1.0) if max_dist > 0 else 0.0
-            current_orientation = slerp([progress])[0].as_matrix()
-        else:
-            current_orientation = None
-        
         # Explore neighbors (with dual-frame collision checking if enabled)
+        # Each neighbor computes its OWN orientation based on distance from start
         for neighbor_pos in get_valid_neighbors_dual_frame(
             grid, current_pos, x_vals, y_vals, z_vals,
-            T_wrist3_tool0, current_orientation
+            T_wrist3_tool0, slerp, start, max_dist_grid,
+            cylinder_center_xy, cylinder_radius, cylinder_z_range
         ):
             # Skip if already explored
             if neighbor_pos in closed_set:
