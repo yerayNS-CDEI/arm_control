@@ -110,6 +110,11 @@ def generate_launch_description():
         default_value='true',
         description='Open RViz from child launch files',
     )
+    ethercat_interface_arg = DeclareLaunchArgument(
+        'ethercat_interface',
+        default_value='eno1',
+        description='Network interface used by the Navi Wall EtherCAT master',
+    )
     rviz_config_file_arg = DeclareLaunchArgument(
         'rviz_config_file',
         default_value=PathJoinSubstitution(
@@ -173,6 +178,16 @@ def generate_launch_description():
         default_value='',
         description='Optional joint_states topic override for MoveIt',
     )
+    moveit_controller_name_arg = DeclareLaunchArgument(
+        'moveit_controller_name',
+        default_value='joint_trajectory_controller',
+        description=(
+            'Trajectory controller used by the MoveIt/real-robot path. '
+            'Defaults to joint_trajectory_controller because scaled_joint_trajectory_controller '
+            'is currently crashing in the Humble UR driver on the real robot.'
+        ),
+        choices=['joint_trajectory_controller', 'scaled_joint_trajectory_controller'],
+    )
     controllers_file_arg = DeclareLaunchArgument(
         'controllers_file',
         default_value='mobile_manipulator_controllers.yaml',
@@ -200,6 +215,7 @@ def generate_launch_description():
     tf_prefix = LaunchConfiguration('tf_prefix')
     prefix = LaunchConfiguration('prefix')
     launch_rviz = LaunchConfiguration('launch_rviz')
+    ethercat_interface = LaunchConfiguration('ethercat_interface')
     rviz_config_file = LaunchConfiguration('rviz_config_file')
     ur_type = LaunchConfiguration('ur_type')
     simulation = LaunchConfiguration('sim')
@@ -208,6 +224,7 @@ def generate_launch_description():
     moveit_mode = LaunchConfiguration('moveit_mode')
     moveit_use_sim_time = LaunchConfiguration('moveit_use_sim_time')
     moveit_joint_states_topic = LaunchConfiguration('moveit_joint_states_topic')
+    moveit_controller_name = LaunchConfiguration('moveit_controller_name')
     controllers_file = LaunchConfiguration('controllers_file')
     namespace_arm = LaunchConfiguration('namespace_arm')
     planner_backend = LaunchConfiguration('planner_backend')
@@ -217,7 +234,13 @@ def generate_launch_description():
     )
 
     joint_controller_type = PythonExpression(
-        ["'scaled_joint_trajectory_controller' if '", planner_backend, "' == 'moveit' else 'joint_trajectory_controller'"]
+        [
+            "'",
+            moveit_controller_name,
+            "' if '",
+            planner_backend,
+            "' == 'moveit' else 'joint_trajectory_controller'",
+        ]
     )
     # Determine the effective mode for MoveIt (used for moveit_include launch args)
     # - If moveit_mode is explicitly set (!= 'auto'), use it
@@ -253,24 +276,25 @@ def generate_launch_description():
                     'prefix': prefix,
                     'mode': mode,
                     'sim': inverted_sim,
+                    'ethercat_interface': ethercat_interface,
                     'stack_launch_rviz': stack_launch_rviz,
                     'initial_joint_controller': joint_controller_type,
                     'activate_joint_controller': 'true',
                 }.items(),
-                condition=IfCondition(hybrid_sim),
+                # condition=IfCondition(hybrid_sim),
             ),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(ur_sim_control_launch),
-                launch_arguments={
-                    'ur_type': ur_type,
-                    'tf_prefix': tf_prefix,
-                    'prefix': prefix,
-                    'mode': mode,
-                    'stack_launch_rviz': stack_launch_rviz,
-                    'controllers_file': controllers_file,
-                }.items(),
-                condition=IfCondition(AndSubstitution(simulation, NotSubstitution(hybrid_sim))),
-            ),
+            # IncludeLaunchDescription(
+            #     PythonLaunchDescriptionSource(ur_sim_control_launch),
+            #     launch_arguments={
+            #         'ur_type': ur_type,
+            #         'tf_prefix': tf_prefix,
+            #         'prefix': prefix,
+            #         'mode': mode,
+            #         'stack_launch_rviz': stack_launch_rviz,
+            #         'controllers_file': controllers_file,
+            #     }.items(),
+            #     condition=IfCondition(AndSubstitution(simulation, NotSubstitution(hybrid_sim))),
+            # ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(publisher_launch),
                 launch_arguments={'check_starting_point': 'false'}.items(),
@@ -311,6 +335,7 @@ def generate_launch_description():
             'launch_rviz': launch_rviz,
             'rviz_config_file': rviz_config_file,
             'joint_states_topic': moveit_joint_states_topic,
+            'default_trajectory_controller': moveit_controller_name,
         }.items(),
         condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'moveit'"])),
     )
@@ -324,6 +349,7 @@ def generate_launch_description():
             tf_prefix_arg,
             prefix_arg,
             launch_rviz_arg,
+            ethercat_interface_arg,
             rviz_config_file_arg,
             ur_type_arg,
             simulation_arg,
@@ -335,6 +361,7 @@ def generate_launch_description():
             moveit_pose_planner_id_arg,
             moveit_joint_planner_id_arg,
             moveit_joint_states_topic_arg,
+            moveit_controller_name_arg,
             controllers_file_arg,
             namespace_arm_arg,
             planner_backend_arg,

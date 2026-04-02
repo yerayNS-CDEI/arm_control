@@ -20,6 +20,7 @@ def launch_setup(context, *args, **kwargs):
     launch_rviz = LaunchConfiguration("launch_rviz")
     rviz_config_file = LaunchConfiguration("rviz_config_file")
     joint_states_topic_override = LaunchConfiguration("joint_states_topic")
+    default_trajectory_controller = LaunchConfiguration("default_trajectory_controller")
     publish_robot_description_semantic = LaunchConfiguration(
         "publish_robot_description_semantic"
     )
@@ -187,14 +188,26 @@ def launch_setup(context, *args, **kwargs):
     }
 
     controllers_yaml = load_yaml("arm_control", os.path.join("config", "moveit", "controllers.yaml"))
+    default_controller_name = context.perform_substitution(default_trajectory_controller).strip()
+    controller_names = list(controllers_yaml["controller_names"])
+    if default_controller_name not in controller_names:
+        raise RuntimeError(
+            f"Unsupported MoveIt trajectory controller '{default_controller_name}'. "
+            f"Expected one of: {controller_names}"
+        )
+    ordered_controller_names = [default_controller_name] + [
+        name for name in controller_names if name != default_controller_name
+    ]
 
     namespaced_controllers_yaml = {"controller_names": []}
-    for controller_name in controllers_yaml["controller_names"]:
+    for controller_name in ordered_controller_names:
         namespaced_name = (
             f"{controller_namespace}/{controller_name}" if controller_namespace else controller_name
         )
         namespaced_controllers_yaml["controller_names"].append(namespaced_name)
-        namespaced_controllers_yaml[namespaced_name] = controllers_yaml[controller_name]
+        controller_config = dict(controllers_yaml[controller_name])
+        controller_config["default"] = controller_name == default_controller_name
+        namespaced_controllers_yaml[namespaced_name] = controller_config
 
     moveit_controllers = {
         "moveit_simple_controller_manager": namespaced_controllers_yaml,
@@ -286,6 +299,12 @@ def generate_launch_description():
             DeclareLaunchArgument("use_sim_time", default_value="false"),
             DeclareLaunchArgument("launch_rviz", default_value="true"),
             DeclareLaunchArgument("joint_states_topic", default_value=""),
+            DeclareLaunchArgument(
+                "default_trajectory_controller",
+                default_value="joint_trajectory_controller",
+                description="MoveIt FollowJointTrajectory controller to prefer for execution.",
+                choices=["joint_trajectory_controller", "scaled_joint_trajectory_controller"],
+            ),
             DeclareLaunchArgument(
                 "rviz_config_file",
                 default_value=PathJoinSubstitution(

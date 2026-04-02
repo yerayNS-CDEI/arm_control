@@ -33,6 +33,7 @@ def launch_setup(context, *args, **kwargs):
     controller_spawner_timeout = LaunchConfiguration("controller_spawner_timeout")
     initial_joint_controller = LaunchConfiguration("initial_joint_controller")
     activate_joint_controller = LaunchConfiguration("activate_joint_controller")
+    ethercat_interface = LaunchConfiguration("ethercat_interface")
     stack_launch_rviz = LaunchConfiguration("stack_launch_rviz")
     headless_mode = LaunchConfiguration("headless_mode")
     launch_dashboard_client = LaunchConfiguration("launch_dashboard_client")
@@ -256,6 +257,11 @@ def launch_setup(context, *args, **kwargs):
         name="dashboard_client",
         output="screen",
         emulate_tty=True,
+        parameters=[
+            {
+                "robot_ip": robot_ip,
+            }
+        ],
     )
 
     tool_communication_node = Node(
@@ -484,6 +490,13 @@ def generate_launch_description():
     )
     declared_arguments.append(
         DeclareLaunchArgument(
+            "ethercat_interface",
+            default_value="eno1",
+            description="Network interface used by the Navi Wall EtherCAT master.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
             "headless_mode",
             default_value="false",
             description="Enable headless mode for robot control",
@@ -499,7 +512,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "initial_joint_controller",
-            default_value="scaled_joint_trajectory_controller",
+            default_value="joint_trajectory_controller",
             choices=[
                 "scaled_joint_trajectory_controller",
                 "joint_trajectory_controller",
@@ -508,7 +521,11 @@ def generate_launch_description():
                 "freedrive_mode_controller",
                 "passthrough_trajectory_controller",
             ],
-            description="Initially loaded robot controller.",
+            description=(
+                "Initially loaded robot controller. Defaults to joint_trajectory_controller "
+                "because scaled_joint_trajectory_controller is currently crashing on the "
+                "real-robot Humble path."
+            ),
         )
     )
     declared_arguments.append(
