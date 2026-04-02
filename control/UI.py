@@ -816,6 +816,11 @@ class RobotControlUI(QMainWindow):
         full_control_mapping_layout = QVBoxLayout()
         full_control_mapping_box.setLayout(full_control_mapping_layout)
 
+        self.btn_full_control_launch = QPushButton("Start Mobile Manipulator")
+        self.btn_full_control_launch.clicked.connect(self.toggle_full_control_launch)
+        self.btn_full_control_launch.setToolTip("ros2 launch navi_wall oliwall_mobile_manipulator.launch.py mode:=full sim:=<mode> hybrid_sim:=<true/false> robot_ip:=<auto> controller_type:=<type> planner_backend:=<moveit|legacy> [moveit_planning_pipeline:=<...> moveit_pose_planner_id:=<...>]")
+        full_control_mapping_layout.addWidget(self.btn_full_control_launch)
+
         self.btn_full_control_mapping = QPushButton("Start Mapping")
         self.btn_full_control_mapping.clicked.connect(
             lambda: self.toggle_mapping(
@@ -1145,26 +1150,30 @@ class RobotControlUI(QMainWindow):
         QTimer.singleShot(1000, self.refresh_topics_list)  # Delay 1s to ensure ROS is ready
         
     def _update_full_control_sim_mode(self):
-        """Sync full control sim mode with arm and base sim modes"""
-        sim_mode = self.full_control_sim_mode_combo.currentText()
-        
-        # Block signals to prevent cascading updates
-        self.arm_sim_mode_combo.blockSignals(True)
-        self.sim_mode_combo.blockSignals(True)
-        
-        self.arm_sim_mode_combo.setCurrentText(sim_mode)
-        self.sim_mode_combo.setCurrentText(sim_mode)
-        
-        self.arm_sim_mode_combo.blockSignals(False)
-        self.sim_mode_combo.blockSignals(False)
-        
-        self._update_full_control_init_box_state()
-        self._update_headless_visibility()
+        """Refresh Full Control state when its simulation mode changes."""
+        self._update_full_control_planner_constraints()
 
     def _on_full_control_hybrid_changed(self):
         """Refresh dependent UI elements when Full Control hybrid_sim changes."""
         self._update_full_control_init_box_state()
         self._update_headless_visibility()
+
+    def _sync_full_control_hybrid_sim_state(self):
+        """Keep Full Control hybrid_sim aligned with the simulation toggle."""
+        sim_mode = (
+            self.full_control_sim_mode_combo.currentText()
+            if hasattr(self, 'full_control_sim_mode_combo')
+            else 'false'
+        )
+        desired_hybrid_sim = 'true' if sim_mode == 'true' else 'false'
+
+        if hasattr(self, 'full_control_hybrid_sim_combo'):
+            previous_signal_state = self.full_control_hybrid_sim_combo.blockSignals(True)
+            self.full_control_hybrid_sim_combo.setCurrentText(desired_hybrid_sim)
+            self.full_control_hybrid_sim_combo.setEnabled(False)
+            self.full_control_hybrid_sim_combo.blockSignals(previous_signal_state)
+
+        return desired_hybrid_sim
 
     def _update_arm_planner_constraints(self):
         """Lock/unlock URSim selector based on Arm tab planner backend selection and simulation mode."""
@@ -1205,14 +1214,9 @@ class RobotControlUI(QMainWindow):
         self._update_init_box_state()
 
     def _update_full_control_planner_constraints(self):
-        """Lock/unlock Hybrid Sim selector based on Full Control planner backend selection."""
+        """Keep Full Control hybrid_sim aligned with simulation and refresh planner UI."""
         planner = self._get_planner_backend(context='full')
-        if hasattr(self, 'full_control_hybrid_sim_combo'):
-            if planner == 'moveit':
-                self.full_control_hybrid_sim_combo.setCurrentText('true')
-                self.full_control_hybrid_sim_combo.setEnabled(False)
-            else:
-                self.full_control_hybrid_sim_combo.setEnabled(True)
+        self._sync_full_control_hybrid_sim_state()
 
         # Disable Reset Planner button when backend is moveit
         if hasattr(self, 'btn_full_control_reset_planner'):
@@ -1287,7 +1291,7 @@ class RobotControlUI(QMainWindow):
     def _update_full_control_init_box_state(self):
         """Disable Full Control initialization only when sim=true and hybrid_sim=false."""
         full_sim_mode = self.full_control_sim_mode_combo.currentText() if hasattr(self, "full_control_sim_mode_combo") else 'false'
-        full_hybrid_mode = self.full_control_hybrid_sim_combo.currentText() if hasattr(self, "full_control_hybrid_sim_combo") else 'false'
+        full_hybrid_mode = self._sync_full_control_hybrid_sim_state()
         should_disable = (full_sim_mode == 'true' and full_hybrid_mode == 'false')
         if hasattr(self, "full_control_init_box"):
             self.full_control_init_box.setEnabled(not should_disable)
@@ -1314,6 +1318,7 @@ class RobotControlUI(QMainWindow):
 
         full_sim_mode = self.full_control_sim_mode_combo.currentText() if hasattr(self, "full_control_sim_mode_combo") else 'false'
         full_visible = (full_sim_mode == 'true')
+        full_hybrid_mode = self._sync_full_control_hybrid_sim_state()
         if hasattr(self, "full_control_headless_label"):
             self.full_control_headless_label.setVisible(full_visible)
         if hasattr(self, "full_control_headless_combo"):
@@ -1326,11 +1331,6 @@ class RobotControlUI(QMainWindow):
             self.full_control_hybrid_sim_combo.setVisible(full_visible)
 
         # In Full Control, headless is only meaningful when hybrid_sim is false.
-        full_hybrid_mode = (
-            self.full_control_hybrid_sim_combo.currentText()
-            if hasattr(self, "full_control_hybrid_sim_combo")
-            else 'false'
-        )
         full_headless_visible = full_visible and (full_hybrid_mode == 'false')
         if hasattr(self, "full_control_headless_label"):
             self.full_control_headless_label.setVisible(full_headless_visible)
@@ -1362,7 +1362,13 @@ class RobotControlUI(QMainWindow):
         """Update tab states based on full control processes"""
         full_running = any(
             key in self.process_map
-            for key in ['full_mapping', 'full_localization', 'full_nav2', 'full_exploration']
+            for key in [
+                'full_mobile_manipulator',
+                'full_mapping',
+                'full_localization',
+                'full_nav2',
+                'full_exploration',
+            ]
         )
 
         if full_running:
@@ -1588,6 +1594,33 @@ class RobotControlUI(QMainWindow):
         # Update tab states
         self._update_tab_states_for_arm()
 
+    def toggle_full_control_launch(self):
+        """Toggle the full mobile manipulator bringup from the Full Control tab."""
+        sim_mode = self.full_control_sim_mode_combo.currentText()
+        hybrid_sim = self._sync_full_control_hybrid_sim_state()
+        controller_type = self.full_control_controller_type_combo.currentText()
+        robot_ip = self._get_robot_ip_for_launch(context='full')
+
+        launch_args = [
+            'launch', 'navi_wall', 'oliwall_mobile_manipulator.launch.py',
+            'mode:=full',
+            f'sim:={sim_mode}',
+            f'hybrid_sim:={hybrid_sim}',
+            f'robot_ip:={robot_ip}',
+            f'controller_type:={controller_type}',
+            f'planner_backend:={self._get_planner_backend(context="full")}',
+        ]
+        launch_args.extend(self._get_moveit_launch_args(context='full'))
+
+        self._toggle_base_process(
+            'full_mobile_manipulator',
+            self.btn_full_control_launch,
+            'Mobile Manipulator',
+            'ros2',
+            launch_args,
+        )
+        self._update_tab_states_for_full_control()
+
     def send_all_status_commands(self, status_text=None):
         """Send all status commands sequentially"""
         if status_text is None:
@@ -1657,7 +1690,10 @@ class RobotControlUI(QMainWindow):
         sim_mode = sim_combo.currentText()
         controller_type = controller_type_combo.currentText()
         headless = headless_combo.currentText() if headless_combo else 'false'
-        hybrid_sim = hybrid_sim_combo.currentText() if hybrid_sim_combo else 'false'
+        if mode == 'full':
+            hybrid_sim = self._sync_full_control_hybrid_sim_state()
+        else:
+            hybrid_sim = hybrid_sim_combo.currentText() if hybrid_sim_combo else 'false'
         
         args = [
             'launch',
@@ -1708,7 +1744,10 @@ class RobotControlUI(QMainWindow):
         sim_mode = sim_combo.currentText()
         controller_type = controller_type_combo.currentText()
         headless = headless_combo.currentText() if headless_combo else 'false'
-        hybrid_sim = hybrid_sim_combo.currentText() if hybrid_sim_combo else 'false'
+        if mode == 'full':
+            hybrid_sim = self._sync_full_control_hybrid_sim_state()
+        else:
+            hybrid_sim = hybrid_sim_combo.currentText() if hybrid_sim_combo else 'false'
         
         process_key = f'{mode}_localization' if mode != 'base' else 'localization'
         display_name = 'Localization'
@@ -2398,7 +2437,8 @@ class RobotControlUI(QMainWindow):
                 self._update_tab_states_for_base()
 
             elif process_key.startswith('full') and any(
-                p in process_key for p in ['mapping', 'localization', 'nav2', 'exploration']
+                p in process_key
+                for p in ['mobile_manipulator', 'mapping', 'localization', 'nav2', 'exploration']
             ):
                 self._update_tab_states_for_full_control()
  
@@ -3090,9 +3130,9 @@ class RobotControlUI(QMainWindow):
                 return False
             return self.arm_hybrid_sim_combo.currentText() == 'true'
 
-        if not hasattr(self, "full_control_hybrid_sim_combo"):
+        if not hasattr(self, "full_control_sim_mode_combo"):
             return False
-        return self.full_control_hybrid_sim_combo.currentText() == 'true'
+        return self._sync_full_control_hybrid_sim_state() == 'true'
 
     def _get_joint_states_topic_for_ui(self, context='arm'):
         """Pick the joint_states topic for slider updates/readback based on context and simulation settings."""
@@ -3102,10 +3142,11 @@ class RobotControlUI(QMainWindow):
                 return '/arm/joint_states'
             return '/joint_states'
         # Full Control tab uses namespace when both simulation and hybrid_sim are true
-        if (hasattr(self, 'full_control_sim_mode_combo') and
-            hasattr(self, 'full_control_hybrid_sim_combo') and
-            self.full_control_sim_mode_combo.currentText() == 'true' and
-            self.full_control_hybrid_sim_combo.currentText() == 'true'):
+        if (
+            hasattr(self, 'full_control_sim_mode_combo')
+            and self.full_control_sim_mode_combo.currentText() == 'true'
+            and self._sync_full_control_hybrid_sim_state() == 'true'
+        ):
             return '/arm/joint_states'
         return '/joint_states'
 
@@ -3176,9 +3217,8 @@ class RobotControlUI(QMainWindow):
         """Only the Full Control hybrid launch keeps the arm stack under /arm."""
         return (
             hasattr(self, 'full_control_sim_mode_combo') and
-            hasattr(self, 'full_control_hybrid_sim_combo') and
             self.full_control_sim_mode_combo.currentText() == 'true' and
-            self.full_control_hybrid_sim_combo.currentText() == 'true'
+            self._sync_full_control_hybrid_sim_state() == 'true'
         )
 
     def _get_robot_ip_for_arm_launch(self):
@@ -3193,10 +3233,11 @@ class RobotControlUI(QMainWindow):
                 return '/arm/emergency_stop'
             return '/emergency_stop'
         # Full Control tab uses namespace when both simulation and hybrid_sim are true
-        if (hasattr(self, 'full_control_sim_mode_combo') and 
-            hasattr(self, 'full_control_hybrid_sim_combo') and
-            self.full_control_sim_mode_combo.currentText() == 'true' and
-            self.full_control_hybrid_sim_combo.currentText() == 'true'):
+        if (
+            hasattr(self, 'full_control_sim_mode_combo')
+            and self.full_control_sim_mode_combo.currentText() == 'true'
+            and self._sync_full_control_hybrid_sim_state() == 'true'
+        ):
             return '/arm/emergency_stop'
         return '/emergency_stop'
 
