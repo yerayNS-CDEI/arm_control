@@ -130,19 +130,171 @@ def reconstruct_path(goal_node: Dict) -> List[Tuple[int, int, int]]:
         
     return path[::-1]  # Reverse to get path from start to goal
 
+def check_dual_frame_collision(
+    wrist3_idx: Tuple[int, int, int],
+    grid: np.ndarray,
+    x_vals: np.ndarray,
+    y_vals: np.ndarray,
+    z_vals: np.ndarray,
+    T_wrist3_tool0: np.ndarray,
+    orientation_matrix: np.ndarray
+) -> bool:
+    """
+    Check if both wrist_3 AND tool0 frames are collision-free at a given wrist_3 position.
+    
+    IMPORTANT CONSTRAINT LOGIC:
+    - Wrist_3 MUST be in bounds (it's the IK target, must be in reachable workspace)
+    - Wrist_3 MUST be collision-free
+    - Tool0 MUST be collision-free IF it's within grid bounds
+    - Tool0 CAN extend outside grid bounds (it's not the IK target, just a rigid offset)
+    
+    This allows the arm to utilize its full reachability map (wrist_3 at edges)
+    while ensuring tool0 doesn't collide when it's checkable.
+    
+    Args:
+        wrist3_idx: Grid indices (i, j, k) of wrist_3 position
+        grid: Occupancy grid (0=free, 1=occupied)
+        x_vals, y_vals, z_vals: World coordinate arrays for grid (defines reachable workspace)
+        T_wrist3_tool0: 4x4 transform from wrist_3 to tool0
+        orientation_matrix: 3x3 rotation matrix at this position
+    
+    Returns:
+        True if collision-free, False if collision detected or wrist_3 out of bounds
+    """
+    i, j, k = wrist3_idx
+    rows, cols, depth = grid.shape
+    
+    # CRITICAL: Wrist_3 must be in reachable workspace bounds
+    if not (0 <= i < rows and 0 <= j < cols and 0 <= k < depth):
+        return False  # Wrist_3 unreachable
+    
+    # CRITICAL: Wrist_3 must not collide with obstacles
+    if grid[i, j, k] == 1:
+        return False  # Wrist_3 in collision
+    
+    # Convert wrist_3 grid position to world coordinates
+    wrist3_world = np.array([x_vals[i], y_vals[j], z_vals[k]])
+    
+    # Compute tool0 world position
+    T_world_wrist3 = np.eye(4)
+    T_world_wrist3[:3, :3] = orientation_matrix
+    T_world_wrist3[:3, 3] = wrist3_world
+    T_world_tool0 = T_world_wrist3 @ T_wrist3_tool0
+    tool0_world = T_world_tool0[:3, 3]
+    
+    # Convert tool0 to grid indices
+    ti = np.argmin(np.abs(x_vals - tool0_world[0]))
+    tj = np.argmin(np.abs(y_vals - tool0_world[1]))
+    tk = np.argmin(np.abs(z_vals - tool0_world[2]))
+    
+    # Check tool0 collision ONLY if within grid bounds
+    # If tool0 extends beyond workspace, we allow it (can't verify collision, but wrist_3 is safe)
+    if (0 <= ti < rows and 0 <= tj < cols and 0 <= tk < depth):
+        if grid[ti, tj, tk] == 1:
+            return False  # Tool0 in collision (within checkable region)
+    # else: tool0 outside grid bounds - allowed (wrist_3 is reachable, tool is just extended)
+    
+    return True  # Wrist_3 reachable and collision-free, tool0 either clear or beyond workspace
+
+
+def get_valid_neighbors_dual_frame(
+    grid: np.ndarray,
+    position: Tuple[int, int, int],
+    x_vals: np.ndarray = None,
+    y_vals: np.ndarray = None,
+    z_vals: np.ndarray = None,
+    T_wrist3_tool0: np.ndarray = None,
+    orientation_matrix: np.ndarray = None
+) -> List[Tuple[int, int, int]]:
+    """
+    Get all valid neighboring positions checking both wrist_3 and tool0 frames.
+    
+    If dual-frame params are None, falls back to wrist_3-only checking (original behavior).
+    """
+    x, y, z = position
+    rows, cols, depth = grid.shape
+    
+    # All possible moves (26-connected grid)
+    possible_moves = [
+        (x+1, y, z), (x-1, y, z),    # Right, Left
+        (x, y+1, z), (x, y-1, z),    # Forward, Backward
+        (x+1, y+1, z), (x-1, y-1, z),  # Diagonal moves x-y
+        (x+1, y-1, z), (x-1, y+1, z),
+        (x, y, z+1), (x, y, z-1),   # Up, Down
+        (x+1, y, z+1), (x-1, y, z+1),   # Diagonal moves x-z
+        (x+1, y, z-1), (x-1, y, z-1),
+        (x, y+1, z+1), (x, y-1, z+1),   # Diagonal moves y-z
+        (x, y+1, z-1), (x, y-1, z-1),
+        (x+1, y+1, z+1), (x+1, y-1, z+1),   # Corner moves
+        (x-1, y+1, z+1), (x-1, y-1, z+1),
+        (x+1, y+1, z-1), (x+1, y-1, z-1),
+        (x-1, y+1, z-1), (x-1, y-1, z-1),
+    ]
+    
+    # If dual-frame checking is disabled, use original logic
+    if (x_vals is None or y_vals is None or z_vals is None or 
+        T_wrist3_tool0 is None or orientation_matrix is None):
+        return [
+            (nx, ny, nz) for nx, ny, nz in possible_moves
+            if 0 <= nx < rows and 0 <= ny < cols and 0 <= nz < depth
+            and grid[nx, ny, nz] == 0
+        ]
+    
+    # Dual-frame checking: validate both wrist_3 AND tool0
+    valid_neighbors = []
+    for nx, ny, nz in possible_moves:
+        if check_dual_frame_collision(
+            (nx, ny, nz), grid, x_vals, y_vals, z_vals,
+            T_wrist3_tool0, orientation_matrix
+        ):
+            valid_neighbors.append((nx, ny, nz))
+    
+    return valid_neighbors
+
+
 def find_path(grid: np.ndarray, start: Tuple[int, int, int], 
-              goal: Tuple[int, int, int]) -> List[Tuple[int, int, int]]:
+              goal: Tuple[int, int, int],
+              x_vals: np.ndarray = None,
+              y_vals: np.ndarray = None,
+              z_vals: np.ndarray = None,
+              T_wrist3_tool0: np.ndarray = None,
+              start_orientation: np.ndarray = None,
+              goal_orientation: np.ndarray = None) -> List[Tuple[int, int, int]]:
     """
     Find the optimal path using A* algorithm.
     
     Args:
-        grid: 2D numpy array (0 = free space, 1 = obstacle)
-        start: Starting position (x, y)
-        goal: Goal position (x, y)
+        grid: 3D numpy array (0 = free space, 1 = obstacle)
+        start: Starting position (i, j, k) grid indices
+        goal: Goal position (i, j, k) grid indices
+        x_vals, y_vals, z_vals: World coordinate arrays (optional, for dual-frame checking)
+        T_wrist3_tool0: 4x4 transform from wrist_3 to tool0 (optional)
+        start_orientation: 3x3 rotation matrix at start (optional)
+        goal_orientation: 3x3 rotation matrix at goal (optional)
     
     Returns:
-        List of positions representing the optimal path
+        List of grid positions representing the optimal path
+        
+    Note:
+        If dual-frame params are provided, A* will check collision for BOTH
+        wrist_3 and tool0 at each node. Otherwise, only wrist_3 is checked.
     """
+    # Determine if dual-frame checking is enabled
+    dual_frame_enabled = (
+        x_vals is not None and y_vals is not None and z_vals is not None and
+        T_wrist3_tool0 is not None and start_orientation is not None and goal_orientation is not None
+    )
+    
+    # Pre-compute orientation interpolation parameters if dual-frame checking
+    if dual_frame_enabled:
+        from scipy.spatial.transform import Rotation as R, Slerp
+        start_rot = R.from_matrix(start_orientation)
+        goal_rot = R.from_matrix(goal_orientation)
+        slerp = Slerp([0, 1], R.from_quat([start_rot.as_quat(), goal_rot.as_quat()]))
+        
+        # Compute diagonal distance for progress estimation
+        max_dist = calculate_heuristic(start, goal)
+    
     # Initialize start node
     start_node = create_node(
         position=start,
@@ -166,8 +318,20 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
             
         closed_set.add(current_pos)
         
-        # Explore neighbors
-        for neighbor_pos in get_valid_neighbors(grid, current_pos):
+        # Compute orientation at current position (for dual-frame checking)
+        if dual_frame_enabled:
+            # Estimate progress along path (0 at start, 1 at goal)
+            dist_from_start = calculate_heuristic(start, current_pos)
+            progress = min(dist_from_start / max_dist, 1.0) if max_dist > 0 else 0.0
+            current_orientation = slerp([progress])[0].as_matrix()
+        else:
+            current_orientation = None
+        
+        # Explore neighbors (with dual-frame collision checking if enabled)
+        for neighbor_pos in get_valid_neighbors_dual_frame(
+            grid, current_pos, x_vals, y_vals, z_vals,
+            T_wrist3_tool0, current_orientation
+        ):
             # Skip if already explored
             if neighbor_pos in closed_set:
                 continue
