@@ -1016,6 +1016,14 @@ class RobotControlUI(QMainWindow):
         btn_kill_process.setMaximumWidth(120)
         btn_kill_process.setStyleSheet("background-color: #d73a49; color: white; font-weight: bold;")
         process_selector_layout.addWidget(btn_kill_process, 0)  # No stretch
+        
+        btn_kill_all = QPushButton("Kill All")
+        btn_kill_all.clicked.connect(self.kill_all_processes)
+        btn_kill_all.setToolTip("Kill all detected processes except UI and ros2 daemon")
+        btn_kill_all.setMaximumWidth(120)
+        btn_kill_all.setStyleSheet("background-color: #8B0000; color: white; font-weight: bold;")
+        process_selector_layout.addWidget(btn_kill_all, 0)  # No stretch
+        
         full_control_troubleshooting_layout.addLayout(process_selector_layout)
 
         full_control_troubleshooting_layout.addStretch()
@@ -3567,6 +3575,88 @@ class RobotControlUI(QMainWindow):
             error_output = process.readAllStandardOutput().data().decode()
             self._append_to_text_widget(self.full_control_status_text, 
                                        f"<span style='color: #d73a49;'>✗ Failed to kill process {pid}: {error_output}</span>")
+    
+    def kill_all_processes(self):
+        """Kill all detected processes except UI itself and ros2 daemon"""
+        if not self.current_process_list:
+            self._append_to_text_widget(self.full_control_status_text, 
+                                       "<span style='color: #d73a49;'>No processes to kill</span>")
+            return
+        
+        # Get our own PID to exclude
+        ui_pid = os.getpid()
+        
+        # Filter processes to kill (exclude UI and ros2 daemon)
+        processes_to_kill = []
+        for process_info in self.current_process_list:
+            pid = process_info['pid']
+            command = process_info['command'].lower()
+            
+            # Skip our own process
+            if int(pid) == ui_pid:
+                continue
+            
+            # Skip ros2 daemon
+            if 'ros2' in command and 'daemon' in command:
+                continue
+            
+            # Skip if it's the UI.py script
+            if 'ui.py' in command:
+                continue
+            
+            processes_to_kill.append(process_info)
+        
+        if not processes_to_kill:
+            self._append_to_text_widget(self.full_control_status_text, 
+                                       "<span style='color: #d73a49;'>No processes to kill (all are protected)</span>")
+            return
+        
+        # Confirm kill all
+        from PyQt5.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, 
+            'Confirm Kill All Processes',
+            f"Are you sure you want to kill {len(processes_to_kill)} process(es)?\n\n"
+            f"This will kill all detected processes except the UI and ros2 daemon.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            killed_count = 0
+            failed_count = 0
+            
+            self._append_to_text_widget(self.full_control_status_text, 
+                                       f"<b style='color: #d73a49;'>▶ Killing {len(processes_to_kill)} process(es)...</b>")
+            
+            for process_info in processes_to_kill:
+                pid = process_info['pid']
+                command = process_info['command']
+                
+                try:
+                    # Use os.kill for synchronous killing
+                    os.kill(int(pid), signal.SIGKILL)
+                    self._append_to_text_widget(self.full_control_status_text, 
+                                               f"<span style='color: #57ab5a;'>✓ Killed PID {pid}: {command[:60]}...</span>")
+                    killed_count += 1
+                except ProcessLookupError:
+                    self._append_to_text_widget(self.full_control_status_text, 
+                                               f"<span style='color: #e3b341;'>⚠ Process {pid} already terminated</span>")
+                    failed_count += 1
+                except PermissionError:
+                    self._append_to_text_widget(self.full_control_status_text, 
+                                               f"<span style='color: #d73a49;'>✗ Permission denied for PID {pid}</span>")
+                    failed_count += 1
+                except Exception as e:
+                    self._append_to_text_widget(self.full_control_status_text, 
+                                               f"<span style='color: #d73a49;'>✗ Failed to kill PID {pid}: {str(e)}</span>")
+                    failed_count += 1
+            
+            self._append_to_text_widget(self.full_control_status_text, 
+                                       f"<b style='color: #57ab5a;'>Finished: {killed_count} killed, {failed_count} failed</b>")
+            
+            # Refresh the process list after killing
+            QTimer.singleShot(500, self.run_full_control_ps_ros)
  
 if __name__ == '__main__':
     app = QApplication(sys.argv)
