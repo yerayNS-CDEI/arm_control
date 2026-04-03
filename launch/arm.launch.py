@@ -4,6 +4,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
     AndSubstitution,
+    OrSubstitution,
     LaunchConfiguration,
     NotSubstitution,
     PathJoinSubstitution,
@@ -281,20 +282,20 @@ def generate_launch_description():
                     'initial_joint_controller': joint_controller_type,
                     'activate_joint_controller': 'true',
                 }.items(),
-                # condition=IfCondition(hybrid_sim),
+                condition=IfCondition(OrSubstitution(NotSubstitution(simulation), hybrid_sim)),
             ),
-            # IncludeLaunchDescription(
-            #     PythonLaunchDescriptionSource(ur_sim_control_launch),
-            #     launch_arguments={
-            #         'ur_type': ur_type,
-            #         'tf_prefix': tf_prefix,
-            #         'prefix': prefix,
-            #         'mode': mode,
-            #         'stack_launch_rviz': stack_launch_rviz,
-            #         'controllers_file': controllers_file,
-            #     }.items(),
-            #     condition=IfCondition(AndSubstitution(simulation, NotSubstitution(hybrid_sim))),
-            # ),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(ur_sim_control_launch),
+                launch_arguments={
+                    'ur_type': ur_type,
+                    'tf_prefix': tf_prefix,
+                    'prefix': prefix,
+                    'mode': mode,
+                    'stack_launch_rviz': stack_launch_rviz,
+                    'controllers_file': controllers_file,
+                }.items(),
+                condition=IfCondition(AndSubstitution(simulation, NotSubstitution(hybrid_sim))),
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(publisher_launch),
                 launch_arguments={'check_starting_point': 'false'}.items(),

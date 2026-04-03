@@ -743,6 +743,9 @@ class RobotControlUI(QMainWindow):
         self.full_control_headless_combo = QComboBox()
         self.full_control_headless_combo.addItems(['false', 'true'])
         self.full_control_headless_combo.setCurrentText('true')
+        self.full_control_headless_combo.currentTextChanged.connect(
+            self._update_full_control_launch_tooltip
+        )
         full_control_sim_param_layout.addWidget(self.full_control_headless_label)
         full_control_sim_param_layout.addWidget(self.full_control_headless_combo)
         full_control_sim_param_layout.addStretch()
@@ -816,9 +819,13 @@ class RobotControlUI(QMainWindow):
         full_control_mapping_layout = QVBoxLayout()
         full_control_mapping_box.setLayout(full_control_mapping_layout)
 
-        self.btn_full_control_launch = QPushButton("Start Mobile Manipulator")
+        self.btn_full_control_launch = QPushButton("Launch Full Robot")
         self.btn_full_control_launch.clicked.connect(self.toggle_full_control_launch)
-        self.btn_full_control_launch.setToolTip("ros2 launch navi_wall oliwall_mobile_manipulator.launch.py mode:=full sim:=<mode> hybrid_sim:=<true/false> robot_ip:=<auto> controller_type:=<type> planner_backend:=<moveit|legacy> [moveit_planning_pipeline:=<...> moveit_pose_planner_id:=<...>]")
+        self.btn_full_control_launch.setToolTip(
+            "Uses `ros2 launch navi_wall hybrid_simulation.launch.py` when "
+            "`hybrid_sim=true`, otherwise `ros2 launch navi_wall "
+            "oliwall_mobile_manipulator.launch.py`."
+        )
         full_control_mapping_layout.addWidget(self.btn_full_control_launch)
 
         self.btn_full_control_mapping = QPushButton("Start Mapping")
@@ -1157,23 +1164,88 @@ class RobotControlUI(QMainWindow):
         """Refresh dependent UI elements when Full Control hybrid_sim changes."""
         self._update_full_control_init_box_state()
         self._update_headless_visibility()
+        self._update_full_control_launch_tooltip()
+
+    def _get_base_process_start_text(self, process_key, name):
+        """Return the idle button label for base/full-control launch buttons."""
+        if process_key == 'full_mobile_manipulator':
+            return 'Launch Full Robot'
+        return f"Start {name}"
+
+    def _get_base_process_stop_text(self, process_key, name):
+        """Return the running button label for base/full-control launch buttons."""
+        if process_key == 'full_mobile_manipulator':
+            return 'Stop Full Robot'
+        return f"Stop {name}"
 
     def _sync_full_control_hybrid_sim_state(self):
-        """Keep Full Control hybrid_sim aligned with the simulation toggle."""
+        """Apply Full Control hybrid_sim constraints and return the effective value."""
         sim_mode = (
             self.full_control_sim_mode_combo.currentText()
             if hasattr(self, 'full_control_sim_mode_combo')
             else 'false'
         )
-        desired_hybrid_sim = 'true' if sim_mode == 'true' else 'false'
+        planner_backend = self._get_planner_backend(context='full')
+
+        if sim_mode != 'true':
+            desired_hybrid_sim = 'false'
+            should_lock_hybrid_sim = True
+        elif planner_backend == 'moveit':
+            desired_hybrid_sim = 'true'
+            should_lock_hybrid_sim = True
+        elif hasattr(self, 'full_control_hybrid_sim_combo'):
+            desired_hybrid_sim = self.full_control_hybrid_sim_combo.currentText()
+            should_lock_hybrid_sim = False
+        else:
+            desired_hybrid_sim = 'false'
+            should_lock_hybrid_sim = False
 
         if hasattr(self, 'full_control_hybrid_sim_combo'):
             previous_signal_state = self.full_control_hybrid_sim_combo.blockSignals(True)
-            self.full_control_hybrid_sim_combo.setCurrentText(desired_hybrid_sim)
-            self.full_control_hybrid_sim_combo.setEnabled(False)
+            if should_lock_hybrid_sim:
+                self.full_control_hybrid_sim_combo.setCurrentText(desired_hybrid_sim)
+            self.full_control_hybrid_sim_combo.setEnabled(not should_lock_hybrid_sim)
             self.full_control_hybrid_sim_combo.blockSignals(previous_signal_state)
 
         return desired_hybrid_sim
+
+    def _get_full_control_launch_file(self, hybrid_sim=None):
+        """Pick the Full Control launch file from the effective hybrid_sim value."""
+        if hybrid_sim is None:
+            hybrid_sim = self._sync_full_control_hybrid_sim_state()
+        if hybrid_sim == 'true':
+            return 'hybrid_simulation.launch.py'
+        return 'oliwall_mobile_manipulator.launch.py'
+
+    def _update_full_control_launch_tooltip(self):
+        """Keep the Full Control launch tooltip aligned with the selected launch file."""
+        if not hasattr(self, 'btn_full_control_launch'):
+            return
+
+        hybrid_sim = self._sync_full_control_hybrid_sim_state()
+        launch_file = self._get_full_control_launch_file(hybrid_sim=hybrid_sim)
+        headless = (
+            self.full_control_headless_combo.currentText()
+            if hasattr(self, 'full_control_headless_combo')
+            else 'false'
+        )
+
+        if launch_file == 'hybrid_simulation.launch.py':
+            tooltip = (
+                "ros2 launch navi_wall hybrid_simulation.launch.py "
+                "mode:=full robot_ip:=<auto> controller_type:=<type> "
+                f"planner_backend:=<moveit|legacy> headless:={headless} "
+                "[moveit_planning_pipeline:=<...> moveit_pose_planner_id:=<...>]"
+            )
+        else:
+            tooltip = (
+                "ros2 launch navi_wall oliwall_mobile_manipulator.launch.py "
+                "mode:=full sim:=<mode> hybrid_sim:=<true/false> robot_ip:=<auto> "
+                f"controller_type:=<type> planner_backend:=<moveit|legacy> headless:={headless} "
+                "[moveit_planning_pipeline:=<...> moveit_pose_planner_id:=<...>]"
+            )
+
+        self.btn_full_control_launch.setToolTip(tooltip)
 
     def _update_arm_planner_constraints(self):
         """Lock/unlock URSim selector based on Arm tab planner backend selection and simulation mode."""
@@ -1228,6 +1300,7 @@ class RobotControlUI(QMainWindow):
         self._update_moveit_option_visibility()
         self._update_full_control_init_box_state()
         self._update_headless_visibility()
+        self._update_full_control_launch_tooltip()
 
     def _update_moveit_option_visibility(self):
         """Show MoveIt pipeline/planner selectors only when they are relevant."""
@@ -1598,24 +1671,32 @@ class RobotControlUI(QMainWindow):
         """Toggle the full mobile manipulator bringup from the Full Control tab."""
         sim_mode = self.full_control_sim_mode_combo.currentText()
         hybrid_sim = self._sync_full_control_hybrid_sim_state()
+        launch_file = self._get_full_control_launch_file(hybrid_sim=hybrid_sim)
         controller_type = self.full_control_controller_type_combo.currentText()
+        headless = self.full_control_headless_combo.currentText()
         robot_ip = self._get_robot_ip_for_launch(context='full')
 
         launch_args = [
-            'launch', 'navi_wall', 'oliwall_mobile_manipulator.launch.py',
+            'launch', 'navi_wall', launch_file,
             'mode:=full',
-            f'sim:={sim_mode}',
-            f'hybrid_sim:={hybrid_sim}',
             f'robot_ip:={robot_ip}',
             f'controller_type:={controller_type}',
             f'planner_backend:={self._get_planner_backend(context="full")}',
+            f'headless:={headless}',
         ]
+        if launch_file == 'oliwall_mobile_manipulator.launch.py':
+            launch_args.extend([
+                f'sim:={sim_mode}',
+                f'hybrid_sim:={hybrid_sim}',
+            ])
         launch_args.extend(self._get_moveit_launch_args(context='full'))
+        if 'full_mobile_manipulator' not in self.process_map:
+            self.btn_full_control_launch.setProperty('uses_gazebo', sim_mode == 'true')
 
         self._toggle_base_process(
             'full_mobile_manipulator',
             self.btn_full_control_launch,
-            'Mobile Manipulator',
+            'Full Robot',
             'ros2',
             launch_args,
         )
@@ -2307,16 +2388,32 @@ class RobotControlUI(QMainWindow):
                 process.kill()
                 process.waitForFinished(2000)
 
-            # Kill Gazebo processes when stopping mapping or localization
-            if 'mapping' in process_key or 'localization' in process_key:
+            # Kill orphaned launch children/Gazebo for simulator-backed launches.
+            if process_key == 'full_mobile_manipulator' and pid:
+                try:
+                    subprocess.run(['pkill', '-9', '-P', str(pid)], timeout=2, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+                self._cleanup_ros_children_of_pid(pid)
+
+            uses_gazebo = bool(button.property('uses_gazebo'))
+
+            # Kill Gazebo processes when stopping mapping, localization, or a sim-backed full robot bringup
+            if (
+                'mapping' in process_key
+                or 'localization' in process_key
+                or (process_key == 'full_mobile_manipulator' and uses_gazebo)
+            ):
                 self._kill_gazebo_processes()
 
             # Final cleanup
             if process_key in self.process_map:
                 del self.process_map[process_key]
 
-            button.setText(f"Start {name}")
+            button.setText(self._get_base_process_start_text(process_key, name))
             button.setStyleSheet("")
+            if process_key == 'full_mobile_manipulator':
+                button.setProperty('uses_gazebo', False)
             status_text.append(f"⏹ Stopped {name}")
 
             # Re‑enable mutually exclusive buttons
@@ -2352,7 +2449,7 @@ class RobotControlUI(QMainWindow):
 
             process.start(program, args)
             self.process_map[process_key] = process
-            button.setText(f"Stop {name}")
+            button.setText(self._get_base_process_stop_text(process_key, name))
             button.setStyleSheet("background-color:#4CAF50; color:white; font-weight:bold;")
 
 
@@ -2406,7 +2503,7 @@ class RobotControlUI(QMainWindow):
         """Handle when a base process finishes unexpectedly"""
         if process_key in self.process_map:
             del self.process_map[process_key]
-            button.setText(f"Start {name}")
+            button.setText(self._get_base_process_start_text(process_key, name))
             button.setStyleSheet("")
             
             # Determine which status text to use
@@ -2416,6 +2513,10 @@ class RobotControlUI(QMainWindow):
                 status_text = self.base_status_text
             
             status_text.append(f"{name} exited")
+
+            if process_key == 'full_mobile_manipulator' and bool(button.property('uses_gazebo')):
+                self._kill_gazebo_processes()
+                button.setProperty('uses_gazebo', False)
             
             # Re-enable mutually exclusive buttons
             if 'mapping' in process_key:
