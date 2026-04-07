@@ -34,7 +34,10 @@ class PositionSenderNode(Node):
         
         # Publishers for planner goals
         self.pose_goal_pub = self.create_publisher(PoseStamped, '/arm/goal_pose', 10)
+        self.pose_goal_ptp_pub = self.create_publisher(PoseStamped, '/arm/goal_pose_ptp', 10)
+        self.pose_goal_ompl_pub = self.create_publisher(PoseStamped, '/arm/goal_pose_ompl', 10)
         self.joint_goal_pub = self.create_publisher(JointState, '/arm/joint_goal', 10)
+        self.joint_goal_ptp_pub = self.create_publisher(JointState, '/arm/joint_goal_ptp', 10)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
         self.marker_pub = self.create_publisher(Marker, 'goal_pose_marker', 10)
         
@@ -168,6 +171,7 @@ class PositionSenderNode(Node):
             'arm_wrist_2_joint',
             'arm_wrist_3_joint'
         ]
+        self.ompl_pose_positions = {'folded_fsm', 'unfolded_fsm'}
         self.joint_indices = None
         
         # Timer for checking status
@@ -255,8 +259,22 @@ class PositionSenderNode(Node):
             self.get_logger().error(msg)
             return False, msg
 
-        if self.pose_goal_pub.get_subscription_count() == 0:
-            msg = "No planner subscriber detected on /arm/goal_pose. Goal not sent."
+        if self.planner_backend == 'moveit':
+            if position_name in self.ompl_pose_positions:
+                pose_goal_pub = self.pose_goal_ompl_pub
+                goal_topic = '/arm/goal_pose_ompl'
+                goal_label = 'OMPL pose goal'
+            else:
+                pose_goal_pub = self.pose_goal_ptp_pub
+                goal_topic = '/arm/goal_pose_ptp'
+                goal_label = 'PTP pose goal'
+        else:
+            pose_goal_pub = self.pose_goal_pub
+            goal_topic = '/arm/goal_pose'
+            goal_label = 'planner goal'
+
+        if pose_goal_pub.get_subscription_count() == 0:
+            msg = f"No planner subscriber detected on {goal_topic}. Goal not sent."
             self.get_logger().warn(msg)
             return False, msg
             
@@ -276,17 +294,17 @@ class PositionSenderNode(Node):
         msg.pose.orientation.z = pose_data[5]
         msg.pose.orientation.w = pose_data[6]
         
-        self.pose_goal_pub.publish(msg)
+        pose_goal_pub.publish(msg)
         
         self.goal_sent = True
         self.movement_done = False
         self.current_position_name = position_name
         
-        self.get_logger().info(f"→ Sending position '{position_name}' to planner...")
+        self.get_logger().info(f"→ Sending position '{position_name}' as a {goal_label}...")
         self.get_logger().info(f"   Position: x={pose_data[0]:.3f}, y={pose_data[1]:.3f}, z={pose_data[2]:.3f}")
         self.get_logger().info(f"   Orientation: x={pose_data[3]:.3f}, y={pose_data[4]:.3f}, z={pose_data[5]:.3f}, w={pose_data[6]:.3f}")
-        
-        success_msg = f"Position '{position_name}' sent to planner successfully"
+
+        success_msg = f"Position '{position_name}' sent successfully via {goal_label}"
         return True, success_msg
 
     def send_joint_goal(self, position_name, joint_data):
@@ -296,8 +314,11 @@ class PositionSenderNode(Node):
             self.get_logger().error(msg)
             return False, msg
 
-        if self.joint_goal_pub.get_subscription_count() == 0:
-            msg = "No MoveIt subscriber detected on /arm/joint_goal. Joint goal not sent."
+        joint_goal_pub = self.joint_goal_ptp_pub
+        goal_topic = '/arm/joint_goal_ptp'
+
+        if joint_goal_pub.get_subscription_count() == 0:
+            msg = f"No MoveIt subscriber detected on {goal_topic}. Joint goal not sent."
             self.get_logger().warn(msg)
             return False, msg
 
@@ -306,17 +327,17 @@ class PositionSenderNode(Node):
         msg.name = list(self.expected_joint_names)
         msg.position = [float(value) for value in joint_data]
 
-        self.joint_goal_pub.publish(msg)
+        joint_goal_pub.publish(msg)
 
         self.goal_sent = True
         self.movement_done = False
         self.current_position_name = position_name
 
         joint_values_text = ", ".join(f"{value:.3f}" for value in msg.position)
-        self.get_logger().info(f"→ Sending joint goal '{position_name}' to MoveIt...")
+        self.get_logger().info(f"→ Sending joint goal '{position_name}' to MoveIt PTP...")
         self.get_logger().info(f"   Joints: [{joint_values_text}]")
 
-        success_msg = f"Joint goal '{position_name}' sent to MoveIt successfully"
+        success_msg = f"Joint goal '{position_name}' sent to MoveIt PTP successfully"
         return True, success_msg
     
     def check_status(self):

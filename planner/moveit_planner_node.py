@@ -10,6 +10,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
+from builtin_interfaces.msg import Duration as DurationMsg
 from geometry_msgs.msg import Point, Pose, PoseStamped
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import (
@@ -19,8 +20,9 @@ from moveit_msgs.msg import (
     OrientationConstraint,
     PlanningScene,
     PositionConstraint,
+    RobotState,
 )
-from moveit_msgs.srv import ApplyPlanningScene
+from moveit_msgs.srv import ApplyPlanningScene, GetPositionIK
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import Mesh, MeshTriangle, SolidPrimitive
 from std_msgs.msg import Bool
@@ -32,6 +34,9 @@ class MoveItPlannerNode(Node):
     WALL_OBJECT_PREFIX = 'scan_wall_panel_'
     BASE_COLUMN_OBJECT_ID = 'mobile_base_column'
     BASE_FOOTPRINT_OBJECT_ID = 'mobile_base_footprint'
+    PILZ_PIPELINE_ID = 'pilz_industrial_motion_planner'
+    OMPL_PIPELINE_ID = 'move_group'
+    OMPL_POSE_PLANNER_ID = 'RRTConnectkConfigDefault'
 
     def __init__(self):
         super().__init__('moveit_planner_node')
@@ -43,6 +48,17 @@ class MoveItPlannerNode(Node):
         self.declare_parameter('planning_pipeline', 'pilz_industrial_motion_planner')
         self.declare_parameter('pose_planner_id', 'PTP')
         self.declare_parameter('joint_planner_id', 'PTP')
+        self.declare_parameter(
+            'arm_joint_names',
+            [
+                'arm_shoulder_pan_joint',
+                'arm_shoulder_lift_joint',
+                'arm_elbow_joint',
+                'arm_wrist_1_joint',
+                'arm_wrist_2_joint',
+                'arm_wrist_3_joint',
+            ],
+        )
         self.declare_parameter('planning_time', 5.0)
         self.declare_parameter('planning_attempts', 5)
         self.declare_parameter('position_tolerance', 0.002)
@@ -73,6 +89,7 @@ class MoveItPlannerNode(Node):
         self.planning_pipeline = str(self.get_parameter('planning_pipeline').value).strip()
         self.pose_planner_id = str(self.get_parameter('pose_planner_id').value).strip()
         self.joint_planner_id = str(self.get_parameter('joint_planner_id').value).strip()
+        self.arm_joint_names = list(self.get_parameter('arm_joint_names').value)
         self.planning_time = float(self.get_parameter('planning_time').value)
         self.planning_attempts = int(self.get_parameter('planning_attempts').value)
         self.position_tolerance = float(self.get_parameter('position_tolerance').value)
@@ -152,9 +169,19 @@ class MoveItPlannerNode(Node):
 
         self._action_client = ActionClient(self, MoveGroup, 'move_action')
         self._planning_scene_client = self.create_client(ApplyPlanningScene, 'apply_planning_scene')
+        self._compute_ik_client = self.create_client(GetPositionIK, 'compute_ik')
+        self._current_joint_state: Optional[JointState] = None
 
         self.create_subscription(PoseStamped, '/arm/goal_pose', self.goal_callback, 10)
+        self.create_subscription(PoseStamped, '/arm/goal_pose_ptp', self.goal_ptp_callback, 10)
+        self.create_subscription(PoseStamped, '/arm/goal_pose_lin', self.goal_lin_callback, 10)
+        self.create_subscription(PoseStamped, '/arm/goal_pose_ompl', self.goal_ompl_callback, 10)
         self.create_subscription(JointState, '/arm/joint_goal', self.joint_goal_callback, 10)
+        self.create_subscription(JointState, '/arm/joint_goal_ptp', self.joint_goal_ptp_callback, 10)
+        self.create_subscription(JointState, 'joint_states', self.current_joint_state_callback, 10)
+        self.create_subscription(JointState, '/joint_states', self.current_joint_state_callback, 10)
+        self.create_subscription(JointState, '/arm/joint_states', self.current_joint_state_callback, 10)
+        self.create_subscription(JointState, '/moveit_joint_states', self.current_joint_state_callback, 10)
         self.create_subscription(Bool, 'emergency_stop', self.emergency_callback, qos)
         self.create_subscription(Bool, '/arm/emergency_stop', self.emergency_callback, qos)
         if self.enable_planning_scene_obstacles and self.enable_wall_scene_sync:
@@ -182,14 +209,64 @@ class MoveItPlannerNode(Node):
         )
 
     def goal_callback(self, msg: PoseStamped):
-        self.goal_queue.append(('pose', msg))
-        frame_id = msg.header.frame_id or self.planning_frame
-        self.get_logger().info(
-            f"Queued MoveIt goal in frame '{frame_id}' at "
-            f"({msg.pose.position.x:.3f}, {msg.pose.position.y:.3f}, {msg.pose.position.z:.3f})."
+        self.enqueue_pose_goal(msg)
+
+    def goal_ptp_callback(self, msg: PoseStamped):
+        self.enqueue_pose_goal(
+            msg,
+            pipeline_id=self.PILZ_PIPELINE_ID,
+            planner_id='PTP',
+            source_label='PTP pose',
+        )
+
+    def goal_lin_callback(self, msg: PoseStamped):
+        self.enqueue_pose_goal(
+            msg,
+            pipeline_id=self.PILZ_PIPELINE_ID,
+            planner_id='LIN',
+            source_label='LIN pose',
+        )
+
+    def goal_ompl_callback(self, msg: PoseStamped):
+        self.enqueue_pose_goal(
+            msg,
+            pipeline_id=self.OMPL_PIPELINE_ID,
+            planner_id=self.OMPL_POSE_PLANNER_ID,
+            source_label='OMPL pose',
         )
 
     def joint_goal_callback(self, msg: JointState):
+        self.enqueue_joint_goal(msg)
+
+    def joint_goal_ptp_callback(self, msg: JointState):
+        self.enqueue_joint_goal(
+            msg,
+            pipeline_id=self.PILZ_PIPELINE_ID,
+            planner_id='PTP',
+            source_label='PTP joint',
+        )
+
+    def enqueue_pose_goal(
+        self,
+        msg: PoseStamped,
+        pipeline_id: Optional[str] = None,
+        planner_id: Optional[str] = None,
+        source_label: str = 'default pose',
+    ):
+        self.goal_queue.append(('pose', msg, pipeline_id, planner_id, source_label))
+        frame_id = msg.header.frame_id or self.planning_frame
+        self.get_logger().info(
+            f"Queued {source_label} MoveIt goal in frame '{frame_id}' at "
+            f"({msg.pose.position.x:.3f}, {msg.pose.position.y:.3f}, {msg.pose.position.z:.3f})."
+        )
+
+    def enqueue_joint_goal(
+        self,
+        msg: JointState,
+        pipeline_id: Optional[str] = None,
+        planner_id: Optional[str] = None,
+        source_label: str = 'default joint',
+    ):
         if len(msg.name) != len(msg.position):
             self.get_logger().error(
                 'Ignoring joint goal: joint name and position arrays have different lengths.'
@@ -200,17 +277,22 @@ class MoveItPlannerNode(Node):
             self.get_logger().error('Ignoring joint goal: no joint names were provided.')
             return
 
-        self.goal_queue.append(('joint', msg))
+        self.goal_queue.append(('joint', msg, pipeline_id, planner_id, source_label))
         joint_summary = ', '.join(
             f"{joint_name}={position:.3f}"
             for joint_name, position in zip(msg.name, msg.position)
         )
-        self.get_logger().info(f"Queued MoveIt joint goal: {joint_summary}.")
+        self.get_logger().info(f"Queued {source_label} MoveIt joint goal: {joint_summary}.")
 
     def emergency_callback(self, msg: Bool):
         self.emergency_stop = bool(msg.data)
         if self.emergency_stop:
             self.cancel_active_goal('Emergency stop topic received.')
+
+    def current_joint_state_callback(self, msg: JointState):
+        if not msg.name or len(msg.name) != len(msg.position):
+            return
+        self._current_joint_state = msg
 
     def handle_emergency_stop(self, request, response):
         del request
@@ -237,17 +319,65 @@ class MoveItPlannerNode(Node):
             if not self._action_client.server_is_ready():
                 self.get_logger().warn('Waiting for MoveIt move_action server...')
                 return
-            goal_type, goal_msg = self.goal_queue.popleft()
+            goal_type, goal_msg, pipeline_id, planner_id, source_label = self.goal_queue.popleft()
             if goal_type == 'joint':
-                self.send_move_group_joint_goal(goal_msg)
+                self.send_move_group_joint_goal(
+                    goal_msg,
+                    pipeline_id=pipeline_id,
+                    planner_id=planner_id,
+                    source_label=source_label,
+                )
             else:
-                self.send_move_group_goal(goal_msg)
+                self.send_move_group_goal(
+                    goal_msg,
+                    pipeline_id=pipeline_id,
+                    planner_id=planner_id,
+                    source_label=source_label,
+                )
 
-    def send_move_group_goal(self, goal_pose: PoseStamped):
+    def send_move_group_goal(
+        self,
+        goal_pose: PoseStamped,
+        pipeline_id: Optional[str] = None,
+        planner_id: Optional[str] = None,
+        source_label: str = 'default pose',
+        use_seeded_ik: bool = True,
+    ):
+        planner_name = planner_id if planner_id is not None else self.pose_planner_id
+        pipeline_name = pipeline_id if pipeline_id is not None else self.planning_pipeline
+        if use_seeded_ik and self.should_seed_pose_goal_with_ik(planner_name, pipeline_name):
+            if self.try_seed_pose_goal_with_ik(
+                goal_pose,
+                pipeline_id=pipeline_id,
+                planner_id=planner_id,
+                source_label=source_label,
+            ):
+                return
+
+        self.dispatch_pose_goal(
+            goal_pose,
+            pipeline_id=pipeline_id,
+            planner_id=planner_id,
+            source_label=source_label,
+        )
+
+    def dispatch_pose_goal(
+        self,
+        goal_pose: PoseStamped,
+        pipeline_id: Optional[str] = None,
+        planner_id: Optional[str] = None,
+        source_label: str = 'default pose',
+    ):
+
         self.execution_complete = False
 
         goal_msg = MoveGroup.Goal()
-        self.configure_request_planner(goal_msg.request, goal_type='pose')
+        self.configure_request_planner(
+            goal_msg.request,
+            goal_type='pose',
+            pipeline_id=pipeline_id,
+            planner_id=planner_id,
+        )
         goal_msg.request.group_name = self.group_name
         goal_msg.request.num_planning_attempts = self.planning_attempts
         goal_msg.request.allowed_planning_time = self.planning_time
@@ -272,15 +402,183 @@ class MoveItPlannerNode(Node):
         goal_msg.planning_options.replan_delay = 0.2
 
         self.goal_failed_pub.publish(Bool(data=False))
-        self.get_logger().info('Sending MoveIt planning+execution goal...')
+        self.get_logger().info(
+            f"Sending {source_label} MoveIt planning+execution goal "
+            f"(pipeline='{goal_msg.request.pipeline_id or 'default'}', "
+            f"planner='{goal_msg.request.planner_id or 'default'}')."
+        )
         future = self._action_client.send_goal_async(goal_msg)
         future.add_done_callback(self.goal_response_callback)
 
-    def send_move_group_joint_goal(self, joint_goal: JointState):
+    def should_seed_pose_goal_with_ik(
+        self,
+        planner_id: Optional[str],
+        pipeline_id: Optional[str],
+    ) -> bool:
+        planner_name = (planner_id or '').strip().upper()
+        pipeline_name = (pipeline_id or '').strip()
+        return planner_name == 'PTP' and pipeline_name == self.PILZ_PIPELINE_ID
+
+    def try_seed_pose_goal_with_ik(
+        self,
+        goal_pose: PoseStamped,
+        pipeline_id: Optional[str],
+        planner_id: Optional[str],
+        source_label: str,
+    ) -> bool:
+        if self._current_joint_state is None:
+            self.get_logger().warn(
+                f'No current joint state available to seed IK for {source_label}; '
+                'falling back to direct pose planning.'
+            )
+            return False
+        if not self._compute_ik_client.service_is_ready():
+            self.get_logger().warn(
+                f'compute_ik service is not ready for {source_label}; '
+                'falling back to direct pose planning.'
+            )
+            return False
+
+        request = GetPositionIK.Request()
+        request.ik_request.group_name = self.group_name
+        request.ik_request.ik_link_name = self.end_effector_link
+        request.ik_request.pose_stamped = goal_pose
+        request.ik_request.avoid_collisions = True
+        request.ik_request.timeout = DurationMsg(sec=0, nanosec=300_000_000)
+
+        robot_state = RobotState()
+        robot_state.joint_state = self._current_joint_state
+        robot_state.is_diff = False
+        request.ik_request.robot_state = robot_state
+
+        self.execution_complete = False
+        self.goal_failed_pub.publish(Bool(data=False))
+        self.get_logger().info(
+            f"Resolving {source_label} pose goal to a seeded IK solution before Pilz PTP."
+        )
+        future = self._compute_ik_client.call_async(request)
+        future.add_done_callback(
+            lambda fut: self.ik_response_callback(
+                fut,
+                goal_pose=goal_pose,
+                pipeline_id=pipeline_id,
+                planner_id=planner_id,
+                source_label=source_label,
+            )
+        )
+        return True
+
+    def ik_response_callback(
+        self,
+        future,
+        *,
+        goal_pose: PoseStamped,
+        pipeline_id: Optional[str],
+        planner_id: Optional[str],
+        source_label: str,
+    ):
+        try:
+            response = future.result()
+        except Exception as exc:
+            self.get_logger().warn(
+                f'Seeded IK request for {source_label} raised an exception: {exc}. '
+                'Falling back to direct pose planning.'
+            )
+            self.send_move_group_goal_without_seed(
+                goal_pose,
+                pipeline_id=pipeline_id,
+                planner_id=planner_id,
+                source_label=source_label,
+            )
+            return
+
+        if response is None or response.error_code.val != response.error_code.SUCCESS:
+            error_code = response.error_code.val if response is not None else 'unknown'
+            self.get_logger().warn(
+                f'Seeded IK request for {source_label} failed with error code {error_code}; '
+                'falling back to direct pose planning.'
+            )
+            self.send_move_group_goal_without_seed(
+                goal_pose,
+                pipeline_id=pipeline_id,
+                planner_id=planner_id,
+                source_label=source_label,
+            )
+            return
+
+        joint_goal = self.joint_goal_from_robot_state(response.solution)
+        if joint_goal is None:
+            self.get_logger().warn(
+                f'Seeded IK solution for {source_label} did not contain the expected arm joints; '
+                'falling back to direct pose planning.'
+            )
+            self.send_move_group_goal_without_seed(
+                goal_pose,
+                pipeline_id=pipeline_id,
+                planner_id=planner_id,
+                source_label=source_label,
+            )
+            return
+
+        self.get_logger().info(
+            f'Using seeded IK solution for {source_label} before Pilz PTP execution.'
+        )
+        self.send_move_group_joint_goal(
+            joint_goal,
+            pipeline_id=pipeline_id,
+            planner_id=planner_id,
+            source_label=f'{source_label} (seeded IK)',
+        )
+
+    def send_move_group_goal_without_seed(
+        self,
+        goal_pose: PoseStamped,
+        pipeline_id: Optional[str],
+        planner_id: Optional[str],
+        source_label: str,
+    ):
+        self.send_move_group_goal(
+            goal_pose,
+            pipeline_id=pipeline_id,
+            planner_id=planner_id,
+            source_label=source_label,
+            use_seeded_ik=False,
+        )
+
+    def joint_goal_from_robot_state(self, robot_state: RobotState) -> Optional[JointState]:
+        joint_state = robot_state.joint_state
+        if not joint_state.name or len(joint_state.name) != len(joint_state.position):
+            return None
+
+        positions_by_name = {
+            name: float(position)
+            for name, position in zip(joint_state.name, joint_state.position)
+        }
+        if any(name not in positions_by_name for name in self.arm_joint_names):
+            return None
+
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = list(self.arm_joint_names)
+        msg.position = [positions_by_name[name] for name in self.arm_joint_names]
+        return msg
+
+    def send_move_group_joint_goal(
+        self,
+        joint_goal: JointState,
+        pipeline_id: Optional[str] = None,
+        planner_id: Optional[str] = None,
+        source_label: str = 'default joint',
+    ):
         self.execution_complete = False
 
         goal_msg = MoveGroup.Goal()
-        self.configure_request_planner(goal_msg.request, goal_type='joint')
+        self.configure_request_planner(
+            goal_msg.request,
+            goal_type='joint',
+            pipeline_id=pipeline_id,
+            planner_id=planner_id,
+        )
         goal_msg.request.group_name = self.group_name
         goal_msg.request.num_planning_attempts = self.planning_attempts
         goal_msg.request.allowed_planning_time = self.planning_time
@@ -295,15 +593,27 @@ class MoveItPlannerNode(Node):
         goal_msg.planning_options.replan_delay = 0.2
 
         self.goal_failed_pub.publish(Bool(data=False))
-        self.get_logger().info('Sending MoveIt joint-space planning+execution goal...')
+        self.get_logger().info(
+            f"Sending {source_label} MoveIt joint-space planning+execution goal "
+            f"(pipeline='{goal_msg.request.pipeline_id or 'default'}', "
+            f"planner='{goal_msg.request.planner_id or 'default'}')."
+        )
         future = self._action_client.send_goal_async(goal_msg)
         future.add_done_callback(self.goal_response_callback)
 
-    def configure_request_planner(self, request, goal_type: str):
-        if self.planning_pipeline:
-            request.pipeline_id = self.planning_pipeline
+    def configure_request_planner(
+        self,
+        request,
+        goal_type: str,
+        pipeline_id: Optional[str] = None,
+        planner_id: Optional[str] = None,
+    ):
+        selected_pipeline_id = pipeline_id if pipeline_id is not None else self.planning_pipeline
+        if selected_pipeline_id:
+            request.pipeline_id = selected_pipeline_id
 
-        planner_id = self.pose_planner_id if goal_type == 'pose' else self.joint_planner_id
+        if planner_id is None:
+            planner_id = self.pose_planner_id if goal_type == 'pose' else self.joint_planner_id
         if planner_id:
             request.planner_id = planner_id
 
