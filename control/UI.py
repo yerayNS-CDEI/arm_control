@@ -1673,6 +1673,7 @@ class RobotControlUI(QMainWindow):
         hybrid_sim = self._sync_full_control_hybrid_sim_state()
         launch_file = self._get_full_control_launch_file(hybrid_sim=hybrid_sim)
         controller_type = self.full_control_controller_type_combo.currentText()
+        publish_controller_odom_tf = 'true'
         headless = self.full_control_headless_combo.currentText()
         robot_ip = self._get_robot_ip_for_launch(context='full')
 
@@ -1681,6 +1682,7 @@ class RobotControlUI(QMainWindow):
             'mode:=full',
             f'robot_ip:={robot_ip}',
             f'controller_type:={controller_type}',
+            f'publish_controller_odom_tf:={publish_controller_odom_tf}',
             f'planner_backend:={self._get_planner_backend(context="full")}',
             f'headless:={headless}',
         ]

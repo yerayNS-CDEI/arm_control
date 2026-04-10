@@ -14,6 +14,7 @@ from launch.substitutions import Command, FindExecutable, LaunchConfiguration, P
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+from nav2_common.launch import RewrittenYaml
 import os
 
 def launch_setup(context, *args, **kwargs):
@@ -34,6 +35,7 @@ def launch_setup(context, *args, **kwargs):
     gazebo_gui = LaunchConfiguration("gazebo_gui")
     # My arguments
     mode = LaunchConfiguration("mode")
+    publish_controller_odom_tf = LaunchConfiguration("publish_controller_odom_tf")
 
     stack_launch_rviz_enabled = (
         context.perform_substitution(stack_launch_rviz).strip().lower() == "true"
@@ -41,6 +43,14 @@ def launch_setup(context, *args, **kwargs):
 
     initial_joint_controllers = PathJoinSubstitution(
         [FindPackageShare("navi_wall"), "config", controllers_file]
+    )
+    configured_joint_controllers = RewrittenYaml(
+        source_file=initial_joint_controllers,
+        param_rewrites={
+            'should_publish_tf': publish_controller_odom_tf,
+            'should_publish_odom': publish_controller_odom_tf,
+        },
+        convert_types=True,
     )
 
     # Get package share directories for Gazebo resource lookup.
@@ -100,7 +110,7 @@ def launch_setup(context, *args, **kwargs):
             "sim_ignition:=true",
             " ",
             "simulation_controllers:=",
-            initial_joint_controllers,
+            configured_joint_controllers,
             " ",
             "initial_positions_file:=",
             initial_positions_file_abs,
@@ -125,6 +135,7 @@ def launch_setup(context, *args, **kwargs):
         name="rviz2",
         output="log",
         arguments=["-d", rviz_config_file],
+        parameters=[{"use_sim_time": True}],
     )
 
     joint_state_broadcaster_spawner = Node(
@@ -289,6 +300,13 @@ def generate_launch_description():
             "controllers_file",
             default_value="mobile_manipulator_controllers.yaml",
             description="YAML file with the controllers configuration.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "publish_controller_odom_tf",
+            default_value="false",
+            description="Override controller YAMLs so the controller publishes odom and TF.",
         )
     )
     declared_arguments.append(

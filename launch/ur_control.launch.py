@@ -14,6 +14,7 @@ from launch.substitutions import (
     PathJoinSubstitution,
     PythonExpression,
 )
+from nav2_common.launch import RewrittenYaml
 
 def launch_setup(context, *args, **kwargs):
     # Initialize Arguments
@@ -54,6 +55,7 @@ def launch_setup(context, *args, **kwargs):
     # My arguments
     mode = LaunchConfiguration("mode")
     sim = LaunchConfiguration("sim")
+    publish_controller_odom_tf = LaunchConfiguration("publish_controller_odom_tf")
     
     # sim is inverted from arm.launch.py, so invert back for base simulation
     base_simulation = NotSubstitution(sim)
@@ -210,6 +212,17 @@ def launch_setup(context, *args, **kwargs):
     initial_joint_controllers = PathJoinSubstitution(
         [FindPackageShare("navi_wall"), "config", controllers_file]
     )
+    configured_joint_controllers = ParameterFile(
+        RewrittenYaml(
+            source_file=initial_joint_controllers,
+            param_rewrites={
+                'should_publish_tf': publish_controller_odom_tf,
+                'should_publish_odom': publish_controller_odom_tf,
+            },
+            convert_types=True,
+        ),
+        allow_substs=True,
+    )
 
     rviz_config_file = PathJoinSubstitution(
         [FindPackageShare("arm_control"),"rviz", "view_robot.rviz"]
@@ -230,7 +243,7 @@ def launch_setup(context, *args, **kwargs):
         parameters=[
             robot_description,
             update_rate_config_file,
-            ParameterFile(initial_joint_controllers, allow_substs=True),
+            configured_joint_controllers,
         ],
         output="screen",
         condition=IfCondition(use_fake_hardware),
@@ -242,7 +255,7 @@ def launch_setup(context, *args, **kwargs):
         parameters=[
             robot_description,
             update_rate_config_file,
-            ParameterFile(initial_joint_controllers, allow_substs=True),
+            configured_joint_controllers,
         ],
         output="screen",
         condition=UnlessCondition(use_fake_hardware),
@@ -441,6 +454,13 @@ def generate_launch_description():
             "controllers_file",
             default_value="mobile_manipulator_controllers.yaml",
             description="YAML file with the controllers configuration.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "publish_controller_odom_tf",
+            default_value="false",
+            description="Override controller YAMLs so the controller publishes odom and TF.",
         )
     )
     declared_arguments.append(

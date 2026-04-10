@@ -194,6 +194,11 @@ def generate_launch_description():
         default_value='mobile_manipulator_controllers.yaml',
         description='Controller configuration file for simulation launches',
     )
+    publish_controller_odom_tf_arg = DeclareLaunchArgument(
+        'publish_controller_odom_tf',
+        default_value='false',
+        description='Override controller YAMLs so the controller publishes odom and TF.',
+    )
     namespace_arm_arg = DeclareLaunchArgument(
         'namespace_arm',
         default_value='',
@@ -227,6 +232,7 @@ def generate_launch_description():
     moveit_joint_states_topic = LaunchConfiguration('moveit_joint_states_topic')
     moveit_controller_name = LaunchConfiguration('moveit_controller_name')
     controllers_file = LaunchConfiguration('controllers_file')
+    publish_controller_odom_tf = LaunchConfiguration('publish_controller_odom_tf')
     namespace_arm = LaunchConfiguration('namespace_arm')
     planner_backend = LaunchConfiguration('planner_backend')
     enable_wall_scene_sync = LaunchConfiguration('enable_wall_scene_sync')
@@ -281,6 +287,7 @@ def generate_launch_description():
                     'stack_launch_rviz': stack_launch_rviz,
                     'initial_joint_controller': joint_controller_type,
                     'activate_joint_controller': 'true',
+                    'publish_controller_odom_tf': publish_controller_odom_tf,
                 }.items(),
                 condition=IfCondition(OrSubstitution(NotSubstitution(simulation), hybrid_sim)),
             ),
@@ -293,6 +300,7 @@ def generate_launch_description():
                     'mode': mode,
                     'stack_launch_rviz': stack_launch_rviz,
                     'controllers_file': controllers_file,
+                    'publish_controller_odom_tf': publish_controller_odom_tf,
                 }.items(),
                 condition=IfCondition(AndSubstitution(simulation, NotSubstitution(hybrid_sim))),
             ),
@@ -364,6 +372,7 @@ def generate_launch_description():
             moveit_joint_states_topic_arg,
             moveit_controller_name_arg,
             controllers_file_arg,
+            publish_controller_odom_tf_arg,
             namespace_arm_arg,
             planner_backend_arg,
             enable_wall_scene_sync_arg,
