@@ -129,8 +129,8 @@ class HyperspectralNode(Node):
 
         # Connect sensors (LenzClient handles keepalive automatically)
         self.get_logger().info("Connecting to VIS and NIR sensors...")
-        self.vis = LenzClient(vis_ip)
-        self.nir = LenzClient(nir_ip)
+        self.vis = LenzClient(vis_ip, timeout=15.0)
+        self.nir = LenzClient(nir_ip, timeout=15.0)
 
         try:
             self.vis.connect()
@@ -236,6 +236,7 @@ class HyperspectralNode(Node):
             self.nir.flush_buffer()
             time.sleep(0.1)
             self.vis.wait_after_ping(0.5)
+            self.nir.pause_keepalive()
             self.nir.wait_after_ping(0.5)
             
             # Enviar la comanda de calibració
@@ -259,6 +260,8 @@ class HyperspectralNode(Node):
             t_vis.join()
             t_nir.join()
             
+            self.nir.resume_keepalive()
+
             # GUARDEM LES DADES DE CALIBRACIÓ!
             if (isinstance(results["VIS"], dict) and "spectrum" in results["VIS"] and 
                 isinstance(results["NIR"], dict) and "spectrum" in results["NIR"]):
@@ -355,6 +358,7 @@ class HyperspectralNode(Node):
 
                 # Wait for safe timing window after PNG
                 self.vis.wait_after_ping(0.5)
+                self.nir.pause_keepalive() 
                 self.nir.wait_after_ping(0.5)
 
                 # Send commands
@@ -375,8 +379,8 @@ class HyperspectralNode(Node):
                         pass
                     
                     time.sleep(2)
-                    self.vis = LenzClient(self.get_parameter("vis_ip").value)
-                    self.nir = LenzClient(self.get_parameter("nir_ip").value)
+                    self.vis = LenzClient(self.get_parameter("vis_ip").value, timeout=15.0)
+                    self.nir = LenzClient(self.get_parameter("nir_ip").value, timeout=15.0)
                     self.vis.connect()
                     self.nir.connect()
                     time.sleep(3)

@@ -29,6 +29,8 @@ class LenzClient:
         self.last_ping_time = time.time()
         # Ping més ràpid (cada 1s) per mantenir el sensor ben despert
         self.next_ping_time = time.time() + 1.0 
+        #Flag per aturar els pings sense tancar el fil de xarxa
+        self.ping_paused = False
 
     def connect(self, retries=3):
         last_error = None
@@ -51,7 +53,7 @@ class LenzClient:
     def _keepalive_loop(self):
         while self.running:
             now = time.time()
-            if now >= self.next_ping_time:
+            if now >= self.next_ping_time and not self.ping_paused:
                 with self.tx_lock:
                     try:
                         self.sock.sendall(build_simple("PNG"))
@@ -61,6 +63,15 @@ class LenzClient:
                         break
                 self.next_ping_time = now + 1.0 # Ping cada segon
             time.sleep(0.1)
+    
+    def pause_keepalive(self):
+        """Atura temporalment l'enviament de PNGs per evitar ofegar el sensor NIR."""
+        self.ping_paused = True
+
+    def resume_keepalive(self):
+        """Re-activa els PNGs i força un enviament immediat."""
+        self.ping_paused = False
+        self.next_ping_time = time.time()  # Forcem el ping ara mateix per evitar timeout
 
     def wait_after_ping(self, delay=0.4):
         elapsed = time.time() - self.last_ping_time

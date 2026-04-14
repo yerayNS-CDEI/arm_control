@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/home/mariona/Documents/Hyperspectral_camera/src/arm_control/sensors/inspection_manager.py", line 13, in <module>
+    from arm_control.srv import HyperspectralCommand, HyperspectralConfig, PredictMaterial
+ModuleNotFoundError: No module named 'arm_control'
