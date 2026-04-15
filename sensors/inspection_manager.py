@@ -9,6 +9,8 @@ import numpy as np
 from datetime import datetime, timezone
 import sys
 import argparse
+from rclpy.utilities import remove_ros_args
+import time
 
 from arm_control.srv import HyperspectralCommand, HyperspectralConfig, PredictMaterial
 
@@ -348,6 +350,68 @@ class InspectionManager(Node):
                 
             self.get_logger().info(f"7. Dades guardades correctament a '{dataset_path}'!")
             self.get_logger().info("   (Recorda que en Mode Collect NO s'actualitza el JSON d'inspeccions).")
+    
+    def run_manual_focus_test(self):
+        """
+        Assistent interactiu per trobar l'enfocament òptim movent el material a mà.
+        """
+        self.get_logger().info("="*60)
+        self.get_logger().info("🚀 INICIANT ASSISTENT DE FOCUS MANUAL (KNIFE-EDGE)")
+        self.get_logger().info("="*60)
+
+        # Bucle infinit fins que l'usuari vulgui sortir
+        while True:
+            # 1. Demanem a quina alçada estem
+            z_input = input("\n📏 Quina alçada (Z) vols provar ara? (Escriu 'q' per sortir): ")
+            if z_input.lower() == 'q':
+                self.get_logger().info("Surtint del mode focus. Bon treball!")
+                break
+
+            # 2. Preparem l'usuari
+            print(f"\n📍 Configura el robot a Z = {z_input}.")
+            print("1. Posa la meitat NEGRA del paper just sota la càmera.")
+            input("2. Prem [ENTER] i comença a moure el paper lentament cap al BLANC...")
+
+            self.get_logger().info("📸 Capturant 30 mesures (Mou el paper a poc a poc!)...")
+            intensities = []
+
+            # 3. Fem l'escombrat temporal (uns 6 segons de captura contínua)
+            for i in range(30):
+                req = HyperspectralCommand.Request()
+                req.command = 'GSM'
+                req.x_coord = 0.0 # Valors default ja que és un test manual
+                req.y_coord = 0.0
+                req.z_coord = float(z_input) if z_input.replace('.','',1).isdigit() else 0.0
+
+                future = self.camera_client.call_async(req)
+                rclpy.spin_until_future_complete(self, future)
+                
+                res = future.result()
+                
+                # PROTECCIÓ CRÍTICA AFEGIDA:
+                if res is not None and res.vis_ok and res.nir_ok:
+                    vis_sum = np.sum(np.array(res.vis_spectrum, dtype=np.float64))
+                    nir_sum = np.sum(np.array(res.nir_spectrum, dtype=np.float64))
+                    total_energy = vis_sum + nir_sum
+                    intensities.append(total_energy)
+                else:
+                    self.get_logger().warn(f"Fallada en la captura {i+1}/30. Es descarta aquest punt.")
+                
+                # Petita pausa perquè et doni temps a moure el paper a mà
+                time.sleep(0.5) 
+
+            # 4. Càlcul de la Nitidesa
+            if len(intensities) > 1:
+                # Fem la derivada (la diferència entre cada captura i la següent)
+                sharpness = np.max(np.abs(np.diff(intensities)))
+                
+                self.get_logger().info("="*60)
+                self.get_logger().info(f"✅ Escombrat finalitzat amb {len(intensities)} punts vàlids.")
+                self.get_logger().info(f"🎯 NITIDESA DETECTADA A Z={z_input}:  {sharpness:.2f}")
+                self.get_logger().info("="*60)
+                print("Pots comparar aquest valor amb les següents alçades. Busca el número més alt!")
+            else:
+                self.get_logger().error("❌ No s'han pogut recollir prou dades per calcular la nitidesa.")
 
 
 # ----------------------------------------------------------
@@ -363,8 +427,8 @@ def parse_args():
     parser.add_argument('z', type=float, nargs='?', default=0.0, help='Coordenada Z (m)')
 
     #--- ARGUMENTS PER ALS MODES ---
-    parser.add_argument('--mode', type=str, choices=['predict', 'collect'], default='predict',
-                        help="Mode de funcionament: 'predict' (per defecte) o 'collect' per crear dataset.")
+    parser.add_argument('--mode', type=str, choices=['predict', 'collect', 'focus'], default='predict',
+                        help="Mode: 'predict', 'collect', o 'focus' per test manual.")
     parser.add_argument('--label', type=str, default='Unknown',
                         help="Classe del material per entrenar (ex: P1, Fora1). Només s'usa en mode 'collect'.")
     
@@ -384,8 +448,9 @@ def parse_args():
     parser.add_argument('--nir-thp', type=int, default=None,
                         help='NIR: threshold de pic (THP)')
 
-    # parse_known_args evita conflictes amb els args interns de ROS2
-    known, _ = parser.parse_known_args()
+    # parse_known_args evita conflictes amb els args internals de ROS2
+    clean_args = remove_ros_args(sys.argv)[1:]
+    known, _ = parser.parse_known_args(clean_args)
     return known
 
 
@@ -394,19 +459,33 @@ def main(args=None):
     params = parse_args()
 
     manager = InspectionManager()
-    manager.run_inspection(
-        x=params.x,
-        y=params.y,
-        z=params.z,
-        mode=params.mode,      
-        label=params.label,
-        vis_mtr=params.vis_mtr,
-        vis_mti=params.vis_mti,
-        vis_thp=params.vis_thp,
-        nir_mtr=params.nir_mtr,
-        nir_mti=params.nir_mti,
-        nir_thp=params.nir_thp,
-    )
+    if params.mode == 'focus':
+        vis_speed = params.vis_mti if params.vis_mti else 15000
+        nir_speed = params.nir_mti if params.nir_mti else 15000
+
+        manager.get_logger().info("Esperant que el node de la càmera estigui actiu...")
+        manager.config_client.wait_for_service()
+        manager.camera_client.wait_for_service()
+
+        manager.get_logger().info(f"Accelerant càmera per al test... (MTI={vis_speed})")
+        manager.configure_sensor("VIS", "MTI", vis_speed)
+        manager.configure_sensor("NIR", "MTI", nir_speed)
+        # Llança l'assistent interactiu directament a la terminal
+        manager.run_manual_focus_test()
+    else:
+        manager.run_inspection(
+            x=params.x,
+            y=params.y,
+            z=params.z,
+            mode=params.mode,      
+            label=params.label,
+            vis_mtr=params.vis_mtr,
+            vis_mti=params.vis_mti,
+            vis_thp=params.vis_thp,
+            nir_mtr=params.nir_mtr,
+            nir_mti=params.nir_mti,
+            nir_thp=params.nir_thp,
+        )
 
     manager.destroy_node()
     rclpy.shutdown()

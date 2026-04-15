@@ -219,6 +219,11 @@ class HyperspectralNode(Node):
     # ----------------------------------------------------------
     def _calibrate_sensors(self):
         """Send the mandatory GDS -> GDR -> GRF sequence before any GSM."""
+        
+        # INICI DEL NOU CODI: Invoquem l'ajust de llum abans de prendre referències obscures
+        self._auto_calibrate_mti()
+        # FI DEL NOU CODI
+
         sequence = [
             ("GDS", "Dark Sample (POSA LA TAPA A LA CÀMERA)"), 
             ("GDR", "Dark Reference (MANTÉN LA TAPA POSADA)"), 
@@ -230,7 +235,7 @@ class HyperspectralNode(Node):
             input(f"\n>>> PREPARACIÓ: {label} - Prem ENTER quan estiguis llesta...")
             
             self.get_logger().info(f"Sending mandatory calibration command: {cmd}...")
-            
+                    
             # Neteja de buffers i espera com a l'exemple
             self.vis.flush_buffer()
             self.nir.flush_buffer()
@@ -499,6 +504,101 @@ class HyperspectralNode(Node):
 
         return response
 
+    # ----------------------------------------------------------
+    # Helper: Auto-Calibratge de l'Exposició (MTI)
+    # ----------------------------------------------------------
+    def _auto_calibrate_mti(self, target_intensity=55000.0):
+        """
+        Calcula i aplica l'MTI ideal fent servir el paper blanc 
+        abans de començar la seqüència de calibratge real.
+        """
+        print("\n" + "="*60)
+        print("⚙️  PAS 0: AUTO-CALIBRATGE D'EXPOSICIÓ (MTI)")
+        print("="*60)
+        input(">>> PREPARACIÓ: Posa el PAPER BLANC a Z=30mm i prem ENTER...")
+
+        self.get_logger().info(f"Iniciant auto-calibratge. MTI actuals - VIS: {self.vis_mti}, NIR: {self.nir_mti}")
+
+        # Neteja i sincronització de seguretat TCP obligatòria abans de capturar
+        self.vis.flush_buffer()
+        self.nir.flush_buffer()
+        time.sleep(0.1)
+        self.vis.wait_after_ping(0.5)
+        self.nir.pause_keepalive()
+        self.nir.wait_after_ping(0.5)
+
+        # 1. Demanem un espectre cru de prova (GSM)
+        self.vis.send_simple("GSM")
+        self.nir.send_simple("GSM")
+        time.sleep(1.2)
+
+        results = {}
+        def read_sensor(client, sensor_label):
+            try:
+                results[sensor_label] = client.read_frame(["GSM"])
+            except Exception as e:
+                results[sensor_label] = f"ERROR: {e}"
+
+        # Lectura en paral·lel
+        t_vis = threading.Thread(target=read_sensor, args=(self.vis, "VIS"))
+        t_nir = threading.Thread(target=read_sensor, args=(self.nir, "NIR"))
+        t_vis.start()
+        t_nir.start()
+        t_vis.join()
+        t_nir.join()
+
+        self.nir.resume_keepalive()
+
+        # Neteja immediata de restes al buffer
+        time.sleep(0.1)
+        self.vis.flush_buffer()
+        self.nir.flush_buffer()
+
+        # 2. Comprovació de dades i Càlcul Matemàtic
+        if (isinstance(results.get("VIS"), dict) and "spectrum" in results["VIS"] and 
+            isinstance(results.get("NIR"), dict) and "spectrum" in results["NIR"]):
+            
+            # Passem a float64 per prevenció d'underflow abans d'operar
+            vis_array = np.array(results["VIS"]["spectrum"], dtype=np.float64)
+            nir_array = np.array(results["NIR"]["spectrum"], dtype=np.float64)
+
+            # Ignorem els extrems (trimming tèrmic) per no falsejar el pic màxim
+            max_vis = np.max(vis_array[10:-10])
+            max_nir = np.max(nir_array[10:-10])
+
+            self.get_logger().info(f"Intensitat màxima detectada - VIS: {max_vis:.1f}, NIR: {max_nir:.1f}")
+
+            # Càlcul proporcional per quadrar amb el target_intensity (~55.000)
+            new_mti_vis = self.vis_mti * (target_intensity / max_vis) if max_vis > 0 else self.vis_mti
+            new_mti_nir = self.nir_mti * (target_intensity / max_nir) if max_nir > 0 else self.nir_mti
+
+            # Clamping de seguretat de Hardware (limitem l'MTI entre 1000 i 65000 per no bloquejar la càmera)
+            new_mti_vis = int(np.clip(new_mti_vis, 1000, 65000))
+            new_mti_nir = int(np.clip(new_mti_nir, 1000, 65000))
+
+            self.get_logger().info(f"Aplicant nous MTIs òptims - VIS: {new_mti_vis}, NIR: {new_mti_nir}")
+
+            # 3. Enviem la configuració a la xarxa
+            self.vis.send_config("MTI", new_mti_vis)
+            time.sleep(0.2)
+            self.nir.send_config("MTI", new_mti_nir)
+            time.sleep(0.2)
+
+            # FLUSH CRÍTIC: Consumim l'"OK" de confirmació que retorna el sensor 
+            # perquè no es barregi amb la capçalera de dades del següent tret.
+            self.vis.flush_buffer()
+            self.nir.flush_buffer()
+
+            # Guardem els valors al Node
+            self.vis_mti = new_mti_vis
+            self.nir_mti = new_mti_nir
+
+            self.get_logger().info("✓ Auto-calibratge de MTI completat amb èxit.")
+        else:
+            self.get_logger().error("✗ Error llegint dades de prova. Es mantindrà l'MTI original per defecte.")
+
+        time.sleep(1.0) # Estabilització òptica abans de seguir
+        
     # ----------------------------------------------------------
     # SERVICE: Material Prediction
     # ----------------------------------------------------------
