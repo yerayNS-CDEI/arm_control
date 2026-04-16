@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+import html
+import json
 import sys
 import os
+import shlex
 import subprocess
 import signal
 import socket
@@ -11,7 +14,7 @@ from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import QTimer, QProcess, Qt
-from PyQt5.QtGui import QIcon, QPixmap
+from PyQt5.QtGui import QFontMetrics, QIcon, QPixmap
 from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
@@ -82,6 +85,7 @@ class RobotControlUI(QMainWindow):
         # Store cleared status text for restore functionality
         self.cleared_status_backup = None
         self.base_cleared_status_backup = None
+        self.gpr_cleared_status_backup = None
         
         # Store process list for kill functionality
         self.current_process_list = []
@@ -128,6 +132,9 @@ class RobotControlUI(QMainWindow):
         main_layout.addWidget(tabs)
 
         self.tabs = tabs
+        self.gpr_request_groups = self._build_gpr_request_groups()
+        self.gpr_group_combos = {}
+        self.gpr_request_processes = {}
         # ===== ARM CONTROL TAB =====
         arm_tab = QWidget()
         arm_tab_layout = QVBoxLayout(arm_tab)
@@ -1131,6 +1138,7 @@ class RobotControlUI(QMainWindow):
         full_control_tab_layout.addLayout(full_control_terminal_status_layout)
         # Add Full Control tab after Joint Control
         tabs.addTab(full_control_tab, "Full Control")
+        tabs.addTab(self._create_gpr_api_test_tab(), "GPR API Test")
 
         # Connect tab change signal to check joint states when Joint Control tab is activated
         tabs.currentChanged.connect(lambda index: self._on_tab_changed(index, tabs))
@@ -1643,7 +1651,710 @@ class RobotControlUI(QMainWindow):
         else:
             # User was scrolled up, maintain their position
             scrollbar.setValue(old_scroll_value)
+
+    def _build_gpr_request_groups(self):
+        """Return the supported GPR API requests grouped for the UI."""
+        probe_status_tooltip = """Get information about Probe. The response **must** include:
+
+- If GP App is connected to a Probe. If that’s the case:
     
+    - Serial Number of the Probe
+        
+    - Probe model (GP8000, GP8100, GP8800)
+        
+    - Battery status of the Probe
+        
+
+If no probe is connected, the probe field should be absent""".strip()
+
+        probe_connect_tooltip = """Connect to Probe at a given IP address (optional) and serial number.
+
+This endpoint should wait until connection is successful or fails before
+returning. The app should not show any alert in case of failure.
+
+If no contract is found, or if contract does not have API access feature
+flag, the app should disconnect from the probe immediately and return a
+403 error.
+
+If an IP was specified, and connection was successful, but serial number
+does not match the one that was provided, app should disconnect and
+throw an error.""".strip()
+
+        line_get_tooltip = """Gets the current line being measured.
+
+If the measurement has not been started, return index: 0 and started:
+false.""".strip()
+
+        presets_tooltip = """Set measurement parameters:
+
+- Resolution (max depth / max speed)
+    
+- Repetition rate (number, time triggered, or “rising edge” (GP8800
+only))
+    
+
+This endpoint can only be called before any data has been added to a
+measurement.
+
+#### Fixed step size
+
+``` json
+{
+    "mode": "FIXED_STEP",
+    "stepSize": 0.5, // For metric, value in [scans/cm]. For imperial value in [scans/in],
+    "unit": "METRIC" | "IMPERIAL",
+    "resolution": "MAX_SPEED" | "MAX_DEPTH" // only available with GP8000
+}
+```
+
+#### Time-triggered
+
+``` json
+{
+    "mode": "TIMED",
+    "scanFrequency": 0.5 // Value in scans / second
+    "unit": "METRIC" | "IMPERIAL",
+    "resolution": "MAX_SPEED" | "MAX_DEPTH" // only available with GP8000
+}
+```
+
+#### External trigger (GP8800 only)
+
+``` json
+{
+    "mode": "EXTERNAL"
+}
+```""".strip()
+
+        measurement_start_tooltip = """Start a new measurement. The endpoint **must** allow to create one of
+those measurement types:
+
+- Line scan
+    
+- Superline scan (GP8100 only)
+    
+- Area scan
+    
+
+The endpoint will return when the the measurement is ready to start and
+a line can be started. The app will navigate to the measurements screen.
+
+If a new measurement has already been started, but no data has been
+added to it, it should be discarded. If data has been added, an error
+should be thrown (see below) until the measurement has been stopped.
+This is similar to the current behavior in the app when pressing the “+”
+button or going back to explorer screen.""".strip()
+
+        display_tooltip = """Set display parameters:
+
+- View to apply to
+    
+- Color map
+    
+    - Scheme name
+        
+    - Brightness
+        
+- Slice start and end (C-Scan and superline view only)
+    
+
+Setting the parameters for a given view must switch the app to that view
+and apply the settings. The applied display parameters are then to be
+used for image generation.""".strip()
+
+        processing_tooltip = """Set image processing parameters:
+
+- View to apply to
+    
+- Gain
+    
+    - Auto gain (on/off)
+        
+    - Adjust gain (press “ok” button)
+        
+    - Linear gain (dB)
+        
+    - Time gain compensation (dB/ns)
+        
+- Noise cancellation (on/off)
+    
+- Background removal depth (ns)
+    
+- Depth / time window (ns)
+    
+- Dielectric constant
+    
+
+This endpoint can only be called at any time. If the gain object is
+present, the view must change to reflect that which is specified in the
+view property.""".strip()
+
+        export_bscan_tooltip = """Get a B-Scan as a PNG image.
+
+Grid lines, marker lines and tags, must not be visible. This should be a
+raw image of the migrated B-Scan data.
+
+- For a superline scan (GP8100 only), given a channel (A-F).
+    
+- For an area scan, given a line / column ID
+    
+    - For GP8100, an additional channel (A-F) is required
+        
+
+The endpoint **must** use the post-processing and display parameters for
+the MIGRATED_B_SCAN view:
+
+- Color map (scheme + brightness)
+    
+- Gain
+    
+- Noise cancellation
+    
+- Background removal
+    
+- Depth / time window (GP8000 only)
+    
+
+The image returned will be of the native resolution for the device,
+meaning:
+
+- **Width:** amount of a-scans for the line
+    
+- **Height:** amount of samples for an a-scan
+    
+
+This endpoint can be called at any time if data is available for the
+specified channel / line combination.""".strip()
+
+        export_cscan_tooltip = """Get a C-Scan as a PNG image.
+
+This is only available in Area Scan.
+
+Grid lines, marker lines and tags, must not be visible. This should be a
+raw image of C-Scan
+
+The endpoint **must** use the post-processing and display parameters for
+the C_SCAN view:
+
+- Color map (scheme + brightness)
+    
+- Gain
+    
+- Noise cancellation
+    
+- Background removal
+    
+- Depth / time window (GP8000 only)
+    
+
+The image returned will be of the resolution provided by the user
+
+This endpoint can be called at any time if data is available.""".strip()
+
+        export_ascan_tooltip = """Get an A-Scan as a CSV.
+
+- For a line scan, given a distance from the start.
+    
+- For a superline scan (GP8100 only), given a distance from the start
+and a channel (A-F)
+    
+- For an area scan, given a line / column ID and a distance from the
+start of the line / column (= X and Y coordinate)
+    
+    - For GP8100, an additional channel (A-F) is required
+        
+- The returned CSV contains the full raw data of a-scan.""".strip()
+
+        return {
+            'probe': [
+                {
+                    'label': 'Connect to probe',
+                    'method': 'POST',
+                    'path': '/probe/connect',
+                    'body': {'serialNumber': 'GP88-007-0081'},
+                    'description': 'Connect to the GPR probe using the provided serial number.',
+                    'tooltip': probe_connect_tooltip,
+                },
+                {
+                    'label': 'Disconnect probe',
+                    'method': 'POST',
+                    'path': '/probe/disconnect',
+                    'body': None,
+                    'description': 'Disconnect from the currently connected probe.',
+                    'tooltip': "Disconnects from the currently connected probe.",
+                },
+                {
+                    'label': 'Get probe status',
+                    'method': 'GET',
+                    'path': '/probe',
+                    'body': None,
+                    'description': 'Get the current probe connection status and probe details when connected.',
+                    'tooltip': probe_status_tooltip,
+                },
+            ],
+            'line': [
+                {
+                    'label': 'Start line',
+                    'method': 'POST',
+                    'path': '/measurement/line/start',
+                    'body': None,
+                    'description': 'Start the current line. The probe should wake up if needed.',
+                    'tooltip': """Start line.
+
+This works for any measurement type. If the device is in sleep mode, it
+should wake it up and return only when the device is ready and a-scans
+can be fed to the app.""".strip(),
+                },
+                {
+                    'label': 'Stop line',
+                    'method': 'POST',
+                    'path': '/measurement/line/stop',
+                    'body': None,
+                    'description': 'Stop the current line. In Area Scan it does not advance until the next line is started.',
+                    'tooltip': """Stop line. In area scan, this should **not** move to the next line until
+it has been started.
+
+This works for any measurement type. If the device is in sleep mode, it
+should wake it up and return only when the device is ready and a-scans
+can be fed to the app.""".strip(),
+                },
+                {
+                    'label': 'Pause line',
+                    'method': 'POST',
+                    'path': '/measurement/line/pause',
+                    'body': None,
+                    'description': 'Pause the current measurement line.',
+                    'tooltip': """Pauses current line.
+
+This works for any measurement type. If the device is in sleep mode, it
+should wake it up and return only when the device is ready and a-scans
+can be fed to the app.""".strip(),
+                },
+                {
+                    'label': 'Unpause line',
+                    'method': 'POST',
+                    'path': '/measurement/line/unpause',
+                    'body': None,
+                    'description': 'Resume a paused measurement line.',
+                    'tooltip': """Unpauses current line.
+
+Only works if the current line has been paused""".strip(),
+                },
+                {
+                    'label': 'Get current line',
+                    'method': 'GET',
+                    'path': '/measurement/line',
+                    'body': None,
+                    'description': 'Get the current line status, scan count, length, and line index.',
+                    'tooltip': line_get_tooltip,
+                },
+                {
+                    'label': 'Delete current line',
+                    'method': 'DELETE',
+                    'path': '/measurement/line',
+                    'body': None,
+                    'description': 'Delete the current line and move back to the previous line. Area Scan only.',
+                    'tooltip': """Deletes the current line being measured. Sets the current line to the
+previous line.
+
+Only available for Area Scan.""".strip(),
+                },
+            ],
+            'presets': [
+                {
+                    'label': 'Set Fixed Step',
+                    'method': 'POST',
+                    'path': '/measurement/presets',
+                    'body': {'mode': 'FIXED_STEP', 'repetitionRate': 0.5, 'unit': 'METRIC'},
+                    'description': 'Set measurement presets for fixed-step acquisition before data is added.',
+                    'tooltip': presets_tooltip,
+                },
+                {
+                    'label': 'Set Time Trigger',
+                    'method': 'POST',
+                    'path': '/measurement/presets',
+                    'body': {'mode': 'TIMED', 'scanFrequency': 0.5, 'unit': 'METRIC'},
+                    'description': 'Set measurement presets for time-triggered acquisition. Swagger examples use scanFrequency for this mode.',
+                    'tooltip': presets_tooltip,
+                },
+                {
+                    'label': 'Set External Trigger',
+                    'method': 'POST',
+                    'path': '/measurement/presets',
+                    'body': {'mode': 'EXTERNAL'},
+                    'description': 'Set measurement presets for external triggering. Available for GP8800 according to the Swagger examples.',
+                    'tooltip': presets_tooltip,
+                },
+            ],
+            'measurements': [
+                {
+                    'label': 'Start measurement',
+                    'method': 'POST',
+                    'path': '/measurement/start',
+                    'body': {'type': 'LINE_SCAN', 'name': 'GPR API Test'},
+                    'description': 'Create and start a new measurement session.',
+                    'tooltip': measurement_start_tooltip,
+                },
+                {
+                    'label': 'Stop measurement',
+                    'method': 'POST',
+                    'path': '/measurement/stop',
+                    'body': None,
+                    'description': 'Stop the current measurement and leave the measurement screen.',
+                    'tooltip': """Stop the measurement. This will exit from the measurement screen and
+return to the home screen.""".strip(),
+                },
+                {
+                    'label': 'Delete measurement',
+                    'method': 'DELETE',
+                    'path': '/measurement',
+                    'body': None,
+                    'description': 'Delete the current measurement. The API description says a new measurement is created afterward.',
+                    'tooltip': "Deletes the current measurement and creates a new one.",
+                },
+                {
+                    'label': 'Trigger sync',
+                    'method': 'POST',
+                    'path': '/measurement/sync',
+                    'body': None,
+                    'description': 'Sync the current measurement to Workspace after the line has been stopped.',
+                    'tooltip': """Triggers a sync of the current measurement to Workspace.
+
+This endpoint can only be called when line has been stopped.
+
+This endpoint locks the UI of the GP App during syncing. Requires GP App
+to have access to the internet.""".strip(),
+                },
+                {
+                    'label': 'Get measurement info',
+                    'method': 'GET',
+                    'path': '/measurement/info',
+                    'body': None,
+                    'description': 'Get current measurement metadata and settings.',
+                    'tooltip': "Gets the current measurement information",
+                },
+                {
+                    'label': 'Set display params',
+                    'method': 'POST',
+                    'path': '/measurement/display',
+                    'body': {'view': 'B_SCAN', 'colorMap': {'scheme': 'COOL', 'brightness': 0}},
+                    'description': 'Set display parameters for a measurement view, such as the active colormap.',
+                    'tooltip': display_tooltip,
+                },
+                {
+                    'label': 'Set processing params',
+                    'method': 'POST',
+                    'path': '/measurement/processing',
+                    'body': {
+                        'gain': {'view': 'B_SCAN', 'autoGain': True},
+                        'noiseCancellation': True,
+                        'backgroundRemovalDepth': 0,
+                        'dielectricConstant': 6,
+                    },
+                    'description': 'Set image processing parameters such as gain, noise cancellation, and dielectric constant.',
+                    'tooltip': processing_tooltip,
+                },
+            ],
+            'export': [
+                {
+                    'label': 'Export raw data',
+                    'method': 'POST',
+                    'path': '/measurement/export/raw',
+                    'body': None,
+                    'description': 'Export raw measurement data as an offline SEG-Y zip package.',
+                    'tooltip': """Exports raw data of the measurement.
+
+Generates a local (offline) SEG-Y export of the entire measurement. The
+result is a zip file containing all b-scans, along with a CSV.""".strip(),
+                },
+                {
+                    'label': 'Get B-Scan',
+                    'method': 'POST',
+                    'path': '/measurement/export/bscan',
+                    'body': {'migrated': True},
+                    'description': 'Export a B-Scan PNG. Additional channel or line fields may be needed for some measurement types.',
+                    'tooltip': export_bscan_tooltip,
+                },
+                {
+                    'label': 'Get C-Scan',
+                    'method': 'POST',
+                    'path': '/measurement/export/cscan',
+                    'body': {'width': 300, 'height': 300},
+                    'description': 'Export a C-Scan PNG. This is only available for Area Scan measurements.',
+                    'tooltip': export_cscan_tooltip,
+                },
+                {
+                    'label': 'Get A-Scan',
+                    'method': 'POST',
+                    'path': '/measurement/export/ascan',
+                    'body': {'index': 0},
+                    'description': 'Export an A-Scan CSV. Additional channel or line fields may be needed for some measurement types.',
+                    'tooltip': export_ascan_tooltip,
+                },
+            ],
+        }
+
+    def _create_gpr_api_test_tab(self):
+        """Create the GPR API test tab UI."""
+        gpr_tab = QWidget()
+        gpr_tab_layout = QVBoxLayout(gpr_tab)
+
+        gpr_base_url_layout = QHBoxLayout()
+        gpr_base_url_layout.addWidget(QLabel("Base URL:"))
+        self.gpr_base_url_input = QLineEdit("http://192.168.42.53:9000")
+        self.gpr_base_url_input.setPlaceholderText("http://192.168.42.53:9000")
+        self.gpr_base_url_input.setToolTip("Base URL for the GPR HTTP server.")
+        gpr_base_url_layout.addWidget(self.gpr_base_url_input)
+        gpr_base_url_layout.addStretch()
+        gpr_tab_layout.addLayout(gpr_base_url_layout)
+
+        gpr_groups_layout = QGridLayout()
+        gpr_groups_layout.setHorizontalSpacing(12)
+        gpr_groups_layout.setVerticalSpacing(12)
+        group_positions = [
+            ('probe', 'Probe', 0, 0),
+            ('line', 'Line', 0, 1),
+            ('presets', 'Presets', 0, 2),
+            ('measurements', 'Measurements', 1, 0),
+            ('export', 'Export', 1, 1),
+        ]
+        for group_key, title, row, col in group_positions:
+            gpr_groups_layout.addWidget(self._create_gpr_group_box(group_key, title), row, col)
+        gpr_groups_layout.setColumnStretch(0, 1)
+        gpr_groups_layout.setColumnStretch(1, 1)
+        gpr_groups_layout.setColumnStretch(2, 1)
+        gpr_tab_layout.addLayout(gpr_groups_layout)
+
+        self.gpr_status_text = QTextEdit()
+        self.gpr_status_text.setReadOnly(True)
+        self.gpr_status_text.setAcceptRichText(True)
+        self.gpr_status_text.setStyleSheet(
+            "background-color: #22272e; color: #adbac7; border: 1px solid #444c56; "
+            "font-family: 'Courier New', monospace; white-space: pre;"
+        )
+        font_metrics = QFontMetrics(self.gpr_status_text.font())
+        tab_width = font_metrics.horizontalAdvance(' ') * 8
+        self.gpr_status_text.setTabStopDistance(tab_width)
+
+        gpr_status_header = QHBoxLayout()
+        gpr_status_header.addWidget(QLabel("GPR API Test - Curl Command + Response"))
+        gpr_status_header.addStretch()
+        gpr_status_header.addWidget(QLabel("Search:"))
+        self.gpr_search_input = QLineEdit()
+        self.gpr_search_input.setPlaceholderText("Enter search term...")
+        self.gpr_search_input.setMaximumWidth(180)
+        self.gpr_search_input.returnPressed.connect(lambda: self.search_gpr_status(forward=True))
+        gpr_status_header.addWidget(self.gpr_search_input)
+
+        btn_gpr_search_prev = QPushButton("◀")
+        btn_gpr_search_prev.clicked.connect(lambda: self.search_gpr_status(forward=False))
+        btn_gpr_search_prev.setMaximumWidth(40)
+        btn_gpr_search_prev.setToolTip("Find previous")
+        gpr_status_header.addWidget(btn_gpr_search_prev)
+
+        btn_gpr_search_next = QPushButton("▶")
+        btn_gpr_search_next.clicked.connect(lambda: self.search_gpr_status(forward=True))
+        btn_gpr_search_next.setMaximumWidth(40)
+        btn_gpr_search_next.setToolTip("Find next")
+        gpr_status_header.addWidget(btn_gpr_search_next)
+
+        self.btn_restore_gpr_status = QPushButton("Restore")
+        self.btn_restore_gpr_status.clicked.connect(self.restore_gpr_status)
+        self.btn_restore_gpr_status.setMaximumWidth(80)
+        self.btn_restore_gpr_status.setVisible(False)
+        gpr_status_header.addWidget(self.btn_restore_gpr_status)
+
+        btn_clear_gpr_status = QPushButton("Clear")
+        btn_clear_gpr_status.clicked.connect(self.clear_gpr_status)
+        btn_clear_gpr_status.setMaximumWidth(80)
+        gpr_status_header.addWidget(btn_clear_gpr_status)
+
+        gpr_tab_layout.addLayout(gpr_status_header)
+        gpr_tab_layout.addWidget(self.gpr_status_text, 1)
+        return gpr_tab
+
+    def _create_gpr_group_box(self, group_key, title):
+        """Create a labeled group box with a request combobox and send button."""
+        group_box = QGroupBox(title)
+        group_layout = QVBoxLayout()
+        group_box.setLayout(group_layout)
+
+        request_combo = QComboBox()
+        request_combo.setMinimumWidth(220)
+        self._populate_gpr_request_combo(request_combo, self.gpr_request_groups[group_key])
+        group_layout.addWidget(request_combo)
+
+        send_button = QPushButton("Send")
+        send_button.clicked.connect(
+            lambda _, combo=request_combo, button=send_button: self.send_gpr_request(combo, button)
+        )
+        group_layout.addWidget(send_button)
+        group_layout.addStretch()
+
+        self.gpr_group_combos[group_key] = request_combo
+        return group_box
+
+    def _populate_gpr_request_combo(self, combo, requests):
+        """Populate a GPR request combobox with tooltip metadata."""
+        for request in requests:
+            combo.addItem(request['label'], request)
+            item_index = combo.count() - 1
+            combo.setItemData(item_index, request.get('tooltip', request['description']), Qt.ToolTipRole)
+
+        combo.currentIndexChanged.connect(lambda _, c=combo: self._update_gpr_combo_tooltip(c))
+        self._update_gpr_combo_tooltip(combo)
+
+    def _update_gpr_combo_tooltip(self, combo):
+        """Keep the combobox tooltip aligned with the selected request."""
+        request = combo.currentData()
+        combo.setToolTip(request.get('tooltip', request['description']) if request else "")
+
+    def send_gpr_request(self, combo, button):
+        """Send the selected GPR HTTP request using curl."""
+        request = combo.currentData()
+        if not request:
+            self._append_to_text_widget(
+                self.gpr_status_text,
+                "<span style='color: #c69026;'>⚠ No GPR request selected</span>",
+            )
+            return
+
+        base_url = self.gpr_base_url_input.text().strip().rstrip('/')
+        if not base_url:
+            self._append_to_text_widget(
+                self.gpr_status_text,
+                "<span style='color: #c69026;'>⚠ Base URL is empty</span>",
+            )
+            return
+
+        url = f"{base_url}{request['path']}"
+        args = [
+            '--silent',
+            '--show-error',
+            '--location',
+            '--max-time',
+            '30',
+            '--request',
+            request['method'],
+            url,
+            '--write-out',
+            '\nHTTP_STATUS:%{http_code}\n',
+        ]
+
+        if request['body'] is not None:
+            payload = json.dumps(request['body'], separators=(',', ':'))
+            args.extend([
+                '--header',
+                'Content-Type: application/json',
+                '--data',
+                payload,
+            ])
+
+        cmd_str = 'curl ' + ' '.join(shlex.quote(arg) for arg in args)
+        self._append_to_text_widget(
+            self.gpr_status_text,
+            f"<b style='color: #57ab5a;'>▶ {html.escape(cmd_str)}</b>",
+        )
+        self._append_to_text_widget(
+            self.gpr_status_text,
+            f"<span style='color: #76e3ea;'>Request: {html.escape(request['description'])}</span>",
+        )
+
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.setProperty('had_output', False)
+        process.readyReadStandardOutput.connect(lambda p=process: self.handle_gpr_output(p))
+        process.finished.connect(
+            lambda exit_code, exit_status, p=process, b=button: self._on_gpr_request_finished(
+                p, exit_code, exit_status, b
+            )
+        )
+
+        button.setEnabled(False)
+        button.setText("Sending...")
+        process.start('curl', args)
+        self.gpr_request_processes[id(process)] = process
+
+    def handle_gpr_output(self, process):
+        """Append curl output for GPR requests to the GPR status pane."""
+        output = process.readAllStandardOutput().data().decode(errors='replace')
+        if not output:
+            return
+
+        process.setProperty('had_output', True)
+        self._append_to_text_widget(
+            self.gpr_status_text,
+            (
+                "<pre style=\"margin: 0; font-family: 'Courier New', monospace;\">"
+                f"{html.escape(output)}</pre>"
+            ),
+            add_newline=False,
+        )
+
+    def _on_gpr_request_finished(self, process, exit_code, exit_status, button):
+        """Restore the button state and log the curl completion status."""
+        self.gpr_request_processes.pop(id(process), None)
+        button.setEnabled(True)
+        button.setText("Send")
+
+        if exit_code == 0:
+            if not bool(process.property('had_output')):
+                self._append_to_text_widget(
+                    self.gpr_status_text,
+                    "<span style='color: #57ab5a;'>✓ Request completed (no response body)</span>",
+                )
+            else:
+                self._append_to_text_widget(
+                    self.gpr_status_text,
+                    "<span style='color: #57ab5a;'>✓ Request completed</span>",
+                )
+        else:
+            self._append_to_text_widget(
+                self.gpr_status_text,
+                (
+                    "<span style='color: #f47067;'>"
+                    f"✗ curl exited with code {exit_code}</span>"
+                ),
+            )
+
+        self.gpr_status_text.append("")
+        process.deleteLater()
+
+    def clear_gpr_status(self):
+        """Clear GPR status text and save backup for restore."""
+        self.gpr_cleared_status_backup = self.gpr_status_text.toHtml()
+        self.gpr_status_text.clear()
+        self.btn_restore_gpr_status.setVisible(True)
+
+    def restore_gpr_status(self):
+        """Restore previously cleared GPR status text."""
+        if self.gpr_cleared_status_backup:
+            current_content = self.gpr_status_text.toHtml()
+            self.gpr_status_text.setHtml(self.gpr_cleared_status_backup + current_content)
+            self.gpr_cleared_status_backup = None
+            self.btn_restore_gpr_status.setVisible(False)
+
+    def search_gpr_status(self, forward=True):
+        """Search for text in the GPR status box."""
+        search_text = self.gpr_search_input.text()
+        if not search_text:
+            return
+
+        from PyQt5.QtGui import QTextDocument
+        flags = QTextDocument.FindFlags()
+        if not forward:
+            flags = QTextDocument.FindBackward
+
+        found = self.gpr_status_text.find(search_text, flags)
+        if not found:
+            cursor = self.gpr_status_text.textCursor()
+            if forward:
+                cursor.movePosition(cursor.Start)
+            else:
+                cursor.movePosition(cursor.End)
+            self.gpr_status_text.setTextCursor(cursor)
+            self.gpr_status_text.find(search_text, flags)
+
     def toggle_arm_launch(self):
         sim_mode = self.arm_sim_mode_combo.currentText()
         hybrid_sim = 'true' if self._is_hybrid_sim_enabled(context='arm') else 'false'
