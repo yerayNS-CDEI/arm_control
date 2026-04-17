@@ -39,6 +39,7 @@ def generate_launch_description():
             'tip_col': [tf_prefix, 'tool0'],
             'root': [main_tf_prefix, 'base_link'],
             'tip': [main_tf_prefix, 'tool0'],
+            'main_tf_prefix': main_tf_prefix,
         }.items(),
     )
 

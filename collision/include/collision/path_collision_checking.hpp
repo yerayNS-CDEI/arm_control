@@ -4,6 +4,7 @@
 #include <vector>
 #include <set>
 #include <map>
+#include <atomic>
 
 #include <Eigen/Eigen>
 #include <boost/scoped_ptr.hpp>
@@ -127,6 +128,8 @@ class PathCollisionChecking : public rclcpp::Node
         void polytopePubCallback();
 
         sensor_msgs::msg::JointState convertToNamespaceJointState(const sensor_msgs::msg::JointState& input) const;
+        void warmupCollisionModelFromJointState(const sensor_msgs::msg::JointState& prefixed_joint_state);
+        void warmupFromRealJointState(const sensor_msgs::msg::JointState::SharedPtr msg);
 
         /// Constrained manipulability private methods
 
@@ -406,6 +409,10 @@ class PathCollisionChecking : public rclcpp::Node
         rclcpp::Client<arm_control::srv::AddRemoveCollisionMesh>::SharedPtr real_world_mesh_client_;
         rclcpp::Client<arm_control::srv::AddRemoveCollisionSolid>::SharedPtr real_world_solid_client_;
 
+        // One-shot subscriber to real robot joint states for startup warm-up
+        rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr real_joint_sub_;
+        std::string main_tf_prefix_;
+
         // ROS subscribers/publishers/timers
         rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_sub_;
         rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_filter_sub_;
@@ -424,5 +431,7 @@ class PathCollisionChecking : public rclcpp::Node
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr occupied_voxels_pub_;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr evaluated_voxels_pub_;
         rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr evaluated_joint_pub_;
+
+
 };
 } // namespace constrained_manipulability

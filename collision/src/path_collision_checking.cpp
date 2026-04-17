@@ -281,6 +281,13 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
         RCLCPP_WARN(this->get_logger(), "Real world solid service not available after 10 seconds");
     }
 
+    // Subscribe to real robot joint states for one-time startup warm-up.
+    // On the first message the collision model is pre-built and visualization is seeded.
+    main_tf_prefix_ = this->declare_parameter<std::string>("main_tf_prefix", "arm_");
+    real_joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+        "/joint_states", rclcpp::QoS(1),
+        std::bind(&PathCollisionChecking::warmupFromRealJointState, this, std::placeholders::_1));
+
     RCLCPP_INFO(this->get_logger(), "Initialized constrained_manipulability");
 }
 
@@ -546,6 +553,61 @@ sensor_msgs::msg::JointState PathCollisionChecking::convertToNamespaceJointState
     for (const auto& name : input.name)
         visual.name.push_back("collision_" + name);
     return visual;
+}
+
+void PathCollisionChecking::warmupCollisionModelFromJointState(const sensor_msgs::msg::JointState& prefixed_joint_state)
+{
+    bool self_col = false;
+    bool env_col = false;
+
+    // Build robot_collision_geometry_ and exclusions; prefixed_joint_state already has collision_ names.
+    evaluateCollisionState(prefixed_joint_state, self_col, env_col, false);
+
+    // Seed /collision/joint_states so jointStateCallback fires and visualization starts.
+    evaluated_joint_pub_->publish(prefixed_joint_state);
+
+    RCLCPP_INFO(this->get_logger(),
+                "Startup collision warm-up complete (self_collision=%s, env_collision=%s)",
+                self_col ? "true" : "false",
+                env_col ? "true" : "false");
+}
+
+void PathCollisionChecking::warmupFromRealJointState(const sensor_msgs::msg::JointState::SharedPtr msg)
+{
+    // Unsubscribe immediately — we only need the first message.
+    real_joint_sub_.reset();
+
+    // Convert real robot joint names (e.g. arm_shoulder_pan_joint) to collision names
+    // (collision_shoulder_pan_joint) by stripping main_tf_prefix_ and adding collision_.
+    sensor_msgs::msg::JointState prefixed;
+    prefixed.header = msg->header;
+    prefixed.position = msg->position;
+    prefixed.velocity = msg->velocity;
+    prefixed.effort   = msg->effort;
+    for (const auto& name : msg->name)
+    {
+        std::string base = name;
+        if (!main_tf_prefix_.empty() &&
+            name.compare(0, main_tf_prefix_.size(), main_tf_prefix_) == 0)
+        {
+            base = name.substr(main_tf_prefix_.size());
+        }
+        prefixed.name.push_back("collision_" + base);
+    }
+
+    try
+    {
+        warmupCollisionModelFromJointState(prefixed);
+    }
+    catch (const std::exception& e)
+    {
+        RCLCPP_WARN(this->get_logger(),
+                    "Startup warm-up failed: %s", e.what());
+    }
+    catch (...)
+    {
+        RCLCPP_WARN(this->get_logger(), "Startup warm-up failed with unknown exception");
+    }
 }
 
 
