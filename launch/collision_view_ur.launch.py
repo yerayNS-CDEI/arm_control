@@ -71,7 +71,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "description_package",
-            default_value="ur_description",
+            default_value="arm_control",
             description="Description package with robot URDF/XACRO files. Usually the argument "
             "is not set, it enables use of a custom description.",
         )
@@ -92,6 +92,28 @@ def generate_launch_description():
             "have to be updated.",
         )
     )
+    # End-effector cylinder parameters
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "ee_cylinder_length",
+            default_value="0.15",
+            description="Length of the end-effector cylinder.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "ee_cylinder_radius",
+            default_value="0.035",
+            description="Radius of the end-effector cylinder.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "sensors_offset",
+            default_value="0.15",
+            description="Offset for sensors mounting position.",
+        )
+    )
 
     # Initialize Arguments
     ur_type = LaunchConfiguration("ur_type")
@@ -102,6 +124,10 @@ def generate_launch_description():
     description_package = LaunchConfiguration("description_package")
     description_file = LaunchConfiguration("description_file")
     tf_prefix = LaunchConfiguration("tf_prefix")
+    # End-effector parameters
+    ee_cylinder_length = LaunchConfiguration("ee_cylinder_length")
+    ee_cylinder_radius = LaunchConfiguration("ee_cylinder_radius")
+    sensors_offset = LaunchConfiguration("sensors_offset")
 
     robot_description_content = Command(
         [
@@ -126,6 +152,15 @@ def generate_launch_description():
             " ",
             "tf_prefix:=",
             tf_prefix,
+            " ",
+            "ee_cylinder_length:=",
+            ee_cylinder_length,
+            " ",
+            "ee_cylinder_radius:=",
+            ee_cylinder_radius,
+            " ",
+            "sensors_offset:=",
+            sensors_offset,
         ]
     )
     robot_description = {
@@ -136,12 +171,6 @@ def generate_launch_description():
         [FindPackageShare("arm_control"), "rviz", "view_collision_robot.rviz"]
     )
 
-    joint_state_publisher_node = Node(
-        package="joint_state_publisher",
-        executable="joint_state_publisher",
-        namespace='collision',
-        name="joint_state_publisher",
-    )
     robot_state_publisher_node = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
@@ -150,6 +179,11 @@ def generate_launch_description():
         output="both",
         parameters=[robot_description],
     )
+    
+    # Note: joint_state_publisher is NOT included - the collision checking service
+    # publishes joint states only when checking a configuration, so the robot
+    # visualization will stay at the last tested configuration
+    
     rviz_node = Node(
         package="rviz2",
         executable="rviz2",
@@ -160,7 +194,6 @@ def generate_launch_description():
     )
 
     nodes_to_start = [
-        # joint_state_publisher_node,
         robot_state_publisher_node,
         rviz_node,
     ]

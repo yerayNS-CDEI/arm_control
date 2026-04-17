@@ -1,0 +1,4 @@
+sensor_msgs/JointState joint_state
+bool publish_visualization
+---
+bool in_collision

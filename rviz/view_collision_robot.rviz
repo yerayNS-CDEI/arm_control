@@ -9,16 +9,6 @@ Panels:
         - /RobotModel1
         - /RobotModel1/Description Topic1
         - /TF1/Frames1
-        - /TF1/Tree1/world1
-        - /TF1/Tree1/world1/collision_base_link1
-        - /TF1/Tree1/world1/collision_base_link1/collision_base_link_inertia1
-        - /TF1/Tree1/world1/collision_base_link1/collision_base_link_inertia1/collision_shoulder_link1
-        - /TF1/Tree1/world1/collision_base_link1/collision_base_link_inertia1/collision_shoulder_link1/collision_upper_arm_link1
-        - /TF1/Tree1/world1/collision_base_link1/collision_base_link_inertia1/collision_shoulder_link1/collision_upper_arm_link1/collision_forearm_link1
-        - /TF1/Tree1/world1/collision_base_link1/collision_base_link_inertia1/collision_shoulder_link1/collision_upper_arm_link1/collision_forearm_link1/collision_wrist_1_link1
-        - /TF1/Tree1/world1/collision_base_link1/collision_base_link_inertia1/collision_shoulder_link1/collision_upper_arm_link1/collision_forearm_link1/collision_wrist_1_link1/collision_wrist_2_link1
-        - /TF1/Tree1/world1/collision_base_link1/collision_base_link_inertia1/collision_shoulder_link1/collision_upper_arm_link1/collision_forearm_link1/collision_wrist_1_link1/collision_wrist_2_link1/collision_wrist_3_link1
-        - /TF1/Tree1/world1/collision_base_link1/collision_base_link_inertia1/collision_shoulder_link1/collision_upper_arm_link1/collision_forearm_link1/collision_wrist_1_link1/collision_wrist_2_link1/collision_wrist_3_link1/collision_flange1
       Splitter Ratio: 0.5
     Tree Height: 322
   - Class: rviz_common/Selection
@@ -86,6 +76,11 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        collision_ee_cylinder_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
         collision_flange:
           Alpha: 1
           Show Axes: false
@@ -99,6 +94,26 @@ Visualization Manager:
           Alpha: 1
           Show Axes: false
           Show Trail: false
+        collision_plate_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        collision_sensor_A_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        collision_sensor_B_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        collision_sensor_C_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
         collision_shoulder_link:
           Alpha: 1
           Show Axes: false
@@ -157,23 +172,61 @@ Visualization Manager:
       Frame Timeout: 15
       Frames:
         All Enabled: false
-        base:
-          Value: false
-        base_link:
-          Value: false
-        base_link_inertia:
-          Value: false
+        arm_base:
+          Value: true
+        arm_base_link:
+          Value: true
+        arm_base_link_inertia:
+          Value: true
+        arm_ee_cylinder_link:
+          Value: true
+        arm_flange:
+          Value: true
+        arm_forearm_link:
+          Value: true
+        arm_ft_frame:
+          Value: true
+        arm_plate_link:
+          Value: true
+        arm_sensor_A_link:
+          Value: true
+        arm_sensor_B_link:
+          Value: true
+        arm_sensor_C_link:
+          Value: true
+        arm_shoulder_link:
+          Value: true
+        arm_tool0:
+          Value: true
+        arm_upper_arm_link:
+          Value: true
+        arm_wrist_1_link:
+          Value: true
+        arm_wrist_2_link:
+          Value: true
+        arm_wrist_3_link:
+          Value: true
         collision_base:
           Value: true
         collision_base_link:
           Value: true
         collision_base_link_inertia:
           Value: true
+        collision_ee_cylinder_link:
+          Value: true
         collision_flange:
           Value: true
         collision_forearm_link:
           Value: true
         collision_ft_frame:
+          Value: true
+        collision_plate_link:
+          Value: true
+        collision_sensor_A_link:
+          Value: true
+        collision_sensor_B_link:
+          Value: true
+        collision_sensor_C_link:
           Value: true
         collision_shoulder_link:
           Value: true
@@ -187,26 +240,10 @@ Visualization Manager:
           Value: true
         collision_wrist_3_link:
           Value: true
-        flange:
-          Value: false
-        forearm_link:
-          Value: false
-        ft_frame:
-          Value: false
-        shoulder_link:
-          Value: false
-        tool0:
-          Value: false
-        upper_arm_link:
-          Value: false
+        ground_plane:
+          Value: true
         world:
           Value: true
-        wrist_1_link:
-          Value: false
-        wrist_2_link:
-          Value: false
-        wrist_3_link:
-          Value: false
       Marker Scale: 1
       Name: TF
       Show Arrows: true
@@ -214,20 +251,28 @@ Visualization Manager:
       Show Names: false
       Tree:
         world:
-          base_link:
-            base:
+          arm_base_link:
+            arm_base:
               {}
-            base_link_inertia:
-              shoulder_link:
-                upper_arm_link:
-                  forearm_link:
-                    wrist_1_link:
-                      wrist_2_link:
-                        wrist_3_link:
-                          flange:
-                            tool0:
-                              {}
-                          ft_frame:
+            arm_base_link_inertia:
+              arm_shoulder_link:
+                arm_upper_arm_link:
+                  arm_forearm_link:
+                    arm_wrist_1_link:
+                      arm_wrist_2_link:
+                        arm_wrist_3_link:
+                          arm_flange:
+                            arm_ee_cylinder_link:
+                              arm_plate_link:
+                                arm_sensor_A_link:
+                                  {}
+                                arm_sensor_B_link:
+                                  {}
+                                arm_sensor_C_link:
+                                  {}
+                              arm_tool0:
+                                {}
+                          arm_ft_frame:
                             {}
           collision_base_link:
             collision_base:
@@ -240,11 +285,33 @@ Visualization Manager:
                       collision_wrist_2_link:
                         collision_wrist_3_link:
                           collision_flange:
-                            collision_tool0:
-                              {}
+                            collision_ee_cylinder_link:
+                              collision_plate_link:
+                                collision_sensor_A_link:
+                                  {}
+                                collision_sensor_B_link:
+                                  {}
+                                collision_sensor_C_link:
+                                  {}
+                              collision_tool0:
+                                {}
                           collision_ft_frame:
                             {}
+          ground_plane:
+            {}
       Update Interval: 0
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MarkerArray
+      Namespaces:
+        collision_objects: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /collision/world_obstacles
       Value: true
   Enabled: true
   Global Options:
@@ -292,7 +359,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 2.737480878829956
+      Distance: 3.1825413703918457
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -307,10 +374,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.2303982675075531
+      Pitch: 0.4453981816768646
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 0.8403980731964111
+      Yaw: 0.8953980803489685
     Saved: ~
 Window Geometry:
   Displays:
@@ -326,5 +393,5 @@ Window Geometry:
   Views:
     collapsed: true
   Width: 929
-  X: 62
+  X: 991
   Y: 27
