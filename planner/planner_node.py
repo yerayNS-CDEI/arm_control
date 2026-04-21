@@ -1272,9 +1272,38 @@ class PlannerNode(Node):
         self.get_logger().info(f"Current joint state = {self.current_joint_state.position}")
         all_joint_values_print.append(q_current)
 
+        def select_best_joint_solution(ik_solutions, q_ref):
+            """Pick the closest valid IK candidate and unwrap it near q_ref."""
+            valid_rows = ~np.isnan(ik_solutions).any(axis=1)
+            if not np.any(valid_rows):
+                return np.full(6, np.nan)
+
+            weights = np.ones(6)
+            idx_valid = np.where(valid_rows)[0]
+            diffs = np.array([
+                np.sqrt(np.sum(weights * np.abs(np.arctan2(np.sin(q_ref - ik_solutions[i]), np.cos(q_ref - ik_solutions[i])))))
+                for i in idx_valid
+            ])
+            best_sol = np.array(ik_solutions[idx_valid[np.argmin(diffs)]], dtype=float)
+
+            # Unwrap each joint to the equivalent angle nearest the current state.
+            delta = (best_sol - q_ref + np.pi) % (2 * np.pi) - np.pi
+            best_sol = q_ref + delta
+
+            # Keep joints inside UR controller limits.
+            for i in range(len(best_sol)):
+                while best_sol[i] > 2 * np.pi:
+                    best_sol[i] -= 2 * np.pi
+                while best_sol[i] < -2 * np.pi:
+                    best_sol[i] += 2 * np.pi
+
+            return best_sol
+
         for i in range(len(path_world)):
             T = create_pose_matrix(path_world[i], interp_rot_matrices[i])
-            q_new = closed_form_algorithm(T, q_current, type=0)
+            ik_solutions = closed_form_algorithm(T, q_current=q_current, type=0, return_all_solutions=True)
+            self.get_logger().info(f"IK solutions for waypoint {i}: {ik_solutions}")
+            q_new = select_best_joint_solution(ik_solutions, q_current)
             if np.any(np.isnan(q_new)):
                 self.get_logger().error(f"Invalid IK at step {i}: pose = {T[:3, 3]}. Path world = {path_world[i]}")
                 self.invalid_path = True 
@@ -1288,7 +1317,8 @@ class PlannerNode(Node):
         orn = goal_orientation_wrist3.as_matrix()
         T = create_pose_matrix(pos, orn)
         
-        precise_goal_joint_values = closed_form_algorithm(T, q_current, type=0)
+        precise_goal_solutions = closed_form_algorithm(T, q_current=q_current, type=0, return_all_solutions=True)
+        precise_goal_joint_values = select_best_joint_solution(precise_goal_solutions, q_current)
         all_joint_values_print.append(precise_goal_joint_values)
         all_joint_values.append(precise_goal_joint_values)
 
