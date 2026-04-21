@@ -3,7 +3,7 @@ import numpy as np
 import heapq
 from math import sqrt
 
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 # from mpl_toolkits.mplot3d import Axes3D  # Not needed - 3D projection auto-registers in matplotlib 3.1+
 
 from scipy.ndimage import binary_dilation
@@ -391,6 +391,11 @@ def visualize_path(grid: np.ndarray, path: List[Tuple[int, int, int]]):
     """
     Visualize the grid and found path.
     """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        raise RuntimeError("matplotlib is required only for plotting")
+    
     fig = plt.figure()
     ax = plt.axes(projection='3d')
 
