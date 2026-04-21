@@ -11,6 +11,7 @@ import sys
 import argparse
 from rclpy.utilities import remove_ros_args
 import time
+import matplotlib.pyplot as plt
 
 from arm_control.srv import HyperspectralCommand, HyperspectralConfig, PredictMaterial
 
@@ -19,11 +20,18 @@ SPECTRUM_LENGTH = 256
 
 
 class InspectionManager(Node):
-    def __init__(self):
+    def __init__(self, enable_plot=False):
         super().__init__('inspection_manager')
         self.camera_client = self.create_client(HyperspectralCommand, 'hyperspectral/measurement')
         self.config_client  = self.create_client(HyperspectralConfig,  'hyperspectral/configure')
         self.ml_client      = self.create_client(PredictMaterial,       'hyperspectral/predict_material')
+        
+        self.enable_plot = enable_plot
+        if self.enable_plot:
+            plt.ion() # Mode interactiu (no bloqueja ROS 2)
+            # Creem dos subgràfics (un al costat de l'altre) per VIS i NIR
+            self.fig, (self.ax_vis, self.ax_nir) = plt.subplots(1, 2, figsize=(12, 5))
+            self.fig.canvas.manager.set_window_title('Signatura Química - Reflectància')
 
     # ----------------------------------------------------------
     # Helper: Configuracio d'un sensor
@@ -48,6 +56,38 @@ class InspectionManager(Node):
         else:
             self.get_logger().error(f"  X {response.message}")
         return response.success
+
+    # ----------------------------------------------------------
+    # Helper: Actualitza la finestra del gràfic amb la nova mesura.
+    # ----------------------------------------------------------
+    def _update_plot(self, vis_norm, nir_norm, title_info):
+        if not self.enable_plot: return
+        
+        vis_wls = np.linspace(325.3, 792.6, SPECTRUM_LENGTH)
+        nir_wls = np.linspace(991.0, 1707.0, SPECTRUM_LENGTH)
+        
+        self.ax_vis.clear()
+        self.ax_nir.clear()
+        
+        # Plot VIS
+        self.ax_vis.plot(vis_wls, vis_norm, color='#1f77b4', linewidth=2)
+        self.ax_vis.set_title('Espectre VIS')
+        self.ax_vis.set_xlabel('Longitud d\'ona (nm)')
+        self.ax_vis.set_ylabel('Reflectància')
+        self.ax_vis.set_ylim(-0.1, 1.2) # Limitem de 0 a 1 (amb una mica de marge visual)
+        self.ax_vis.grid(True, linestyle='--', alpha=0.6)
+        
+        # Plot NIR
+        self.ax_nir.plot(nir_wls, nir_norm, color='#d62728', linewidth=2)
+        self.ax_nir.set_title('Espectre NIR')
+        self.ax_nir.set_xlabel('Longitud d\'ona (nm)')
+        self.ax_nir.set_ylim(-0.1, 1.2)
+        self.ax_nir.grid(True, linestyle='--', alpha=0.6)
+        
+        # Títol global amb el material detectat o l'etiqueta
+        self.fig.suptitle(f"Inspecció: {title_info}", fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        plt.pause(0.05)
 
     # ----------------------------------------------------------
     # Helper: Obtenir calibracio guardada al node
@@ -85,6 +125,121 @@ class InspectionManager(Node):
                 f"Longitud invalida per a {label}: {len(spectrum)} (esperats {SPECTRUM_LENGTH})"
             )
             return False
+        return True
+
+    # ----------------------------------------------------------
+    # Helper: Guarda mesures intensitat crua
+    # ----------------------------------------------------------
+    def _log_raw_intensity(self, x, y, z, res_cam, res_gds, res_grf):
+        csv_dir = os.path.expanduser("~/Documents/Hyperspectral_camera/src/arm_control/resource/raw_data")
+        os.makedirs(csv_dir, exist_ok=True)
+
+        file_path = os.path.join(csv_dir, "raw_intensity.csv")
+        file_exists = os.path.isfile(file_path)
+
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S.%f")[:-3]
+
+        with open(file_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+
+            if not file_exists:
+                header = ["Type", "Date", "Time", "X", "Y", "Z"]
+                header += [f"VIS_{i}" for i in range(SPECTRUM_LENGTH)]
+                header += [f"NIR_{i}" for i in range(SPECTRUM_LENGTH)]
+                writer.writerow(header)
+
+            def write_row(tag, vis, nir):
+                row = [tag, date_str, time_str, x, y, z]
+                row += vis.tolist()
+                row += nir.tolist()
+                writer.writerow(row)
+
+            write_row("GDS", np.array(res_gds.vis_spectrum), np.array(res_gds.nir_spectrum))
+            write_row("GRF", np.array(res_grf.vis_spectrum), np.array(res_grf.nir_spectrum))
+            write_row("GSM", np.array(res_cam.vis_spectrum), np.array(res_cam.nir_spectrum))
+    
+    # ----------------------------------------------------------
+    # Helper: Guarda mesures reflectància
+    # ----------------------------------------------------------
+    def _log_reflectance(self, x, y, z, vis_norm, nir_norm):
+        csv_dir = os.path.expanduser("~/Documents/Hyperspectral_camera/src/arm_control/resource/reflectance")
+        os.makedirs(csv_dir, exist_ok=True)
+
+        file_path = os.path.join(csv_dir, "reflectance.csv")
+        file_exists = os.path.isfile(file_path)
+
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S.%f")[:-3]
+
+        with open(file_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+
+            if not file_exists:
+                header = ["Date", "Time", "X", "Y", "Z"]
+                header += [f"VIS_{i}" for i in range(SPECTRUM_LENGTH)]
+                header += [f"NIR_{i}" for i in range(SPECTRUM_LENGTH)]
+                writer.writerow(header)
+
+            row = [date_str, time_str, x, y, z]
+            row += vis_norm.tolist()
+            row += nir_norm.tolist()
+            writer.writerow(row)
+
+    # ----------------------------------------------------------
+    # Helper: Guarda valors MTI al log (per monitoritzar estabilitat i calibració al llarg del temps)
+    # ----------------------------------------------------------
+    def _log_mti(self, vis_mti, nir_mti):
+        file_path = os.path.expanduser("~/Documents/Hyperspectral_camera/src/arm_control/resource/mti_log.json")
+
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "VIS_MTI": vis_mti,
+            "NIR_MTI": nir_mti
+        }
+
+        data = []
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+            except:
+                data = []
+
+        data.append(entry)
+
+        with open(file_path, 'w') as f:
+            json.dump(data, f, indent=4)
+
+    # ----------------------------------------------------------
+    # Helper: Comprova l'estabilitat de les mesures
+    # ----------------------------------------------------------
+    def _check_stability(self, vis, nir):
+        vis = np.array(vis)
+        nir = np.array(nir)
+
+        # 1. Soroll: derivada
+        vis_noise = np.std(np.diff(vis))
+        nir_noise = np.std(np.diff(nir))
+
+        # 2. Energia
+        vis_mean = np.mean(vis)
+        nir_mean = np.mean(nir)
+
+        # 3. Zeros (NIR crític)
+        nir_zero_ratio = np.sum(nir == 0) / len(nir)
+
+        if vis_noise > 0.1:
+            return False
+        if nir_noise > 0.15:
+            return False
+        if vis_mean < 0.01:
+            return False
+        if nir_zero_ratio > 0.1:
+            return False
+        
         return True
 
     # ----------------------------------------------------------
@@ -126,13 +281,42 @@ class InspectionManager(Node):
         # --- Recuperar calibracions ---
         self.get_logger().info("3. Recuperant calibracions (GDS, GDR, GRF) del node...")
         res_gds = self.get_calibration_data("GDS")
-        res_gdr = self.get_calibration_data("GDR")
         res_grf = self.get_calibration_data("GRF")
+        
+        # 1. RECUPERAR L'MTI REAL DEL NODE
+        self.get_logger().info("   Recuperant la configuració MTI final del node...")
+        req_mti = HyperspectralCommand.Request()
+        req_mti.command = "GET_MTI"
+        future_mti = self.camera_client.call_async(req_mti)
+        rclpy.spin_until_future_complete(self, future_mti)
+        res_mti = future_mti.result()
+        
+        if res_mti and res_mti.vis_ok and res_mti.nir_ok:
+            try:
+                real_vis_mti, real_nir_mti = res_mti.message.split('|')
+                mti_vis = int(real_vis_mti)
+                mti_nir = int(real_nir_mti)
+            except ValueError:
+                mti_vis = vis_mti if vis_mti is not None else "node_default"
+                mti_nir = nir_mti if nir_mti is not None else "node_default"
+        else:
+            mti_vis = vis_mti if vis_mti is not None else "node_default"
+            mti_nir = nir_mti if nir_mti is not None else "node_default"
 
-        if res_grf is None or not res_grf.vis_ok:
+        # --- LOG MTI ---
+        self._log_mti(mti_vis, mti_nir)
+
+        # 2. VALIDACIÓ ESTRICТА DE LA CALIBRACIÓ
+        if (
+            res_gds is None or res_grf is None or
+            not res_gds.vis_ok or not res_gds.nir_ok or
+            not res_grf.vis_ok or not res_grf.nir_ok or
+            len(res_gds.vis_spectrum) != SPECTRUM_LENGTH or
+            len(res_grf.vis_spectrum) != SPECTRUM_LENGTH
+        ):
             self.get_logger().error(
-                "Error: Falten les dades del White Reference (GRF). "
-                "Executa la sequencia de calibracio al hyperspectral_node primer."
+                "Calibracions invàlides o incompletes (GDS/GRF VIS o NIR). "
+                "La inspecció no pot continuar."
             )
             return
 
@@ -180,12 +364,12 @@ class InspectionManager(Node):
         self.get_logger().info("5. Normalitzant l'espectre (Reflectancia: (GSM-GDS) / (GRF-GDS))...")
         
         # 1. Passem a Numpy les dades de la Mostra (GSM), del Blanc (GRF) i del Soroll (GDS)
-        vis_gsm = np.array(res_cam.vis_spectrum, dtype=float)
-        vis_grf = np.array(res_grf.vis_spectrum, dtype=float)
-        vis_gds = np.array(res_gds.vis_spectrum, dtype=float)
-        nir_gsm = np.array(res_cam.nir_spectrum, dtype=float)
-        nir_grf = np.array(res_grf.nir_spectrum, dtype=float)
-        nir_gds = np.array(res_gds.nir_spectrum, dtype=float)
+        vis_gsm = np.array(res_cam.vis_spectrum, dtype=np.float64)
+        vis_grf = np.array(res_grf.vis_spectrum, dtype=np.float64)
+        vis_gds = np.array(res_gds.vis_spectrum, dtype=np.float64)
+        nir_gsm = np.array(res_cam.nir_spectrum, dtype=np.float64)
+        nir_grf = np.array(res_grf.nir_spectrum, dtype=np.float64)
+        nir_gds = np.array(res_gds.nir_spectrum, dtype=np.float64)
 
         # 2. Fem la "Tara": Restem el soroll a la mostra i al blanc
         vis_gsm_net = vis_gsm - vis_gds
@@ -196,15 +380,21 @@ class InspectionManager(Node):
 
         # 3. Dividim les dades netes. (Usem > 0 al divisor per evitar errors matemàtics)
         vis_norm = np.divide(vis_gsm_net, vis_grf_net, out=np.zeros(SPECTRUM_LENGTH), where=vis_grf_net > 0)
-        vis_norm = np.maximum(vis_norm, 0)  # Assegurem que no hi ha valors negatius
-        
         nir_norm = np.divide(nir_gsm_net, nir_grf_net, out=np.zeros(SPECTRUM_LENGTH), where=nir_grf_net > 0)
-        nir_norm = np.maximum(nir_norm, 0)  # Assegurem que no hi ha valors negatius
 
         # Doble validacio: la normalitzacio no ha de canviar la longitud
         if not self._validate_spectrum(vis_norm, "VIS normalitzat") or \
            not self._validate_spectrum(nir_norm, "NIR normalitzat"):
             return
+
+        if not self._check_stability(vis_norm, nir_norm):
+            self.get_logger().error("❌ Sample rejected due to instability")
+            return
+        
+        # SI ÉS ESTABLE, LLAVORS GUARDEM ELS REGISTRES OFICIALS
+        self.get_logger().info("✅ Mostra estable. Guardant dades crues i reflectància...")
+        self._log_raw_intensity(x, y, z, res_cam, res_gds, res_grf)
+        self._log_reflectance(x, y, z, vis_norm, nir_norm)
 
         # --- Prediccio ML ---
         # ==========================================================
@@ -226,6 +416,7 @@ class InspectionManager(Node):
                 return
 
             self.get_logger().info(f"  Material: {res_ml.material} | Confianca: {res_ml.confidence:.3f}")
+            self._update_plot(vis_norm, nir_norm, f"{res_ml.material} (Conf: {res_ml.confidence*100:.1f}%)")
 
             # ----------------------------------------------------------
             # A) CSV DE PREDICCIONS (EL DIARI)
@@ -314,7 +505,8 @@ class InspectionManager(Node):
             # MODE CAPTURA (NOMÉS PER CREAR DATASET D'ENTRENAMENT)
             # ==========================================================
             self.get_logger().info(f"6. [MODE COLLECT] Guardant espectre d'entrenament per a la classe: '{label}'...")
-            
+            self._update_plot(vis_norm, nir_norm, f"Mode Collect - Etiqueta: {label}")
+
             now = datetime.now()
             # Guardem tot en un arxiu específic per entrenar, independent de les inspeccions diàries
             csv_dir = os.path.expanduser("~/Documents/Hyperspectral_camera/src/arm_control/resource")
@@ -340,12 +532,18 @@ class InspectionManager(Node):
 
                 # Format de la fila: Measure Type, Date, Time, Counter (0), Label, Class, ...espectres
                 data_row = ["GSM", date_str, time_str, 0, label, label]
+                data_row_brut = ["GSM", date_str, time_str, 0, label, label]
                 
                 # Transformem els punts a comes perquè el teu train_model.py els llegeixi bé com abans
+                espectre_complet_brut = vis_gsm.tolist() + nir_gsm.tolist()
+                espectre_strings_brut = [str(val).replace('.', ',') for val in espectre_complet_brut]
+                data_row_brut.extend(espectre_strings_brut)
                 espectre_complet = vis_norm.tolist() + nir_norm.tolist()
                 espectre_strings = [str(val).replace('.', ',') for val in espectre_complet]
                 data_row.extend(espectre_strings)
+
                 
+                writer.writerow(data_row_brut)
                 writer.writerow(data_row)
                 
             self.get_logger().info(f"7. Dades guardades correctament a '{dataset_path}'!")
@@ -447,7 +645,10 @@ def parse_args():
                         help='NIR: temps d integracio (MTI)')
     parser.add_argument('--nir-thp', type=int, default=None,
                         help='NIR: threshold de pic (THP)')
-
+    
+    parser.add_argument('--plot', action='store_true',
+                        help="Mostra un gràfic en temps real de la reflectància.")
+    
     # parse_known_args evita conflictes amb els args internals de ROS2
     clean_args = remove_ros_args(sys.argv)[1:]
     known, _ = parser.parse_known_args(clean_args)
@@ -458,10 +659,11 @@ def main(args=None):
     rclpy.init(args=args)
     params = parse_args()
 
-    manager = InspectionManager()
+    manager = InspectionManager(enable_plot=params.plot)
+    
     if params.mode == 'focus':
-        vis_speed = params.vis_mti if params.vis_mti else 15000
-        nir_speed = params.nir_mti if params.nir_mti else 15000
+        vis_speed = params.vis_mti if params.vis_mti else 25000
+        nir_speed = params.nir_mti if params.nir_mti else 25000
 
         manager.get_logger().info("Esperant que el node de la càmera estigui actiu...")
         manager.config_client.wait_for_service()

@@ -73,7 +73,6 @@ class HyperspectralNode(Node):
         # Variables per emmagatzemar les calibracions
         self.calibration_data = {
             "GDS": {"vis": None, "nir": None, "timestamp": None},
-            "GDR": {"vis": None, "nir": None, "timestamp": None}, 
             "GRF": {"vis": None, "nir": None, "timestamp": None}
         }
 
@@ -201,24 +200,26 @@ class HyperspectralNode(Node):
     # ----------------------------------------------------------
     def _configure_sensors(self, vis_mtr, vis_mti, nir_mtr, nir_mti):
         """Internal configuration helper."""
-        self.vis.send_config("MTR", vis_mtr); time.sleep(0.2)
-        self.vis.send_config("MTI", vis_mti); time.sleep(0.2)
-        self.vis.send_config("THP", 1);       time.sleep(0.2)
-        
-        self.nir.send_config("MTR", nir_mtr); time.sleep(0.2)
-        self.nir.send_config("MTI", nir_mti); time.sleep(0.2)
-        self.nir.send_config("THP", 1);       time.sleep(0.2)
-        
+        self._send_config_safe("VIS", self.vis, "MTR", vis_mtr)
+        self._send_config_safe("VIS", self.vis, "MTI", vis_mti)
+        self._send_config_safe("VIS", self.vis, "THP", 1)
+
+        self._send_config_safe("NIR", self.nir, "MTR", nir_mtr)
+        self._send_config_safe("NIR", self.nir, "MTI", nir_mti)
+        self._send_config_safe("NIR", self.nir, "THP", 1)
+
+        self.vis_mtr = vis_mtr
+        self.vis_mti = vis_mti
+        self.nir_mtr = nir_mtr
+        self.nir_mti = nir_mti
+
         time.sleep(3)  # Stabilization
 
     # ----------------------------------------------------------
     # Helper: Calibrate sensors (Mandatory Sequence)
     # ----------------------------------------------------------
-    # ----------------------------------------------------------
-    # Helper: Calibrate sensors (Mandatory Sequence)
-    # ----------------------------------------------------------
     def _calibrate_sensors(self):
-        """Send the mandatory GDS -> GDR -> GRF sequence before any GSM."""
+        """Send the mandatory GDS -> GRF sequence before any GSM."""
         
         # INICI DEL NOU CODI: Invoquem l'ajust de llum abans de prendre referències obscures
         self._auto_calibrate_mti()
@@ -226,7 +227,6 @@ class HyperspectralNode(Node):
 
         sequence = [
             ("GDS", "Dark Sample (POSA LA TAPA A LA CÀMERA)"), 
-            ("GDR", "Dark Reference (MANTÉN LA TAPA POSADA)"), 
             ("GRF", "White Reference (TREU LA TAPA I POSA EL PAPER BLANC)")
         ]
         
@@ -235,38 +235,32 @@ class HyperspectralNode(Node):
             input(f"\n>>> PREPARACIÓ: {label} - Prem ENTER quan estiguis llesta...")
             
             self.get_logger().info(f"Sending mandatory calibration command: {cmd}...")
-                    
-            # Neteja de buffers i espera com a l'exemple
-            self.vis.flush_buffer()
-            self.nir.flush_buffer()
-            time.sleep(0.1)
-            self.vis.wait_after_ping(0.5)
-            self.nir.pause_keepalive()
-            self.nir.wait_after_ping(0.5)
-            
-            # Enviar la comanda de calibració
-            self.vis.send_simple(cmd)
-            self.nir.send_simple(cmd)
-            
-            # Temps d'espera i lectura de resultats
-            time.sleep(1.2)
-            
+                        
             results = {}
-            def read_sensor(client, sensor_label):
-                try:
-                    results[sensor_label] = client.read_frame([cmd])
-                except Exception as e:
-                    results[sensor_label] = f"ERROR: {e}"
+            try:
+                self._prepare_capture_window()
 
-            t_vis = threading.Thread(target=read_sensor, args=(self.vis, "VIS"))
-            t_nir = threading.Thread(target=read_sensor, args=(self.nir, "NIR"))
-            t_vis.start()
-            t_nir.start()
-            t_vis.join()
-            t_nir.join()
+                self.vis.send_simple(cmd)
+                self.nir.send_simple(cmd)
+
+                time.sleep(1.2)
+
+                def read_sensor(client, sensor_label):
+                    try:
+                        results[sensor_label] = client.read_frame([cmd])
+                    except Exception as e:
+                        results[sensor_label] = f"ERROR: {e}"
+
+                t_vis = threading.Thread(target=read_sensor, args=(self.vis, "VIS"))
+                t_nir = threading.Thread(target=read_sensor, args=(self.nir, "NIR"))
+                t_vis.start()
+                t_nir.start()
+                t_vis.join()
+                t_nir.join()
+
+            finally:
+                self._close_capture_window()
             
-            self.nir.resume_keepalive()
-
             # GUARDEM LES DADES DE CALIBRACIÓ!
             if (isinstance(results["VIS"], dict) and "spectrum" in results["VIS"] and 
                 isinstance(results["NIR"], dict) and "spectrum" in results["NIR"]):
@@ -286,7 +280,62 @@ class HyperspectralNode(Node):
             
             self.get_logger().info(f"✓ Calibration {cmd} complete.")
             time.sleep(1.5) # Espera curta entre comandes
-            
+
+    def _prepare_capture_window(self):
+        """
+        Open a safe acquisition window for both sensors.
+        VIS must keep keepalive active but synchronized after ping.
+        NIR must pause keepalive before acquisition.
+        """
+        self.vis.flush_buffer()
+        self.nir.flush_buffer()
+        time.sleep(0.1)
+
+        self.vis.wait_after_ping(0.5)
+
+        self.nir.pause_keepalive()
+        self.nir.wait_after_ping(0.5)
+
+    def _close_capture_window(self):
+        """
+        Always restore NIR keepalive and clean remaining bytes.
+        """
+        try:
+            self.nir.resume_keepalive()
+        except Exception as e:
+            self.get_logger().warning(f"Could not resume NIR keepalive: {e}")
+
+        time.sleep(0.1)
+        self.vis.flush_buffer()
+        self.nir.flush_buffer()
+
+    def _send_config_safe(self, sensor_name, client, cmd, value):
+        """
+        Send a configuration command with the correct TCP handshake
+        and consume the sensor OK reply immediately.
+        """
+        if sensor_name == "VIS":
+            client.flush_buffer()
+            time.sleep(0.1)
+            self.vis.wait_after_ping(0.5)
+            client.send_config(cmd, value)
+            time.sleep(0.2)
+            client.flush_buffer()
+            return
+
+        client.flush_buffer()
+        time.sleep(0.1)
+        self.nir.pause_keepalive()
+        try:
+            self.nir.wait_after_ping(0.5)
+            client.send_config(cmd, value)
+            time.sleep(0.2)
+            client.flush_buffer()
+        finally:
+            try:
+                self.nir.resume_keepalive()
+            except Exception as e:
+                self.get_logger().warning(f"Could not resume NIR keepalive after config: {e}")
     # ----------------------------------------------------------
     # SERVICE: Configuration
     # ----------------------------------------------------------
@@ -310,9 +359,19 @@ class HyperspectralNode(Node):
         client = self.vis if sensor_name == "VIS" else self.nir
 
         try:
-            client.send_config(cmd, value)
-            time.sleep(0.2)
-            
+            self._send_config_safe(sensor_name, client, cmd, value)
+
+            if sensor_name == "VIS":
+                if cmd == "MTR":
+                    self.vis_mtr = value
+                elif cmd == "MTI":
+                    self.vis_mti = value
+            else:
+                if cmd == "MTR":
+                    self.nir_mtr = value
+                elif cmd == "MTI":
+                    self.nir_mti = value
+
             response.success = True
             response.message = f"OK: {sensor_name} {cmd}={value}"
             self.get_logger().info(response.message)
@@ -330,9 +389,9 @@ class HyperspectralNode(Node):
     # ----------------------------------------------------------
     def measurement_callback(self, request, response):
         """
-        Execute measurement command (GDS, GDR, GRF, GSM) with automatic retry.
+        Execute measurement command (GDS, GRF, GSM) with automatic retry.
         Request:
-            command: str ("GDS", "GDR", "GRF", "GSM")
+            command: str ("GDS", "GRF", "GSM")
         Response:
             vis_ok: bool
             vis_spectrum: uint16[]
@@ -348,41 +407,88 @@ class HyperspectralNode(Node):
         z_coord = request.z_coord
         self.get_logger().info(f"Measurement request: {cmd} at ({x_coord}, {y_coord}, {z_coord})")
         
-        # Comprovar si és una petició de calibració guardada
+        if cmd == "GET_MTI":
+            response.vis_ok = True
+            response.nir_ok = True
+            response.message = f"{self.vis_mti}|{self.nir_mti}"
+            return response
+        
         if cmd.startswith("GET_"):
-            calib_type = cmd[4:]  # Treu "GET_" -> GDS, GDR, GRF
+            calib_type = cmd[4:]
             return self._get_stored_calibration(calib_type, response)
 
-        # Try with automatic retry (up to 3 attempts)
+        results = {}
+
         for attempt in range(3):
             try:
-                # Clear buffers
-                self.vis.flush_buffer()
-                self.nir.flush_buffer()
-                time.sleep(0.1)
+                self._prepare_capture_window()
 
-                # Wait for safe timing window after PNG
-                self.vis.wait_after_ping(0.5)
-                self.nir.pause_keepalive() 
-                self.nir.wait_after_ping(0.5)
-
-                # Send commands
                 self.get_logger().info(f"[Attempt {attempt+1}/3] Sending {cmd}...")
                 self.vis.send_simple(cmd)
                 self.nir.send_simple(cmd)
-                break  # Success
 
-            except (BrokenPipeError, ConnectionError, OSError) as e:
-                self.get_logger().warning(f"[Attempt {attempt+1}/3] FAILED: {e}")
+                time.sleep(1.2)
+
+                def read_sensor(client, label):
+                    try:
+                        results[label] = client.read_frame([cmd])
+                    except Exception as e:
+                        results[label] = f"ERROR: {e}"
+
+                t_vis = threading.Thread(target=read_sensor, args=(self.vis, "VIS"))
+                t_nir = threading.Thread(target=read_sensor, args=(self.nir, "NIR"))
+                t_vis.start()
+                t_nir.start()
+                t_vis.join()
+                t_nir.join()
+
+                def is_valid_frame(sensor_dict, sensor_name):
+                    if not isinstance(sensor_dict, dict) or "spectrum" not in sensor_dict:
+                        return False
+
+                    arr = np.array(sensor_dict["spectrum"], dtype=np.float64)
+
+                    if len(arr) != 256:
+                        self.get_logger().warning(f"{sensor_name} invalid length: {len(arr)}")
+                        return False
+
+                    if not np.all(np.isfinite(arr)):
+                        self.get_logger().warning(f"{sensor_name} contains non-finite values")
+                        return False
+
+                    if sensor_name == "NIR":
+                        zero_count = int(np.sum(arr == 0.0))
+                        if zero_count > len(arr) * 0.1:
+                            self.get_logger().warning(f"{sensor_name} corrupted frame: {zero_count} exact zeros")
+                            return False
+
+                    if np.mean(arr) < 100.0:
+                        self.get_logger().warning(f"{sensor_name} underexposed frame: mean={np.mean(arr):.2f}")
+                        return False
+
+                    return True
+
+                if is_valid_frame(results.get("VIS"), "VIS") and is_valid_frame(results.get("NIR"), "NIR"):
+                    break
+
+                self.get_logger().warning(f"[Attempt {attempt+1}/3] Invalid frames detected. Retrying...")
+                if attempt == 2:
+                    response.vis_ok = False
+                    response.nir_ok = False
+                    response.message = "ERROR|Invalid frames after 3 attempts"
+                    return response
                 
-                if attempt < 2:  # Retry
+            except (BrokenPipeError, ConnectionError, OSError, Exception) as e:
+                self.get_logger().warning(f"[Attempt {attempt+1}/3] FAILED: {e}")
+
+                if attempt < 2:
                     self.get_logger().info("Reconnecting...")
                     try:
                         self.vis.close()
                         self.nir.close()
-                    except:
+                    except Exception:
                         pass
-                    
+
                     time.sleep(2)
                     self.vis = LenzClient(self.get_parameter("vis_ip").value, timeout=15.0)
                     self.nir = LenzClient(self.get_parameter("nir_ip").value, timeout=15.0)
@@ -390,45 +496,19 @@ class HyperspectralNode(Node):
                     self.nir.connect()
                     time.sleep(3)
 
-                    # Reconfigure
                     self._configure_sensors(
                         self.vis_mtr, self.vis_mti,
                         self.nir_mtr, self.nir_mti
                     )
                     time.sleep(2)
                 else:
-                    # All attempts failed
                     response.vis_ok = False
                     response.nir_ok = False
-                    response.message = f"Failed after 3 attempts: {e}"
+                    response.message = f"ERROR|Failed after 3 attempts: {e}"
                     return response
 
-        # Wait for sensor to complete measurement
-        time.sleep(1.2)
-
-        # Read results in parallel threads (com en la calibració que funciona)
-        results = {}
-        def read_sensor(client, label):
-            try:
-                self.get_logger().info(f"Reading {label} sensor response...")
-                results[label] = client.read_frame([cmd])
-                self.get_logger().info(f"{label} response type: {type(results[label])}, keys: {list(results[label].keys()) if isinstance(results[label], dict) else 'Not a dict'}")
-            except Exception as e:
-                results[label] = f"ERROR: {e}"
-                self.get_logger().error(f"{label} read_frame failed: {e}")
-
-        t_vis = threading.Thread(target=read_sensor, args=(self.vis, "VIS"))
-        t_nir = threading.Thread(target=read_sensor, args=(self.nir, "NIR"))
-
-        t_vis.start()
-        t_nir.start()
-        t_vis.join()
-        t_nir.join()
-
-        # Clean up remaining bytes
-        time.sleep(0.1)
-        self.vis.flush_buffer()
-        self.nir.flush_buffer()
+            finally:
+                self._close_capture_window()
 
         # Process VIS results
         if isinstance(results["VIS"], dict) and "spectrum" in results["VIS"]:
@@ -465,7 +545,7 @@ class HyperspectralNode(Node):
                 self.get_logger().warning(f"NIR error: {results['NIR']}")
 
         # Guardar dades de calibració si és una comanda de calibració
-        if cmd in ["GDS", "GDR", "GRF"] and response.vis_ok and response.nir_ok:
+        if cmd in ["GDS", "GRF"] and response.vis_ok and response.nir_ok:
             self.calibration_data[cmd] = {
                 "vis": response.vis_spectrum,
                 "nir": response.nir_spectrum,
@@ -513,41 +593,36 @@ class HyperspectralNode(Node):
         abans de començar la seqüència de calibratge real.
         """
         print("\n" + "="*60)
-        print("⚙️  PAS 0: AUTO-CALIBRATGE D'EXPOSICIÓ (MTI)")
+        print(" PAS 0: AUTO-CALIBRATGE D'EXPOSICIÓ (MTI)")
         print("="*60)
         input(">>> PREPARACIÓ: Posa el PAPER BLANC a Z=30mm i prem ENTER...")
 
         self.get_logger().info(f"Iniciant auto-calibratge. MTI actuals - VIS: {self.vis_mti}, NIR: {self.nir_mti}")
 
-        # Neteja i sincronització de seguretat TCP obligatòria abans de capturar
-        self.vis.flush_buffer()
-        self.nir.flush_buffer()
-        time.sleep(0.1)
-        self.vis.wait_after_ping(0.5)
-        self.nir.pause_keepalive()
-        self.nir.wait_after_ping(0.5)
-
-        # 1. Demanem un espectre cru de prova (GSM)
-        self.vis.send_simple("GSM")
-        self.nir.send_simple("GSM")
-        time.sleep(1.2)
-
         results = {}
-        def read_sensor(client, sensor_label):
-            try:
-                results[sensor_label] = client.read_frame(["GSM"])
-            except Exception as e:
-                results[sensor_label] = f"ERROR: {e}"
 
-        # Lectura en paral·lel
-        t_vis = threading.Thread(target=read_sensor, args=(self.vis, "VIS"))
-        t_nir = threading.Thread(target=read_sensor, args=(self.nir, "NIR"))
-        t_vis.start()
-        t_nir.start()
-        t_vis.join()
-        t_nir.join()
+        try:
+            self._prepare_capture_window()
 
-        self.nir.resume_keepalive()
+            self.vis.send_simple("GSM")
+            self.nir.send_simple("GSM")
+            time.sleep(1.2)
+
+            def read_sensor(client, sensor_label):
+                try:
+                    results[sensor_label] = client.read_frame(["GSM"])
+                except Exception as e:
+                    results[sensor_label] = f"ERROR: {e}"
+
+            t_vis = threading.Thread(target=read_sensor, args=(self.vis, "VIS"))
+            t_nir = threading.Thread(target=read_sensor, args=(self.nir, "NIR"))
+            t_vis.start()
+            t_nir.start()
+            t_vis.join()
+            t_nir.join()
+
+        finally:
+            self._close_capture_window()
 
         # Neteja immediata de restes al buffer
         time.sleep(0.1)
@@ -555,8 +630,10 @@ class HyperspectralNode(Node):
         self.nir.flush_buffer()
 
         # 2. Comprovació de dades i Càlcul Matemàtic
-        if (isinstance(results.get("VIS"), dict) and "spectrum" in results["VIS"] and 
-            isinstance(results.get("NIR"), dict) and "spectrum" in results["NIR"]):
+        if (
+            isinstance(results.get("VIS"), dict) and "spectrum" in results["VIS"] and 
+            isinstance(results.get("NIR"), dict) and "spectrum" in results["NIR"]
+            ):
             
             # Passem a float64 per prevenció d'underflow abans d'operar
             vis_array = np.array(results["VIS"]["spectrum"], dtype=np.float64)
@@ -579,9 +656,9 @@ class HyperspectralNode(Node):
             self.get_logger().info(f"Aplicant nous MTIs òptims - VIS: {new_mti_vis}, NIR: {new_mti_nir}")
 
             # 3. Enviem la configuració a la xarxa
-            self.vis.send_config("MTI", new_mti_vis)
+            self._send_config_safe("VIS", self.vis, "MTI", new_mti_vis)
             time.sleep(0.2)
-            self.nir.send_config("MTI", new_mti_nir)
+            self._send_config_safe("NIR", self.nir, "MTI", new_mti_nir)
             time.sleep(0.2)
 
             # FLUSH CRÍTIC: Consumim l'"OK" de confirmació que retorna el sensor 
