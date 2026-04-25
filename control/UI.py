@@ -444,6 +444,16 @@ class RobotControlUI(QMainWindow):
         mapping_loc_box = QGroupBox("Mapping and Localization")
         mapping_loc_layout = QVBoxLayout()
         mapping_loc_box.setLayout(mapping_loc_layout)
+
+        self.btn_launch_base_robot = QPushButton("Launch Base Robot")
+        self.btn_launch_base_robot.clicked.connect(self.toggle_base_control_launch)
+        self.btn_launch_base_robot.setToolTip(
+            "ros2 launch navi_wall platform.launch.py sim:=<mode> mode:=base "
+            "controller_type:=<type> odom_tf_from_controller:=true "
+            "publish_controller_odom_tf:=true launch_rviz:=true "
+            "headless:=<true/false>"
+        )
+        mapping_loc_layout.addWidget(self.btn_launch_base_robot)
  
         # Launch Mapping button
         self.btn_launch_mapping = QPushButton("Start Mapping")
@@ -1174,16 +1184,28 @@ class RobotControlUI(QMainWindow):
         self._update_headless_visibility()
         self._update_full_control_launch_tooltip()
 
+    def _is_robot_bringup_process(self, process_key):
+        """Return whether a process key belongs to a robot bringup launch."""
+        return process_key in {'mobile_platform', 'full_mobile_manipulator'}
+
+    def _is_base_tab_state_process(self, process_key):
+        """Return whether a process should lock the Base Control tab context."""
+        return process_key in {'mobile_platform', 'mapping', 'localization', 'nav2', 'exploration'}
+
     def _get_base_process_start_text(self, process_key, name):
         """Return the idle button label for base/full-control launch buttons."""
         if process_key == 'full_mobile_manipulator':
             return 'Launch Full Robot'
+        if process_key == 'mobile_platform':
+            return 'Launch Base Robot'
         return f"Start {name}"
 
     def _get_base_process_stop_text(self, process_key, name):
         """Return the running button label for base/full-control launch buttons."""
         if process_key == 'full_mobile_manipulator':
             return 'Stop Full Robot'
+        if process_key == 'mobile_platform':
+            return 'Stop Base Robot'
         return f"Stop {name}"
 
     def _sync_full_control_hybrid_sim_state(self):
@@ -1425,10 +1447,7 @@ class RobotControlUI(QMainWindow):
     def _update_tab_states_for_base(self):
         """Update tab states based on base control processes"""
         # Any base (non-full) process running?
-        base_running = any(
-            key in self.process_map
-            for key in ['mapping', 'localization', 'nav2', 'exploration']
-        )
+        base_running = any(self._is_base_tab_state_process(key) for key in self.process_map)
 
         if base_running:
             # Disable Arm and Full Control tabs (Base stays enabled, Joint stays enabled)
@@ -2378,6 +2397,34 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         # Update tab states
         self._update_tab_states_for_arm()
 
+    def toggle_base_control_launch(self):
+        """Toggle the base-only bringup from the Base Control tab."""
+        sim_mode = self.sim_mode_combo.currentText()
+        controller_type = self.controller_type_combo.currentText()
+        headless = self.base_headless_combo.currentText()
+
+        launch_args = [
+            'launch', 'navi_wall', 'platform.launch.py',
+            f'sim:={sim_mode}',
+            'mode:=base',
+            f'controller_type:={controller_type}',
+            'odom_tf_from_controller:=true',
+            'publish_controller_odom_tf:=true',
+            'launch_rviz:=true',
+            f'headless:={headless}',
+        ]
+        if 'mobile_platform' not in self.process_map:
+            self.btn_launch_base_robot.setProperty('uses_gazebo', sim_mode == 'true')
+
+        self._toggle_base_process(
+            'mobile_platform',
+            self.btn_launch_base_robot,
+            'Base Robot',
+            'ros2',
+            launch_args,
+        )
+        self._update_tab_states_for_base()
+
     def toggle_full_control_launch(self):
         """Toggle the full mobile manipulator bringup from the Full Control tab."""
         sim_mode = self.full_control_sim_mode_combo.currentText()
@@ -2616,6 +2663,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                                         f'use_sim_time:={sim_mode}', f'controller_type:={controller_type}'])
         if mode == 'full':
             self._update_tab_states_for_full_control()
+        else:
+            self._update_tab_states_for_base()
             
     def toggle_exploration(self, mode='base', button=None, sim_combo=None):
         """Toggle exploration with configurable mode parameter"""
@@ -2637,6 +2686,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                                         '--ros-args', '--params-file', params_file])
         if mode == 'full':
             self._update_tab_states_for_full_control()
+        else:
+            self._update_tab_states_for_base()
    
     # Helper methods to get the correct buttons for each mode
     def _get_mapping_button_for_mode(self, mode):
@@ -3102,7 +3153,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 process.waitForFinished(2000)
 
             # Kill orphaned launch children/Gazebo for simulator-backed launches.
-            if process_key == 'full_mobile_manipulator' and pid:
+            if self._is_robot_bringup_process(process_key) and pid:
                 try:
                     subprocess.run(['pkill', '-9', '-P', str(pid)], timeout=2, stderr=subprocess.DEVNULL)
                 except Exception:
@@ -3115,7 +3166,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             if (
                 'mapping' in process_key
                 or 'localization' in process_key
-                or (process_key == 'full_mobile_manipulator' and uses_gazebo)
+                or (self._is_robot_bringup_process(process_key) and uses_gazebo)
             ):
                 self._kill_gazebo_processes()
 
@@ -3125,7 +3176,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
             button.setText(self._get_base_process_start_text(process_key, name))
             button.setStyleSheet("")
-            if process_key == 'full_mobile_manipulator':
+            if self._is_robot_bringup_process(process_key):
                 button.setProperty('uses_gazebo', False)
             status_text.append(f"⏹ Stopped {name}")
 
@@ -3142,7 +3193,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                     btn.setEnabled(True)
 
             # Only base mode affects tab states
-            if not process_key.startswith('full') and process_key in ['mapping', 'localization']:
+            if not process_key.startswith('full') and self._is_base_tab_state_process(process_key):
                 self._update_tab_states_for_base()
 
         else:
@@ -3227,7 +3278,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             
             status_text.append(f"{name} exited")
 
-            if process_key == 'full_mobile_manipulator' and bool(button.property('uses_gazebo')):
+            if self._is_robot_bringup_process(process_key) and bool(button.property('uses_gazebo')):
                 self._kill_gazebo_processes()
                 button.setProperty('uses_gazebo', False)
             
@@ -3247,7 +3298,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                     btn.setEnabled(True)
             
             # Update tab states when base processes finish
-            if not process_key.startswith('full') and process_key in ['mapping', 'localization']:
+            if not process_key.startswith('full') and self._is_base_tab_state_process(process_key):
                 self._update_tab_states_for_base()
 
             elif process_key.startswith('full') and any(
