@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 
+import copy
+from enum import Enum, auto
+import os
+import threading
+import time
+
 import rclpy
 from rclpy.node import Node
-import os
 from geometry_msgs.msg import PoseStamped, Point
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, ColorRGBA
@@ -17,16 +22,36 @@ from tf2_ros import TransformException
 
 # Import planning functions
 from planner.planner_lib.closed_form_algorithm import closed_form_algorithm
-from planner.planner_lib.Astar3D import find_path, world_to_grid, grid_to_world, dilate_obstacles
+from planner.planner_lib.Astar3D import (
+    dilate_obstacles,
+    find_path,
+    grid_to_world,
+    world_to_grid_checked,
+)
 from scipy.spatial.transform import Rotation as R, Slerp
 from scipy.ndimage import binary_erosion
+
+# Import collision checking service
+from arm_control.srv import CheckCollisionPose
+
+class CollisionCheckStatus(Enum):
+    FREE = auto()
+    COLLISION = auto()
+    CHECK_FAILED = auto()
+
+class IKSelectionOutcome(Enum):
+    SUCCESS = auto()
+    ALL_IN_COLLISION = auto()
+    NO_VALID_SOLUTIONS = auto()
+    CHECK_FAILED = auto()
 
 class PlannerNode(Node):
     def __init__(self):
         super().__init__('planner_node')
         
-        # Set logger level to WARNING to reduce log output
-        self.get_logger().set_level(rclpy.logging.LoggingSeverity.WARN)
+        # Set logger level to INFO to see planning progress
+        # Use WARN to reduce verbose output in production
+        self.get_logger().set_level(rclpy.logging.LoggingSeverity.INFO)
         
         # Declare and get joint prefix parameter
         self.declare_parameter('joint_prefix', 'arm_')
@@ -51,9 +76,12 @@ class PlannerNode(Node):
         self.goal_queue = []
         self.current_joint_state = None
         self.emergency_stop = False
-        self.invalid_path = False
         self.end_effector_pose = None
         self.i = 0  
+        self._state_lock = threading.RLock()
+        self._planning_active = False
+        self._planning_thread = None
+        self._plan_generation = 0
 
         # TF buffer and listener to query transforms dynamically
         self.tf_buffer = tf2_ros.Buffer()
@@ -103,6 +131,8 @@ class PlannerNode(Node):
         z_max = max(self.z_levels)
         self.z_vals = np.linspace(z_min, z_max, len(self.z_levels))  # assumes uniform spacing
         
+        self.get_logger().info(f"Grid configuration: shape={self.grid_shape}, cart_step={self.cart_step}m, z_levels={len(self.z_levels)}")
+        
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -129,10 +159,89 @@ class PlannerNode(Node):
         self.ee_path_marker_pub = self.create_publisher(Marker, 'ee_path_markers', 10)
         self.reachability_marker_pub = self.create_publisher(Marker, 'reachability_boundary_marker', qos)
 
+        # Create collision checking service client
+        # Note: path_collision_checking node is launched with namespace 'collision'
+        self.collision_check_client = self.create_client(CheckCollisionPose, '/collision/check_collision_pose')
+        
+        # Collision checking configuration
+        self.declare_parameter('enable_collision_checking', True)  # Disabled by default due to callback deadlock issues
+        self.enable_collision_checking = self.get_parameter('enable_collision_checking').get_parameter_value().bool_value
+        
+        if self.enable_collision_checking:
+            self.get_logger().info("⚠️  Collision checking ENABLED - may cause delays or timeouts in callbacks")
+        else:
+            self.get_logger().info("Collision checking DISABLED - planner will use closest IK solutions")
+        
+        # Collision service retry logic (handles race conditions with robot_description loading)
+        self._collision_service_available = False
+        self._collision_service_check_count = 0
+        self._collision_service_max_retries = 15  # 15 attempts * 2 seconds = 30 seconds max wait
+        self._collision_service_check_interval = 2.0  # seconds between checks
+        
+        if self.enable_collision_checking:
+            self._collision_check_timer = self.create_timer(
+                self._collision_service_check_interval, 
+                self._check_collision_service_periodic
+            )
+        else:
+            self._collision_service_available = False  # Explicitly disabled
+
         self._reachability_boundary_pts = self._compute_reachability_boundary()
         self._reachability_timer = self.create_timer(2.0, self._publish_reachability_once)
+        self._goal_dispatch_timer = self.create_timer(0.05, self._process_goal_queue)
 
         self.get_logger().info("Planner node initialized and waiting for goal poses...")
+
+    def _check_collision_service_periodic(self):
+        """
+        Periodically check collision service availability with retries.
+        Handles race conditions where collision node starts after planner.
+        """
+        if self._collision_service_available:
+            # Already connected, cancel timer
+            return
+        
+        self._collision_service_check_count += 1
+        
+        if self.collision_check_client.service_is_ready():
+            # Service is now available!
+            self._collision_service_available = True
+            self._collision_check_timer.cancel()
+            self.get_logger().info(
+                f"✅ Collision checking service connected: /collision/check_collision_pose "
+                f"(found after {self._collision_service_check_count} attempts, "
+                f"{self._collision_service_check_count * self._collision_service_check_interval:.1f}s)"
+            )
+        else:
+            # Service not yet available
+            if self._collision_service_check_count <= 3:
+                # Be quiet for first few attempts (normal startup)
+                self.get_logger().debug(
+                    f"Waiting for collision service... (attempt {self._collision_service_check_count}/"
+                    f"{self._collision_service_max_retries})"
+                )
+            elif self._collision_service_check_count >= self._collision_service_max_retries:
+                # Max retries reached - give up and warn user
+                self._collision_check_timer.cancel()
+                self.get_logger().warn(
+                    f"⚠️  Collision checking service NOT available at /collision/check_collision_pose\n"
+                    f"   Waited {self._collision_service_check_count * self._collision_service_check_interval:.1f}s "
+                    f"({self._collision_service_check_count} attempts) but service not found.\n"
+                    f"   Planner will use closest IK solutions without collision validation.\n"
+                    f"   \n"
+                    f"   To enable collision checking, launch:\n"
+                    f"     ros2 launch arm_control abstract_robot.launch.py\n"
+                    f"   or\n"
+                    f"     ros2 launch arm_control collision_view_ur.launch.py ur_type:=ur10e tf_prefix:=collision_"
+                )
+            else:
+                # Still waiting, log periodically
+                if self._collision_service_check_count % 5 == 0:
+                    self.get_logger().info(
+                        f"Still waiting for collision service... (attempt {self._collision_service_check_count}/"
+                        f"{self._collision_service_max_retries}, elapsed: "
+                        f"{self._collision_service_check_count * self._collision_service_check_interval:.1f}s)"
+                    )
 
     def _update_wrist3_tool0_transform(self):
         """
@@ -208,15 +317,15 @@ class PlannerNode(Node):
                 
         except (TransformException, tf2_ros.LookupException, 
                 tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as ex:
-            if not hasattr(self, '_tf_retry_count'):
-                self._tf_retry_count = 0
+                    if not hasattr(self, '_tf_retry_count'):
+                        self._tf_retry_count = 0
             
-            self._tf_retry_count += 1
+                    self._tf_retry_count += 1
             
-            if self._tf_retry_count <= 5 or self._tf_retry_count % 10 == 0:
-                self.get_logger().warn(
+                    if self._tf_retry_count <= 5 or self._tf_retry_count % 10 == 0:
+                        self.get_logger().warn(
                     f"TF lookup exception (attempt {self._tf_retry_count}): {ex}"
-                )
+                        )
 
     def _compute_reachability_boundary(self):
         """Build the outer-shell voxels of the reachability space using morphological erosion.
@@ -389,7 +498,7 @@ class PlannerNode(Node):
         spheres.color.g = float(rgba[1])
         spheres.color.b = float(rgba[2])
         spheres.color.a = float(rgba[3])
-        
+
         spheres.points = []
         for (x, y, z) in path_world:
             spheres.points.append(Point(x=float(x), y=float(y), z=float(z) + float(z_offset)))
@@ -413,7 +522,7 @@ class PlannerNode(Node):
         line.color.g = float(rgba[1])
         line.color.b = float(rgba[2])
         line.color.a = float(rgba[3])
-        
+
         line.points = []
         for (x, y, z) in path_world:
             line.points.append(Point(x=float(x), y=float(y), z=float(z) + float(z_offset)))
@@ -422,7 +531,7 @@ class PlannerNode(Node):
 
         self.ee_path_marker_pub.publish(spheres)
         self.ee_path_marker_pub.publish(line)
-        
+
         # Current EE (green)
         if current_ee_xyz is not None:
             cx, cy, cz = current_ee_xyz
@@ -538,7 +647,7 @@ class PlannerNode(Node):
         if not path_world:
             if log:
                 self.get_logger().info("[prune] input path empty -> return []")
-            return []
+                return []
 
         pw = [(float(x), float(y), float(z)) for (x, y, z) in path_world]
 
@@ -547,7 +656,7 @@ class PlannerNode(Node):
             dy = a[1] - b[1]
             dz = a[2] - b[2]
             return dx*dx + dy*dy + dz*dz
-        
+
         def d(a, b):
             # Actual distance (not squared)
             import math
@@ -662,17 +771,21 @@ class PlannerNode(Node):
         Identify which specific obstacle a position is inside.
         Returns a descriptive string naming the obstacle.
         """
+        self.get_logger().info(f"🔍 _identify_obstacle: position={position}, grid_idx={grid_idx}")
         x, y, z = position
-        i, j, k = grid_idx
+        i, j, k = int(grid_idx[0]), int(grid_idx[1]), int(grid_idx[2])
         
         obstacles = []
         
         # Check cylinder obstacle
+        self.get_logger().info(f"  Checking cylinder...")
         dist_xy = np.sqrt((x - self.cyl_center_xy[0])**2 + (y - self.cyl_center_xy[1])**2)
         if dist_xy <= self.cyl_radius and self.z_min <= z <= self.z_max:
             obstacles.append(f"Cylinder (center={self.cyl_center_xy}, radius={self.cyl_radius}m, z=[{self.z_min}, {self.z_max}])")
+            self.get_logger().info(f"  ✓ Inside cylinder!")
         
         # Check base footprint
+        self.get_logger().info(f"  Checking base footprint...")
         if self.base_z_min <= z <= self.base_z_max:
             # Simple point-in-polygon check
             polygon = self.base_footprint_xy
@@ -692,15 +805,20 @@ class PlannerNode(Node):
             
             if inside:
                 obstacles.append(f"Mobile base footprint (polygon with {len(polygon)} vertices, z=[{self.base_z_min}, {self.base_z_max}])")
+                self.get_logger().info(f"  ✓ Inside base footprint!")
         
-        # Check if it's in the undilated occupancy grid
-        if occupancy_grid[grid_idx] == 1:
+        self.get_logger().info(f"  Checking occupancy_grid at [{i}, {j}, {k}]...")
+        if occupancy_grid[i, j, k] == 1:
             if not obstacles:
                 obstacles.append("Unknown obstacle (present in occupancy grid)")
+                self.get_logger().info(f"  ✓ In occupancy grid!")
         else:
             # Only in dilated grid, not in original
             if not obstacles:
                 obstacles.append("Dilated safety margin around obstacle")
+                self.get_logger().info(f"  ✓ Only in dilated margin")
+        
+        self.get_logger().info(f"  Final obstacles list: {obstacles}")
         
         if obstacles:
             return " AND ".join(obstacles)
@@ -708,9 +826,19 @@ class PlannerNode(Node):
             return "Unknown (possibly dilation margin)"
         
     def emergency_callback(self, msg):
-        self.emergency_stop = msg.data
-        if self.emergency_stop:
-            self.execution_complete = True
+        with self._state_lock:
+            emergency_activated = msg.data and not self.emergency_stop
+            emergency_cleared = (not msg.data) and self.emergency_stop
+            self.emergency_stop = msg.data
+            if self.emergency_stop:
+                self.execution_complete = True
+                if emergency_activated:
+                    self._plan_generation += 1
+
+        if emergency_activated:
+            self.get_logger().warn("Emergency stop activated. Active planning work will be cancelled.")
+        elif emergency_cleared:
+            self.get_logger().info("Emergency stop cleared. Planner can resume queued work.")
 
     def reset_callback(self, msg: Bool):
         """
@@ -718,14 +846,13 @@ class PlannerNode(Node):
         This allows unstucking the planner when goals are stuck due to inactive controllers.
         """
         if msg.data:
-            # Store queue length before clearing for logging
-            queued_goals = len(self.goal_queue)
-            
-            # Reset state variables to their initialization values
-            self.execution_complete = True
-            self.goal_queue = []
-            self.emergency_stop = False
-            self.invalid_path = False
+            with self._state_lock:
+                queued_goals = len(self.goal_queue)
+                planning_was_active = self._planning_active
+                self.execution_complete = True
+                self.goal_queue = []
+                self.emergency_stop = False
+                self._plan_generation += 1
             
             # Clear visualization markers
             self.clear_goal_and_path_markers()
@@ -733,6 +860,7 @@ class PlannerNode(Node):
             self.get_logger().warn(
                 "Planner state RESET requested and completed. "
                 f"Cleared {queued_goals} queued goals. "
+                f"{'Cancelled active planning. ' if planning_was_active else ''}"
                 "Ready to accept new goals."
             )
             
@@ -752,21 +880,24 @@ class PlannerNode(Node):
                 return
             joint_indices.append(idx)
 
-        self.joint_indices = joint_indices
-        self.current_joint_state = msg
+        with self._state_lock:
+            self.joint_indices = joint_indices
+            self.current_joint_state = msg
         
 
     def end_effector_pose_callback(self, msg):
-        self.end_effector_pose = msg
+        with self._state_lock:
+            self.end_effector_pose = msg
 
     def execution_status_callback(self, msg: Bool):
-        self.execution_complete = msg.data
-        if self.execution_complete:
+        with self._state_lock:
+            self.execution_complete = msg.data
+            queued_goals = len(self.goal_queue)
+
+        if msg.data:
             self.get_logger().info("Goal execution complete. Ready for new goal.")
-            if self.goal_queue:
-                next_goal = self.goal_queue.pop(0)
-                self.get_logger().info("Executing next goal in queue.")
-                self._dispatch_goal(next_goal)
+            if queued_goals:
+                self.get_logger().info(f"{queued_goals} queued goal(s) waiting for the planner worker.")
 
     def publish_planner_goal_failed(self, failed: bool):
         msg = Bool()
@@ -775,55 +906,341 @@ class PlannerNode(Node):
 
     def _fail_current_goal(self, message: str):
         self.get_logger().error(message)
-        self.execution_complete = True
+        with self._state_lock:
+            self.execution_complete = True
         self.publish_planner_goal_failed(True)
 
-    def _dispatch_goal(self, msg: PoseStamped):
+    def _snapshot_planning_inputs(self):
+        with self._state_lock:
+            joint_state = copy.deepcopy(self.current_joint_state)
+            end_effector_pose = copy.deepcopy(self.end_effector_pose)
+            joint_indices = None if self.joint_indices is None else list(self.joint_indices)
+        return joint_state, end_effector_pose, joint_indices
+
+    def _should_abort_plan(self, plan_generation):
+        if plan_generation is None:
+            return False
+        with self._state_lock:
+            return self.emergency_stop or self._plan_generation != plan_generation
+
+    def _abort_if_requested(self, plan_generation, context):
+        if self._should_abort_plan(plan_generation):
+            self.get_logger().warn(f"Aborting planning: {context}")
+            return True
+        return False
+
+    def _process_goal_queue(self):
+        with self._state_lock:
+            if (
+                self.emergency_stop
+                or self._planning_active
+                or not self.execution_complete
+                or not self.goal_queue
+            ):
+                return
+
+            next_goal = self.goal_queue.pop(0)
+            self._planning_active = True
+            self.execution_complete = False
+            plan_generation = self._plan_generation
+
         self.publish_planner_goal_failed(False)
-        self.execution_complete = False
         self.clear_goal_and_path_markers()
         pose_data = (
-            msg.pose.position.x,
-            msg.pose.position.y,
-            msg.pose.position.z,
-            msg.pose.orientation.x,
-            msg.pose.orientation.y,
-            msg.pose.orientation.z,
-            msg.pose.orientation.w
+            next_goal.pose.position.x,
+            next_goal.pose.position.y,
+            next_goal.pose.position.z,
+            next_goal.pose.orientation.x,
+            next_goal.pose.orientation.y,
+            next_goal.pose.orientation.z,
+            next_goal.pose.orientation.w
         )
         self.publish_goal_marker(pose_data)
         self.publish_reachability_boundary_marker()
-        self.plan_and_send_trajectory(msg)
+        self._planning_thread = threading.Thread(
+            target=self._plan_goal_worker,
+            args=(copy.deepcopy(next_goal), plan_generation),
+            daemon=True,
+        )
+        self._planning_thread.start()
+
+    def _plan_goal_worker(self, msg: PoseStamped, plan_generation: int):
+        try:
+            if self._abort_if_requested(plan_generation, "goal was cancelled before planning began"):
+                return
+            self.plan_and_send_trajectory(msg, plan_generation=plan_generation)
+        except Exception as exc:
+            self._fail_current_goal(f"Unhandled exception while planning goal: {exc}")
+        finally:
+            with self._state_lock:
+                self._planning_active = False
 
     def goal_callback(self, msg: PoseStamped):
-        if self.emergency_stop:
+        with self._state_lock:
+            if self.emergency_stop:
+                emergency_active = True
+                queued_goals = len(self.goal_queue)
+            else:
+                emergency_active = False
+                self.goal_queue.append(copy.deepcopy(msg))
+                queued_goals = len(self.goal_queue)
+                planning_busy = self._planning_active or not self.execution_complete
+
+        if emergency_active:
             self.get_logger().warn("Emergency stop is active, aborting trajectory planning. Ignoring goal.")
-            self.execution_complete = True  # Ensure we can accept new goals after emergency is cleared
-            return  # Aborting if emergency state is active
-        
-        if not self.execution_complete:
-            self.get_logger().warn("Previous trajectory not finished. Goal queued.")
-            self.goal_queue.append(msg)
             return
 
-        self._dispatch_goal(msg)
+        if planning_busy or queued_goals > 1:
+            self.get_logger().warn("Previous trajectory not finished. Goal queued.")
+            return
 
-    def plan_and_send_trajectory(self, msg: PoseStamped):
-        self.invalid_path = False  # Reset invalid path flag at start of planning
+        self.get_logger().info("Goal queued for planning worker.")
 
-        if self.current_joint_state is None:
+    def _sort_ik_solutions_by_distance(self, ik_solutions, q_current):
+        """
+        Sort IK solutions by their distance from the current joint configuration.
+        
+        Args:
+            ik_solutions: (8, 6) array of IK solutions
+            q_current: (6,) array of current joint values
+            
+        Returns:
+            sorted_indices: Array of indices sorting solutions from closest to furthest
+            distances: Array of distances corresponding to each solution
+        """
+        # Filter out invalid solutions (rows with NaN)
+        valid_mask = ~np.any(np.isnan(ik_solutions), axis=1)
+        # Check if service became available (may have started after initial checks)
+        if not self._collision_service_available and self.collision_check_client.service_is_ready():
+            self._collision_service_available = True
+            self.get_logger().info("✅ Collision checking service now available (late connection)")
+        
+        valid_indices = np.where(valid_mask)[0]
+        
+        if len(valid_indices) == 0:
+            return np.array([]), np.array([])
+        
+        # Calculate weighted distance for each valid solution
+        # Use angular distance in joint space
+        weights = np.ones(6)
+        distances = []
+        
+        for idx in valid_indices:
+            # Angular distance (handles wraparound at ±π)
+            delta = np.arctan2(np.sin(q_current - ik_solutions[idx]), 
+                              np.cos(q_current - ik_solutions[idx]))
+            dist = np.sqrt(np.sum(weights * delta**2))
+            distances.append(dist)
+        
+        distances = np.array(distances)
+        sorted_order = np.argsort(distances)
+        sorted_indices = valid_indices[sorted_order]
+        sorted_distances = distances[sorted_order]
+        
+        return sorted_indices, sorted_distances
+
+    def _check_collision_sync(
+        self,
+        joint_values,
+        publish_visualization=False,
+        timeout_sec=2.0,
+        cancel_check=None,
+    ):
+        """
+        Check collision using a service request while allowing the executor
+        thread to remain free to receive the response.
+        
+        Args:
+            joint_values: (6,) array of joint values
+            publish_visualization: Whether to publish collision visualization markers
+            timeout_sec: Service call timeout in seconds
+            cancel_check: Optional callable that returns True when the current
+                planning job should abort
+            
+        Returns:
+            CollisionCheckStatus indicating whether the tested state is free,
+            in collision, or could not be validated.
+        """
+        if not self.collision_check_client.service_is_ready():
+            return CollisionCheckStatus.CHECK_FAILED
+        
+        # Create JointState message
+        # IMPORTANT: Collision service expects joint names WITHOUT prefix (e.g., 'shoulder_pan_joint' not 'arm_shoulder_pan_joint')
+        # Strip the joint_prefix from expected names to match what collision service expects
+        joint_names_no_prefix = [name.replace(self.joint_prefix, '') for name in self.expected_joint_names]
+        
+        request = CheckCollisionPose.Request()
+        request.joint_state.name = joint_names_no_prefix
+        request.joint_state.position = joint_values.tolist()
+        request.publish_visualization = publish_visualization
+        
+        try:
+            # Create event to signal when response is received
+            response_event = threading.Event()
+            result_container = {'response': None, 'error': None}
+            
+            def response_callback(future):
+                try:
+                    result_container['response'] = future.result()
+                except Exception as e:
+                    result_container['error'] = e
+                finally:
+                    response_event.set()
+            
+            # Call service asynchronously with callback
+            future = self.collision_check_client.call_async(request)
+            future.add_done_callback(response_callback)
+            
+            deadline = time.monotonic() + timeout_sec
+            while True:
+                if cancel_check is not None and cancel_check():
+                    future.cancel()
+                    self.get_logger().warn("Collision validation cancelled because planning was aborted.")
+                    return CollisionCheckStatus.CHECK_FAILED
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    self.get_logger().warn(f"Collision check timed out after {timeout_sec}s")
+                    return CollisionCheckStatus.CHECK_FAILED
+
+                if response_event.wait(timeout=min(0.05, remaining)):
+                    if result_container['error']:
+                        self.get_logger().warn(f"Collision check service error: {result_container['error']}")
+                        return CollisionCheckStatus.CHECK_FAILED
+                    return (
+                        CollisionCheckStatus.COLLISION
+                        if result_container['response'].in_collision
+                        else CollisionCheckStatus.FREE
+                    )
+            
+        except Exception as e:
+            self.get_logger().warn(f"Collision check service call failed: {e}")
+            return CollisionCheckStatus.CHECK_FAILED
+
+    def _select_best_collision_free_solution(
+        self,
+        ik_solutions,
+        q_current,
+        waypoint_idx=-1,
+        test_collision=True,
+        timeout_sec=1.0,
+        cancel_check=None,
+    ):
+        """
+        Select the CLOSEST collision-free IK solution using sequential testing with early exit.
+        
+        STRATEGY: Test IK solutions ONE AT A TIME in order of proximity to current configuration.
+        Returns the FIRST (closest) collision-free solution found.
+        
+        This matches the original behavior where the robot always picks the smoothest path
+        by preferring solutions closest to the current joint state.
+        
+        Args:
+            ik_solutions: (8, 6) array of all IK solutions
+            q_current: (6,) array of current joint configuration
+            waypoint_idx: Index of waypoint for logging purposes
+            test_collision: Whether to test for collisions (default: True)
+            timeout_sec: Timeout per collision check in seconds (default: 1.0s)
+            cancel_check: Optional callable that aborts pending collision checks
+            
+        Returns:
+            best_solution: (6,) array of closest collision-free solution, or None if none found
+            IKSelectionOutcome describing why the selection succeeded or failed
+        """
+        sorted_indices, sorted_distances = self._sort_ik_solutions_by_distance(ik_solutions, q_current)
+        
+        if len(sorted_indices) == 0:
+            self.get_logger().error(f"Waypoint {waypoint_idx}: No valid IK solutions found")
+            return None, IKSelectionOutcome.NO_VALID_SOLUTIONS
+        
+        if not test_collision:
+            best_idx = sorted_indices[0]
+            best_dist = sorted_distances[0]
+            self.get_logger().info(
+                f"Waypoint {waypoint_idx}: Using closest solution {best_idx} "
+                f"(dist: {best_dist:.3f}, collision checking disabled)"
+            )
+            return ik_solutions[best_idx], IKSelectionOutcome.SUCCESS
+
+        if not self.collision_check_client.service_is_ready():
+            self.get_logger().error(
+                f"Waypoint {waypoint_idx}: collision checking requested but service is unavailable"
+            )
+            return None, IKSelectionOutcome.CHECK_FAILED
+        
+        # Test solutions sequentially in order of proximity (closest first)
+        saw_check_failure = False
+        for i, sol_idx in enumerate(sorted_indices):
+            if cancel_check is not None and cancel_check():
+                return None, IKSelectionOutcome.CHECK_FAILED
+
+            solution = ik_solutions[sol_idx]
+            dist = sorted_distances[i]
+            
+            # Use existing collision check function (properly handles async service calls)
+            visualize = (i == 0)  # Only visualize first (closest) solution
+            collision_status = self._check_collision_sync(
+                solution,
+                publish_visualization=visualize,
+                timeout_sec=timeout_sec,
+                cancel_check=cancel_check,
+            )
+            
+            # Process result
+            if collision_status == CollisionCheckStatus.CHECK_FAILED:
+                saw_check_failure = True
+                self.get_logger().warn(
+                    f"Waypoint {waypoint_idx}: Solution {sol_idx} could not be collision-validated "
+                    f"(dist: {dist:.3f}), trying next solution..."
+                )
+                continue
+
+            if collision_status == CollisionCheckStatus.FREE:
+                # Found collision-free solution - use it!
+                self.get_logger().info(
+                    f"Waypoint {waypoint_idx}: ✓ Solution {sol_idx} collision-free "
+                    f"(dist: {dist:.3f}, rank: {i+1}/{len(sorted_indices)})"
+                )
+                return solution, IKSelectionOutcome.SUCCESS
+            else:
+                # Solution in collision, try next one
+                self.get_logger().warn(
+                    f"Waypoint {waypoint_idx}: ✗ Solution {sol_idx} in COLLISION "
+                    f"(dist: {dist:.3f}), trying next solution... ({i+1}/{len(sorted_indices)} tested)"
+                )
+                continue
+        
+        if saw_check_failure:
+            self.get_logger().error(
+                f"Waypoint {waypoint_idx}: unable to validate any collision-free IK solution "
+                f"after testing {len(sorted_indices)} candidate(s)"
+            )
+            return None, IKSelectionOutcome.CHECK_FAILED
+
+        self.get_logger().error(
+            f"Waypoint {waypoint_idx}: ✗ All {len(sorted_indices)} solutions in collision"
+        )
+        return None, IKSelectionOutcome.ALL_IN_COLLISION
+
+    def plan_and_send_trajectory(self, msg: PoseStamped, plan_generation=None):
+        current_joint_state, end_effector_pose, joint_indices = self._snapshot_planning_inputs()
+
+        if self._abort_if_requested(plan_generation, "goal was cancelled before planning state was snapshotted"):
+            return
+
+        if current_joint_state is None:
             self._fail_current_goal("No current joint state received yet. Cannot calculate trajectory.")
             return
 
-        if self.end_effector_pose is None:
+        if end_effector_pose is None:
             self._fail_current_goal("No end effector pose received yet. Cannot calculate trajectory.")
             return
 
-        if not self.joint_indices:
+        if not joint_indices:
             self._fail_current_goal("No valid arm joint-state indices available.")
             return
 
-        if any(i >= len(self.current_joint_state.position) for i in self.joint_indices):
+        if any(i >= len(current_joint_state.position) for i in joint_indices):
             self._fail_current_goal("Received inconsistent joint_states message. Waiting for a valid arm joint-state frame.")
             return
         
@@ -857,8 +1274,8 @@ class PlannerNode(Node):
         # else:
         
         # Obtainin gcurrent robot pose from JointState
-        start_pos = [self.end_effector_pose.pose.position.x, self.end_effector_pose.pose.position.y, self.end_effector_pose.pose.position.z]
-        start_orn = [self.end_effector_pose.pose.orientation.x, self.end_effector_pose.pose.orientation.y, self.end_effector_pose.pose.orientation.z, self.end_effector_pose.pose.orientation.w]
+        start_pos = [end_effector_pose.pose.position.x, end_effector_pose.pose.position.y, end_effector_pose.pose.position.z]
+        start_orn = [end_effector_pose.pose.orientation.x, end_effector_pose.pose.orientation.y, end_effector_pose.pose.orientation.z, end_effector_pose.pose.orientation.w]
         start_orientation = R.from_quat(start_orn)
 
         # Convert start from arm_tool0 to arm_wrist_3_link
@@ -869,47 +1286,31 @@ class PlannerNode(Node):
         start_pos_wrist3 = T_ws_wrist3[:3, 3].tolist()
         start_orientation_wrist3 = R.from_matrix(T_ws_wrist3[:3, :3])
             
-        try:
-            start_idx = world_to_grid(*start_pos_wrist3, self.x_vals, self.y_vals, self.z_vals)
-            goal_idx = world_to_grid(*goal_pos_wrist3, self.x_vals, self.y_vals, self.z_vals)
-        except Exception as e:
-            self._fail_current_goal(f"Failed to convert world to grid: {e}")
-            return
+        start_idx, start_in_bounds = world_to_grid_checked(
+            *start_pos_wrist3, self.x_vals, self.y_vals, self.z_vals
+        )
+        goal_idx, goal_in_bounds = world_to_grid_checked(
+            *goal_pos_wrist3, self.x_vals, self.y_vals, self.z_vals
+        )
         
         # Check if tool0 positions are outside workspace bounds (warn but don't fail if wrist_3 is ok)
-        # Check start tool0
-        try:
-            start_tool0_idx = world_to_grid(*start_pos, self.x_vals, self.y_vals, self.z_vals)
-            st_i, st_j, st_k = start_tool0_idx
-            if not (0 <= st_i < self.grid_size and 0 <= st_j < self.grid_size and 0 <= st_k < len(self.z_levels)):
-                self.get_logger().info(
-                    f"ℹ️  Start tool0 extends outside workspace bounds (expected when tool extends beyond wrist_3).\n"
-                    f"  Start (tool0): {[round(x, 3) for x in start_pos]} → grid {start_tool0_idx}\n"
-                    f"  Start (wrist_3): {[round(x, 3) for x in start_pos_wrist3]} → grid {start_idx}\n"
-                    f"  → Planning uses wrist_3 (IK target) - this is expected and safe."
-                )
-        except Exception:
+        start_tool0_idx, start_tool0_in_bounds = world_to_grid_checked(
+            *start_pos, self.x_vals, self.y_vals, self.z_vals
+        )
+        if not start_tool0_in_bounds:
             self.get_logger().info(
-                f"ℹ️  Start tool0 extends far outside workspace bounds (expected when tool extends significantly).\n"
-                f"  Start (tool0): {[round(x, 3) for x in start_pos]} (out of grid range)\n"
+                f"ℹ️  Start tool0 extends outside workspace bounds (expected when tool extends beyond wrist_3).\n"
+                f"  Start (tool0): {[round(x, 3) for x in start_pos]} (outside grid)\n"
                 f"  Start (wrist_3): {[round(x, 3) for x in start_pos_wrist3]} → grid {start_idx}"
             )
         
-        # Check goal tool0
-        try:
-            goal_tool0_idx = world_to_grid(*goal_pos, self.x_vals, self.y_vals, self.z_vals)
-            gt_i, gt_j, gt_k = goal_tool0_idx
-            if not (0 <= gt_i < self.grid_size and 0 <= gt_j < self.grid_size and 0 <= gt_k < len(self.z_levels)):
-                self.get_logger().info(
-                    f"ℹ️  Goal tool0 extends outside workspace bounds (expected when tool extends beyond wrist_3).\n"
-                    f"  Goal (tool0): {[round(x, 3) for x in goal_pos]} → grid {goal_tool0_idx}\n"
-                    f"  Goal (wrist_3): {[round(x, 3) for x in goal_pos_wrist3]} → grid {goal_idx}\n"
-                    f"  → Planning uses wrist_3 (IK target) - this is expected and safe."
-                )
-        except Exception:
+        goal_tool0_idx, goal_tool0_in_bounds = world_to_grid_checked(
+            *goal_pos, self.x_vals, self.y_vals, self.z_vals
+        )
+        if not goal_tool0_in_bounds:
             self.get_logger().info(
-                f"ℹ️  Goal tool0 extends far outside workspace bounds (expected when tool extends significantly).\n"
-                f"  Goal (tool0): {[round(x, 3) for x in goal_pos]} (out of grid range)\n"
+                f"ℹ️  Goal tool0 extends outside workspace bounds (expected when tool extends beyond wrist_3).\n"
+                f"  Goal (tool0): {[round(x, 3) for x in goal_pos]} (outside grid)\n"
                 f"  Goal (wrist_3): {[round(x, 3) for x in goal_pos_wrist3]} → grid {goal_idx}"
             )
 
@@ -968,49 +1369,89 @@ class PlannerNode(Node):
         dilation_distance = 0.010  # Enlarge obstacles by 0.X meters in all directions
 
         # Apply dilation
+        self.get_logger().info(f"Applying obstacle dilation to grid shape {occupancy_grid.shape}...")
         occupancy_grid_dilated = dilate_obstacles(occupancy_grid, dilation_distance, self.x_vals)
+        self.get_logger().info(f"Obstacle dilation complete.")
         # occupancy_grid_dilated = np.zeros(self.grid_shape, dtype=np.uint8)      # Eliminating all obstacles for now
 
-        # --- Pre-flight check: verify start and goal are not inside obstacles ---
-        start_i, start_j, start_k = start_idx
-        goal_i, goal_j, goal_k = goal_idx
+        # Initialize collision waypoint tracking for replanning
+        self.get_logger().info("Initializing replanning loop...")
+        collision_waypoints_to_avoid = set()  # Set of grid indices that caused collisions
+        MAX_REPLANNING_ATTEMPTS = 3
+        replanning_attempt = 0
         
-        # Check if indices are within bounds
-        if not (0 <= start_i < self.grid_size and 0 <= start_j < self.grid_size and 0 <= start_k < len(self.z_levels)):
-            self._fail_current_goal(
-                f"❌ Start wrist_3 position OUT OF BOUNDS: grid_idx={start_idx}, "
-                f"pos_wrist3={start_pos_wrist3}. Start IK target is outside reachable workspace."
-            )
-            return
-        
-        if not (0 <= goal_i < self.grid_size and 0 <= goal_j < self.grid_size and 0 <= goal_k < len(self.z_levels)):
-            self._fail_current_goal(
+        self.get_logger().info(f"Starting replanning loop (max {MAX_REPLANNING_ATTEMPTS} attempts)...")
+        # Main planning loop with replanning support
+        while replanning_attempt < MAX_REPLANNING_ATTEMPTS:
+            if self._abort_if_requested(plan_generation, "goal was cancelled during replanning"):
+                return
+
+            self.get_logger().info(f"Replanning iteration {replanning_attempt}...")
+            if replanning_attempt > 0:
+                self.get_logger().info(
+                    f"🔄 Replanning attempt {replanning_attempt}/{MAX_REPLANNING_ATTEMPTS - 1}: "
+                    f"Avoiding {len(collision_waypoints_to_avoid)} waypoints with collisions"
+                )
+                
+            # Mark collision waypoints as obstacles in the dilated grid
+            for grid_idx in collision_waypoints_to_avoid:
+                i, j, k = grid_idx
+                if 0 <= i < self.grid_size and 0 <= j < self.grid_size and 0 <= k < len(self.z_levels):
+                    occupancy_grid_dilated[i, j, k] = 1
+                    self.get_logger().debug(f"Marked grid cell {grid_idx} as obstacle for replanning")
+            
+            # --- Pre-flight check: verify start and goal are not inside obstacles ---
+            self.get_logger().info(f"Performing pre-flight checks (start_idx={start_idx}, goal_idx={goal_idx})...")
+            start_i, start_j, start_k = start_idx
+            goal_i, goal_j, goal_k = goal_idx
+
+            self.get_logger().info(f"Checking if indices within bounds...")
+            # Check if indices are within bounds
+            if not start_in_bounds:
+                self._fail_current_goal(
+                    f"❌ Start wrist_3 position OUT OF BOUNDS: grid_idx={start_idx}, "
+                    f"pos_wrist3={start_pos_wrist3}. Start IK target is outside reachable workspace."
+                )
+                return
+            self.get_logger().info(f"Start indices OK. Checking goal bounds...")
+                    
+            if not goal_in_bounds:
+                self._fail_current_goal(
                 f"❌ Goal wrist_3 position OUT OF BOUNDS: grid_idx={goal_idx}, "
                 f"pos_wrist3={goal_pos_wrist3}. "
                 f"Goal IK target is outside reachable workspace - cannot plan path.\n"
                 f"  Note: Tool0 was at {goal_pos} (may also be out of bounds)."
-            )
-            return
-        
-        # Check if start wrist_3 is inside an obstacle
-        if occupancy_grid_dilated[start_i, start_j, start_k] == 1:
-            # Identify which obstacle
-            obstacle_name = self._identify_obstacle(start_pos_wrist3, occupancy_grid, start_idx)
-            self._fail_current_goal(
-                f"❌ Start wrist_3 position is INSIDE OBSTACLE: {obstacle_name}\n"
-                f"  Start pos (wrist_3): {[round(x, 3) for x in start_pos_wrist3]}\n"
-                f"  Start pos (tool0): {[round(x, 3) for x in start_pos]}\n"
-                f"  Grid index (wrist_3): {start_idx}\n"
-                f"  Obstacle detection: dilated grid shows occupied voxel.\n"
-                f"  → Cannot plan path - start wrist_3 is in collision!"
-            )
-            return
-        
-        # Check if start tool0 is inside an obstacle (if within grid bounds)
-        try:
-            start_tool0_idx = world_to_grid(*start_pos, self.x_vals, self.y_vals, self.z_vals)
-            st_i, st_j, st_k = start_tool0_idx
-            if (0 <= st_i < self.grid_size and 0 <= st_j < self.grid_size and 0 <= st_k < len(self.z_levels)):
+                )
+                return
+            # Check if start wrist_3 is inside an obstacle
+            # IMPORTANT: Skip this check during replanning - robot is already at start position
+            if replanning_attempt == 0:
+                self.get_logger().info(f"Goal indices OK. Checking if start is inside obstacle...")
+                if occupancy_grid_dilated[start_i, start_j, start_k] == 1:
+                    # Identify which obstacle
+                    self.get_logger().info(f"Start is inside obstacle! Identifying...")
+                    obstacle_name = self._identify_obstacle(start_pos_wrist3, occupancy_grid, start_idx)
+                    self.get_logger().error(f"Identified obstacle: {obstacle_name}")
+                    self.get_logger().info(f"Calling _fail_current_goal...")
+                    self._fail_current_goal(
+                        f"❌ Start wrist_3 position is INSIDE OBSTACLE: {obstacle_name}\n"
+                        f"  Start pos (wrist_3): {[round(x, 3) for x in start_pos_wrist3]}\n"
+                        f"  Start pos (tool0): {[round(x, 3) for x in start_pos]}\n"
+                        f"  Grid index (wrist_3): {start_idx}\n"
+                        f"  Obstacle detection: dilated grid shows occupied voxel.\n"
+                        f"  → Cannot plan path - start wrist_3 is in collision!"
+                    )
+                    self.get_logger().info(f"_fail_current_goal returned, exiting callback")
+                    return
+            else:
+                self.get_logger().info(
+                    f"Goal indices OK. Skipping start obstacle check during replanning "
+                    f"(robot is already at start position)"
+                )
+            
+            # Check if start tool0 is inside an obstacle (if within grid bounds)
+            if start_tool0_in_bounds:
+                st_i, st_j, st_k = start_tool0_idx
                 if occupancy_grid_dilated[st_i, st_j, st_k] == 1:
                     obstacle_name = self._identify_obstacle(start_pos, occupancy_grid, start_tool0_idx)
                     self._fail_current_goal(
@@ -1021,28 +1462,24 @@ class PlannerNode(Node):
                         f"  → Cannot plan path - tool is in collision!"
                     )
                     return
-        except Exception:
-            pass  # tool0 out of bounds - already warned earlier
-        
-        # Check if goal wrist_3 is inside an obstacle
-        if occupancy_grid_dilated[goal_i, goal_j, goal_k] == 1:
-            # Identify which obstacle
-            obstacle_name = self._identify_obstacle(goal_pos_wrist3, occupancy_grid, goal_idx)
-            self._fail_current_goal(
-                f"❌ Goal wrist_3 position is INSIDE OBSTACLE: {obstacle_name}\n"
-                f"  Goal pos (wrist_3): {[round(x, 3) for x in goal_pos_wrist3]}\n"
-                f"  Goal pos (tool0): {[round(x, 3) for x in goal_pos]}\n"
-                f"  Grid index (wrist_3): {goal_idx}\n"
-                f"  Obstacle detection: dilated grid shows occupied voxel.\n"
-                f"  → Cannot plan path - goal wrist_3 is in collision!"
-            )
-            return
-        
-        # Check if goal tool0 is inside an obstacle (if within grid bounds)
-        try:
-            goal_tool0_idx = world_to_grid(*goal_pos, self.x_vals, self.y_vals, self.z_vals)
-            gt_i, gt_j, gt_k = goal_tool0_idx
-            if (0 <= gt_i < self.grid_size and 0 <= gt_j < self.grid_size and 0 <= gt_k < len(self.z_levels)):
+
+            # Check if goal wrist_3 is inside an obstacle
+            if occupancy_grid_dilated[goal_i, goal_j, goal_k] == 1:
+                # Identify which obstacle
+                obstacle_name = self._identify_obstacle(goal_pos_wrist3, occupancy_grid, goal_idx)
+                self._fail_current_goal(
+                    f"❌ Goal wrist_3 position is INSIDE OBSTACLE: {obstacle_name}\n"
+                    f"  Goal pos (wrist_3): {[round(x, 3) for x in goal_pos_wrist3]}\n"
+                    f"  Goal pos (tool0): {[round(x, 3) for x in goal_pos]}\n"
+                    f"  Grid index (wrist_3): {goal_idx}\n"
+                    f"  Obstacle detection: dilated grid shows occupied voxel.\n"
+                    f"  → Cannot plan path - goal wrist_3 is in collision!"
+                )
+                return
+            
+            # Check if goal tool0 is inside an obstacle (if within grid bounds)
+            if goal_tool0_in_bounds:
+                gt_i, gt_j, gt_k = goal_tool0_idx
                 if occupancy_grid_dilated[gt_i, gt_j, gt_k] == 1:
                     obstacle_name = self._identify_obstacle(goal_pos, occupancy_grid, goal_tool0_idx)
                     self._fail_current_goal(
@@ -1053,152 +1490,159 @@ class PlannerNode(Node):
                         f"  → Cannot plan path - tool is in collision!"
                     )
                     return
-        except Exception:
-            pass  # tool0 out of bounds - already warned earlier
 
-        # Run A* with DUAL-FRAME collision checking (both wrist_3 AND tool0)
-        # All obstacles (including cylinder) block both frames for safety
-        self.get_logger().info("Running A* pathfinding with dual-frame collision checking (wrist_3 + tool0)...")
-        path = find_path(
-            occupancy_grid_dilated,
-            start_idx,
-            goal_idx,
-            x_vals=self.x_vals,
-            y_vals=self.y_vals,
-            z_vals=self.z_vals,
-            T_wrist3_tool0=self._T_wrist3_tool0,
-            start_orientation=start_orientation_wrist3.as_matrix(),
-            goal_orientation=goal_orientation_wrist3.as_matrix(),
-            cylinder_center_xy=self.cyl_center_xy,
-            cylinder_radius=self.cyl_radius,
-            cylinder_z_range=(self.z_min, self.z_max)
-        )
-        self.get_logger().info(f"Found path with length {len(path)}")
-        if not path:
-            self.get_logger().warn(
-                "No path found by A* algorithm!\n"
-                f"  Start: {start_pos_wrist3} (grid {start_idx})\n"
-                f"  Goal: {goal_pos_wrist3} (grid {goal_idx})\n"
-                "  Possible causes: goal unreachable due to obstacles blocking all paths, "
-                "or start/goal in narrow passage that was eliminated by dilation."
+            # Run A* with DUAL-FRAME collision checking (both wrist_3 AND tool0)
+            # All obstacles (including cylinder) block both frames for safety
+            if self._abort_if_requested(plan_generation, "goal was cancelled before A* path search"):
+                return
+            self.get_logger().info("Running A* pathfinding with dual-frame collision checking (wrist_3 + tool0)...")
+            path = find_path(
+                occupancy_grid_dilated,
+                start_idx,
+                goal_idx,
+                x_vals=self.x_vals,
+                y_vals=self.y_vals,
+                z_vals=self.z_vals,
+                T_wrist3_tool0=self._T_wrist3_tool0,
+                start_orientation=start_orientation_wrist3.as_matrix(),
+                goal_orientation=goal_orientation_wrist3.as_matrix(),
+                cylinder_center_xy=self.cyl_center_xy,
+                cylinder_radius=self.cyl_radius,
+                cylinder_z_range=(self.z_min, self.z_max)
             )
-            self.execution_complete = True  # Mark execution as complete to allow new goals
-            self.publish_planner_goal_failed(True)
-            return
+            self.get_logger().info(f"Found path with length {len(path)}")
+            if not path:
+                self.get_logger().warn(
+                    "No path found by A* algorithm!\n"
+                    f"  Start: {start_pos_wrist3} (grid {start_idx})\n"
+                    f"  Goal: {goal_pos_wrist3} (grid {goal_idx})\n"
+                    "  Possible causes: goal unreachable due to obstacles blocking all paths, "
+                    "or start/goal in narrow passage that was eliminated by dilation."
+                )
+                with self._state_lock:
+                    self.execution_complete = True  # Mark execution as complete to allow new goals
+                self.publish_planner_goal_failed(True)
+                return
 
-        # Convert path to world coordinates
-        path_world_raw = [grid_to_world(i, j, k, self.x_vals, self.y_vals, self.z_vals) for i, j, k in path]
-        self.get_logger().info(f"Raw path waypoints (pre-prune): {path_world_raw}")
-        
-        # Keep grid indices for distance-based orientation calculation (matches A*)
-        path_grid_indices = path  # Store grid indices before pruning
-        
-        # Debug: publish raw path (pre-prune)
-        self.publish_ee_path_markers(
-            path_world_raw,
-            frame_id="arm_base",
-            current_ee_xyz=start_pos_wrist3,
-            goal_xyz=goal_pos_wrist3,
-            ns="ee_path_raw",
-            id_offset=100,
-            rgba=(0.0, 1.0, 1.0, 0.5),   # cyan
-            z_offset=0.002,              # 2mm above
-            line_width=0.01,             # thicker
-            sphere_diam=0.03             # bigger
-        )
+            # Convert path to world coordinates
+            path_world_raw = [grid_to_world(i, j, k, self.x_vals, self.y_vals, self.z_vals) for i, j, k in path]
+            self.get_logger().info(f"Raw path waypoints (pre-prune): {path_world_raw}")
 
-        # Prune path endpoints
-        path_world = self._prune_path_endpoints(path_world_raw, start_pos_wrist3, goal_pos_wrist3, tol_m=0.02, log=True)
-        path_len = len(path_world)
-        if path_len == 0:
-            self.get_logger().warn("Path pruned to empty. Falling back to direct goal IK.")
-        
-        # Interpolate orientations along the (possibly pruned) path (wrist_3 orientations)
-        # CRITICAL: Use DISTANCE-BASED interpolation to match A* orientation computation
-        # (A* uses Euclidean distance in GRID SPACE from start, not waypoint index)
-        # We use the UNPRUNED path distances to match A* exactly, then subset for pruned path
-        
-        # First, compute orientations for ALL waypoints in the unpruned path (matches A* validation)
-        start_idx_array = np.array(start_idx, dtype=float)
-        goal_idx_array = np.array(goal_idx, dtype=float)
-        max_dist_grid = np.linalg.norm(goal_idx_array - start_idx_array)  # Distance in grid index space
-        
-        key_rots = R.from_quat([start_orientation_wrist3.as_quat(), goal_orientation_wrist3.as_quat()])
-        slerp = Slerp([0, 1], key_rots)
-        
-        # Compute orientation for each waypoint in UNPRUNED path using grid-space distances
-        unpruned_orientations = []
-        for grid_idx in path_grid_indices:
-            dist_from_start_grid = np.linalg.norm(np.array(grid_idx, dtype=float) - start_idx_array)
-            progress = min(dist_from_start_grid / max_dist_grid, 1.0) if max_dist_grid > 0 else 0.0
-            orientation = slerp([progress])[0].as_matrix()
-            unpruned_orientations.append(orientation)
-        
-        # Match pruned waypoints to their unpruned counterparts to get consistent orientations
-        if path_len == 0:
-            # No waypoint orientations needed; we will only use the goal orientation
-            interp_rot_matrices = np.array([goal_orientation_wrist3.as_matrix()])
-        else:
-            # Find which unpruned waypoints correspond to pruned waypoints
-            # Match by finding closest unpruned position to each pruned position
-            interp_rot_matrices = []
-            for pruned_pos in path_world:
-                # Find closest unpruned waypoint (should be exact match unless floating point drift)
-                min_dist = float('inf')
-                best_idx = 0
-                for i, unpruned_pos in enumerate(path_world_raw):
-                    dist = np.linalg.norm(np.array(pruned_pos) - np.array(unpruned_pos))
-                    if dist < min_dist:
-                        min_dist = dist
-                        best_idx = i
-                interp_rot_matrices.append(unpruned_orientations[best_idx])
-            interp_rot_matrices = np.array(interp_rot_matrices)
-            
-            self.get_logger().info(
-                f"Orientation interpolation: using {len(interp_rot_matrices)} orientations "
-                f"from unpruned path (A*-consistent) for {path_len} pruned waypoints"
+            # Keep grid indices for distance-based orientation calculation (matches A*)
+            path_grid_indices = path  # Store grid indices before pruning
+
+            # Debug: publish raw path (pre-prune)
+            self.publish_ee_path_markers(
+                path_world_raw,
+                frame_id="arm_base",
+                current_ee_xyz=start_pos_wrist3,
+                goal_xyz=goal_pos_wrist3,
+                ns="ee_path_raw",
+                id_offset=100,
+                rgba=(0.0, 1.0, 1.0, 0.5),   # cyan
+                z_offset=0.002,              # 2mm above
+                line_width=0.01,             # thicker
+                sphere_diam=0.03             # bigger
             )
 
-        # Build full path lists for visualization (waypoints + final goal)
-        if path_len == 0:
-            _vis_rots = [goal_orientation_wrist3.as_matrix()]
-        else:
-            _vis_rots = list(interp_rot_matrices) + [goal_orientation_wrist3.as_matrix()]
-        _vis_wrist3 = list(path_world) + [tuple(goal_pos_wrist3)]
+            # Prune path endpoints
+            path_world = self._prune_path_endpoints(path_world_raw, start_pos_wrist3, goal_pos_wrist3, tol_m=0.02, log=True)
+            path_len = len(path_world)
+            if path_len == 0:
+                self.get_logger().warn("Path pruned to empty. Falling back to direct goal IK.")
 
-        # Compute tool0 positions by applying T_wrist3_tool0 at each wrist_3 pose
-        _vis_tool0 = []
-        for _pf, _rf in zip(_vis_wrist3, _vis_rots):
-            _T = np.eye(4)
-            _T[:3, :3] = _rf
-            _T[:3, 3] = np.array(_pf)
-            _vis_tool0.append(tuple((_T @ self._T_wrist3_tool0)[:3, 3]))
+            # Interpolate orientations along the (possibly pruned) path (wrist_3 orientations)
+            # CRITICAL: Use DISTANCE-BASED interpolation to match A* orientation computation
+            # (A* uses Euclidean distance in GRID SPACE from start, not waypoint index)
+            # We use the UNPRUNED path distances to match A* exactly, then subset for pruned path
 
-        # --- SAFETY CHECK: Validate tool0 path (should never fail since A* checked it) ---
-        # This is a redundant check since A* now validates both frames during search,
-        # but kept as a sanity check in case of numerical/rounding issues.
-        # NOTE: Tool0 being out of bounds is ALLOWED (it's not the IK target).
-        tool0_collision_detected = False
-        tool0_out_of_bounds_count = 0
-        for idx, tool0_pos in enumerate(_vis_tool0):
-            try:
-                tool0_grid_idx = world_to_grid(*tool0_pos, self.x_vals, self.y_vals, self.z_vals)
+            # First, compute orientations for ALL waypoints in the unpruned path (matches A* validation)
+            start_idx_array = np.array(start_idx, dtype=float)
+            goal_idx_array = np.array(goal_idx, dtype=float)
+            max_dist_grid = np.linalg.norm(goal_idx_array - start_idx_array)  # Distance in grid index space
+
+            key_rots = R.from_quat([start_orientation_wrist3.as_quat(), goal_orientation_wrist3.as_quat()])
+            slerp = Slerp([0, 1], key_rots)
+
+            # Compute orientation for each waypoint in UNPRUNED path using grid-space distances
+            unpruned_orientations = []
+            for grid_idx in path_grid_indices:
+                dist_from_start_grid = np.linalg.norm(np.array(grid_idx, dtype=float) - start_idx_array)
+                progress = min(dist_from_start_grid / max_dist_grid, 1.0) if max_dist_grid > 0 else 0.0
+                orientation = slerp([progress])[0].as_matrix()
+                unpruned_orientations.append(orientation)
+
+            # Match pruned waypoints to their unpruned counterparts to get consistent orientations
+            if path_len == 0:
+                # No waypoint orientations needed; we will only use the goal orientation
+                interp_rot_matrices = np.array([goal_orientation_wrist3.as_matrix()])
+                pruned_path_grid_indices = []
+            else:
+                # Find which unpruned waypoints correspond to pruned waypoints
+                # Match by finding closest unpruned position to each pruned position
+                interp_rot_matrices = []
+                pruned_path_grid_indices = []
+                for pruned_pos in path_world:
+                    # Find closest unpruned waypoint (should be exact match unless floating point drift)
+                    min_dist = float('inf')
+                    best_idx = 0
+                    for i, unpruned_pos in enumerate(path_world_raw):
+                        dist = np.linalg.norm(np.array(pruned_pos) - np.array(unpruned_pos))
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_idx = i
+                    interp_rot_matrices.append(unpruned_orientations[best_idx])
+                    pruned_path_grid_indices.append(path_grid_indices[best_idx])
+                interp_rot_matrices = np.array(interp_rot_matrices)
+
+                self.get_logger().info(
+                    f"Orientation interpolation: using {len(interp_rot_matrices)} orientations "
+                    f"from unpruned path (A*-consistent) for {path_len} pruned waypoints"
+                )
+
+            # Build full path lists for visualization (waypoints + final goal)
+            if path_len == 0:
+                _vis_rots = [goal_orientation_wrist3.as_matrix()]
+            else:
+                _vis_rots = list(interp_rot_matrices) + [goal_orientation_wrist3.as_matrix()]
+            _vis_wrist3 = list(path_world) + [tuple(goal_pos_wrist3)]
+
+            # Compute tool0 positions by applying T_wrist3_tool0 at each wrist_3 pose
+            _vis_tool0 = []
+            for _pf, _rf in zip(_vis_wrist3, _vis_rots):
+                _T = np.eye(4)
+                _T[:3, :3] = _rf
+                _T[:3, 3] = np.array(_pf)
+                _vis_tool0.append(tuple((_T @ self._T_wrist3_tool0)[:3, 3]))
+
+            # --- SAFETY CHECK: Validate tool0 path (should never fail since A* checked it) ---
+            # This is a redundant check since A* now validates both frames during search,
+            # but kept as a sanity check in case of numerical/rounding issues.
+            # NOTE: Tool0 being out of bounds is ALLOWED (it's not the IK target).
+            tool0_collision_detected = False
+            tool0_out_of_bounds_count = 0
+            for idx, tool0_pos in enumerate(_vis_tool0):
+                if self._abort_if_requested(plan_generation, "goal was cancelled during tool0 path validation"):
+                    return
+
+                tool0_grid_idx, tool0_in_bounds = world_to_grid_checked(
+                    *tool0_pos, self.x_vals, self.y_vals, self.z_vals
+                )
                 ti, tj, tk = tool0_grid_idx
-                
-                # Check if within bounds
-                if not (0 <= ti < self.grid_size and 0 <= tj < self.grid_size and 0 <= tk < len(self.z_levels)):
-                    # Tool0 out of bounds is ALLOWED - it extends beyond wrist_3 reachability map
-                    # This is expected when wrist_3 is near workspace edges
+
+                # Tool0 out of bounds is ALLOWED - it extends beyond wrist_3 reachability map
+                # This is expected when wrist_3 is near workspace edges
+                if not tool0_in_bounds:
                     tool0_out_of_bounds_count += 1
-                    continue  # Skip collision check (can't verify), but allow path
-                
+                    continue
+
                 # Check if in collision (only if within bounds, where we can verify)
                 if occupancy_grid_dilated[ti, tj, tk] == 1:
                     obstacle_name = self._identify_obstacle(tool0_pos, occupancy_grid, tool0_grid_idx)
-                    
+
                     # Compute what A* would have seen for debugging
-                    if idx < len(path_grid_indices):
-                        grid_idx_for_waypoint = path_grid_indices[idx]
+                    if idx < len(pruned_path_grid_indices):
+                        grid_idx_for_waypoint = pruned_path_grid_indices[idx]
                         dist_from_start_grid = np.linalg.norm(
                             np.array(grid_idx_for_waypoint, dtype=float) - np.array(start_idx, dtype=float)
                         )
@@ -1208,7 +1652,7 @@ class PlannerNode(Node):
                         a_star_progress = min(dist_from_start_grid / max_dist_grid, 1.0) if max_dist_grid > 0 else 0.0
                     else:
                         a_star_progress = 1.0  # Goal
-                    
+
                     self._fail_current_goal(
                         f"❌ UNEXPECTED: Tool0 waypoint {idx} COLLIDES despite dual-frame A*: {obstacle_name}\n"
                         f"  Tool0 position: {[round(x, 3) for x in tool0_pos]}\n"
@@ -1219,113 +1663,207 @@ class PlannerNode(Node):
                     )
                     tool0_collision_detected = True
                     break
-            except Exception as e:
-                self.get_logger().error(f"Failed to validate tool0 waypoint {idx}: {e}")
-                tool0_collision_detected = True
-                break
-        
-        if tool0_out_of_bounds_count > 0:
-            self.get_logger().info(
-                f"ℹ️  Tool0 extends beyond workspace bounds at {tool0_out_of_bounds_count}/{len(_vis_tool0)} waypoints.\n"
-                f"  This is expected/allowed - wrist_3 (IK target) remains within reachable workspace."
+
+            if tool0_out_of_bounds_count > 0:
+                self.get_logger().info(
+                    f"ℹ️  Tool0 extends beyond workspace bounds at {tool0_out_of_bounds_count}/{len(_vis_tool0)} waypoints.\n"
+                    f"  This is expected/allowed - wrist_3 (IK target) remains within reachable workspace."
+                )
+
+            if tool0_collision_detected:
+                return  # Path validation failed, abort trajectory
+
+            # Publish pruned wrist_3 path (orange)
+            self.publish_ee_path_markers(
+                _vis_wrist3,
+                frame_id="arm_base",
+                current_ee_xyz=start_pos_wrist3,
+                goal_xyz=goal_pos_wrist3,
+                ns="ee_path_pruned",
+                id_offset=200,
+                rgba=(1.0, 0.5, 0.0, 1.0),  # orange - wrist_3 path
+                z_offset=0.0,
+                line_width=0.01,
+                sphere_diam=0.02
             )
+            # Publish corresponding tool0 path (magenta)
+            self.publish_ee_path_markers(
+                _vis_tool0,
+                frame_id="arm_base",
+                current_ee_xyz=start_pos,
+                goal_xyz=goal_pos,
+                ns="ee_path_tool0",
+                id_offset=300,
+                rgba=(0.8, 0.0, 0.8, 1.0),  # magenta - tool0 path
+                z_offset=0.0,
+                line_width=0.01,
+                sphere_diam=0.02
+            )
+
+            # Plan joint values
+            # home_position = np.array([0.0, -1.2, -2.3, -1.2, 1.57, 0.0])
+            all_joint_values = []
+            all_joint_values_print = []
+            waypoints_requiring_replan = []
+
+            try:
+                q_current = np.array([current_joint_state.position[i] for i in joint_indices])
+            except Exception as e:
+                self._fail_current_goal(f"Failed to extract current arm joint positions: {e}")
+                return
+            self.get_logger().info(f"Current joint state = {current_joint_state.position}")
+            all_joint_values_print.append(q_current)
+
+            # Process waypoints with collision checking
+            for i in range(len(path_world)):
+                if self._abort_if_requested(plan_generation, f"goal was cancelled while solving waypoint {i}"):
+                    return
+
+                T = create_pose_matrix(path_world[i], interp_rot_matrices[i])
+                ik_solutions = closed_form_algorithm(T, q_current=q_current, type=0, return_all_solutions=True)
+                self.get_logger().info(f"IK solutions for waypoint {i}: {ik_solutions}")
+
+                # Select best collision-free solution
+                q_new, selection_outcome = self._select_best_collision_free_solution(
+                    ik_solutions,
+                    q_current,
+                    waypoint_idx=i,
+                    test_collision=self.enable_collision_checking,
+                    cancel_check=lambda: self._should_abort_plan(plan_generation),
+                )
+
+                if q_new is None:
+                    if selection_outcome in (
+                        IKSelectionOutcome.ALL_IN_COLLISION,
+                        IKSelectionOutcome.NO_VALID_SOLUTIONS,
+                    ):
+                        grid_idx = (
+                            pruned_path_grid_indices[i]
+                            if i < len(pruned_path_grid_indices)
+                            else None
+                        )
+                        failure_reason = (
+                            "no collision-free IK solution"
+                            if selection_outcome == IKSelectionOutcome.ALL_IN_COLLISION
+                            else "no valid IK solution"
+                        )
+                        self.get_logger().error(
+                            f"Waypoint {i} at {path_world[i]} has {failure_reason}. "
+                            f"Grid index: {grid_idx if grid_idx is not None else 'unknown'}"
+                        )
+                        waypoints_requiring_replan.append(
+                            (
+                                i,
+                                path_world[i],
+                                grid_idx,
+                                failure_reason,
+                            )
+                        )
+                    elif selection_outcome == IKSelectionOutcome.CHECK_FAILED:
+                        self._fail_current_goal(
+                            f"Waypoint {i} could not be collision-validated. Aborting instead of replanning on uncertain data."
+                        )
+                        return
+                    else:
+                        self._fail_current_goal(f"Unexpected IK selection outcome at waypoint {i}: {selection_outcome}")
+                        return
+                else:
+                    # Apply unwrapping and limits to collision-free solution
+                    # Unwrap each joint to the equivalent angle nearest the current state.
+                    delta = (q_new - q_current + np.pi) % (2 * np.pi) - np.pi
+                    q_new = q_current + delta
+
+                    # Keep joints inside UR controller limits.
+                    for j in range(len(q_new)):
+                        while q_new[j] > 2 * np.pi:
+                            q_new[j] -= 2 * np.pi
+                        while q_new[j] < -2 * np.pi:
+                            q_new[j] += 2 * np.pi
+
+                    all_joint_values.append(q_new)
+                    all_joint_values_print.append(q_new)
+                    q_current = q_new
+            
+            # After processing all waypoints, check if we need to replan
+            if waypoints_requiring_replan:
+                self.get_logger().warn(
+                    f"⚠️  Detected {len(waypoints_requiring_replan)} waypoint(s) that require replanning:\n" +
+                    "\n".join(
+                        [
+                            f"  - Waypoint {idx}: {pos} (grid: {grid_idx}, reason: {reason})"
+                            for idx, pos, grid_idx, reason in waypoints_requiring_replan
+                        ]
+                    )
+                )
+                
+                # Add grid indices to avoid set
+                for _, _, grid_idx, _ in waypoints_requiring_replan:
+                    if grid_idx is not None:
+                        collision_waypoints_to_avoid.add(tuple(grid_idx))
+                
+                replanning_attempt += 1
+                if replanning_attempt >= MAX_REPLANNING_ATTEMPTS:
+                    self._fail_current_goal(
+                        f"❌ Path planning FAILED after {MAX_REPLANNING_ATTEMPTS} attempts: "
+                        f"{len(collision_waypoints_to_avoid)} grid cell(s) consistently have IK collision issues."
+                    )
+                    return
+                else:
+                    # Continue to next replanning iteration
+                    continue
+            
+            # Final goal pose to ensure accuracy — always use the exact goal orientation,
+            # regardless of whether/how waypoint orientations were interpolated.
+            pos = goal_pos_wrist3
+            orn = goal_orientation_wrist3.as_matrix()
+            T = create_pose_matrix(pos, orn)
+            
+            precise_goal_solutions = closed_form_algorithm(T, q_current=q_current, type=0, return_all_solutions=True)
+
+            # Use collision checking for final goal as well
+            precise_goal_joint_values, goal_selection_outcome = self._select_best_collision_free_solution(
+                precise_goal_solutions,
+                q_current,
+                waypoint_idx="GOAL",
+                test_collision=self.enable_collision_checking,
+                cancel_check=lambda: self._should_abort_plan(plan_generation),
+            )
+            
+            if precise_goal_joint_values is None:
+                if goal_selection_outcome == IKSelectionOutcome.ALL_IN_COLLISION:
+                    self._fail_current_goal(
+                        "Goal pose has no collision-free IK solution. All solutions are in collision."
+                    )
+                elif goal_selection_outcome == IKSelectionOutcome.NO_VALID_SOLUTIONS:
+                    self._fail_current_goal("Goal pose has no valid IK solution.")
+                elif goal_selection_outcome == IKSelectionOutcome.CHECK_FAILED:
+                    self._fail_current_goal("Goal pose could not be collision-validated.")
+                else:
+                    self._fail_current_goal(f"Unexpected IK selection outcome for goal pose: {goal_selection_outcome}")
+                return
+            
+            # Apply unwrapping to goal solution
+            delta = (precise_goal_joint_values - q_current + np.pi) % (2 * np.pi) - np.pi
+            precise_goal_joint_values = q_current + delta
+            for j in range(len(precise_goal_joint_values)):
+                while precise_goal_joint_values[j] > 2 * np.pi:
+                    precise_goal_joint_values[j] -= 2 * np.pi
+                while precise_goal_joint_values[j] < -2 * np.pi:
+                    precise_goal_joint_values[j] += 2 * np.pi
+
+            all_joint_values_print.append(precise_goal_joint_values)
+            all_joint_values.append(precise_goal_joint_values)
+            
+            # Path planning successful - break out of replanning loop
+            if replanning_attempt > 0:
+                self.get_logger().info(
+                    f"✅ Replanning successful on attempt {replanning_attempt}: "
+                    f"Found collision-free path avoiding {len(collision_waypoints_to_avoid)} problematic waypoints"
+                )
+            break  # Exit replanning loop
         
-        if tool0_collision_detected:
-            return  # Path validation failed, abort trajectory
-        
-        # Publish pruned wrist_3 path (orange)
-        self.publish_ee_path_markers(
-            _vis_wrist3,
-            frame_id="arm_base",
-            current_ee_xyz=start_pos_wrist3,
-            goal_xyz=goal_pos_wrist3,
-            ns="ee_path_pruned",
-            id_offset=200,
-            rgba=(1.0, 0.5, 0.0, 1.0),  # orange - wrist_3 path
-            z_offset=0.0,
-            line_width=0.01,
-            sphere_diam=0.02
-        )
-        # Publish corresponding tool0 path (magenta)
-        self.publish_ee_path_markers(
-            _vis_tool0,
-            frame_id="arm_base",
-            current_ee_xyz=start_pos,
-            goal_xyz=goal_pos,
-            ns="ee_path_tool0",
-            id_offset=300,
-            rgba=(0.8, 0.0, 0.8, 1.0),  # magenta - tool0 path
-            z_offset=0.0,
-            line_width=0.01,
-            sphere_diam=0.02
-        )
-
-        # Plan joint values
-        # home_position = np.array([0.0, -1.2, -2.3, -1.2, 1.57, 0.0])
-        all_joint_values = []
-        all_joint_values_print = []
-        try:
-            q_current = np.array([self.current_joint_state.position[i] for i in self.joint_indices])
-        except Exception as e:
-            self._fail_current_goal(f"Failed to extract current arm joint positions: {e}")
-            return
-        self.get_logger().info(f"Current joint state = {self.current_joint_state.position}")
-        all_joint_values_print.append(q_current)
-
-        def select_best_joint_solution(ik_solutions, q_ref):
-            """Pick the closest valid IK candidate and unwrap it near q_ref."""
-            valid_rows = ~np.isnan(ik_solutions).any(axis=1)
-            if not np.any(valid_rows):
-                return np.full(6, np.nan)
-
-            weights = np.ones(6)
-            idx_valid = np.where(valid_rows)[0]
-            diffs = np.array([
-                np.sqrt(np.sum(weights * np.abs(np.arctan2(np.sin(q_ref - ik_solutions[i]), np.cos(q_ref - ik_solutions[i])))))
-                for i in idx_valid
-            ])
-            best_sol = np.array(ik_solutions[idx_valid[np.argmin(diffs)]], dtype=float)
-
-            # Unwrap each joint to the equivalent angle nearest the current state.
-            delta = (best_sol - q_ref + np.pi) % (2 * np.pi) - np.pi
-            best_sol = q_ref + delta
-
-            # Keep joints inside UR controller limits.
-            for i in range(len(best_sol)):
-                while best_sol[i] > 2 * np.pi:
-                    best_sol[i] -= 2 * np.pi
-                while best_sol[i] < -2 * np.pi:
-                    best_sol[i] += 2 * np.pi
-
-            return best_sol
-
-        for i in range(len(path_world)):
-            T = create_pose_matrix(path_world[i], interp_rot_matrices[i])
-            ik_solutions = closed_form_algorithm(T, q_current=q_current, type=0, return_all_solutions=True)
-            self.get_logger().info(f"IK solutions for waypoint {i}: {ik_solutions}")
-            q_new = select_best_joint_solution(ik_solutions, q_current)
-            if np.any(np.isnan(q_new)):
-                self.get_logger().error(f"Invalid IK at step {i}: pose = {T[:3, 3]}. Path world = {path_world[i]}")
-                self.invalid_path = True 
-            all_joint_values.append(q_new)
-            all_joint_values_print.append(q_new)
-            q_current = q_new
-        
-        # Final goal pose to ensure accuracy — always use the exact goal orientation,
-        # regardless of whether/how waypoint orientations were interpolated.
-        pos = goal_pos_wrist3
-        orn = goal_orientation_wrist3.as_matrix()
-        T = create_pose_matrix(pos, orn)
-        
-        precise_goal_solutions = closed_form_algorithm(T, q_current=q_current, type=0, return_all_solutions=True)
-        precise_goal_joint_values = select_best_joint_solution(precise_goal_solutions, q_current)
-        all_joint_values_print.append(precise_goal_joint_values)
-        all_joint_values.append(precise_goal_joint_values)
-
-        if np.any(np.isnan(precise_goal_joint_values)):
-            self.get_logger().error("IK solution contains NaN. Aborting.")
-            self.execution_complete = True  # Mark execution as complete to allow new goals
-            self.publish_planner_goal_failed(True)
+        # (END OF REPLANNING LOOP - Continue with jump detection and trajectory publishing)
+        if self._abort_if_requested(plan_generation, "goal was cancelled after replanning completed"):
             return
 
         # --- Jump detection ---
@@ -1352,7 +1890,8 @@ class PlannerNode(Node):
                 break
 
         if jump_detected:
-            self.execution_complete = True
+            with self._state_lock:
+                self.execution_complete = True
             self.publish_planner_goal_failed(True)
             return
 
@@ -1374,12 +1913,8 @@ class PlannerNode(Node):
 
         # Publish success
         self.get_logger().info("Joint planning published.")
-        
-        if self.invalid_path:  # Verifies if invalid IK in path
-            self.get_logger().warn("Invalid path detected. Halting trajectory.")
-            self.invalid_path = False
-            self.execution_complete = True  # Mark execution as complete to allow new goals
-            self.publish_planner_goal_failed(True)
+
+        if self._abort_if_requested(plan_generation, "goal was cancelled before trajectory publication"):
             return
         
         # Publish trajectory

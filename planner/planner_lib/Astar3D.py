@@ -11,11 +11,39 @@ from scipy.ndimage import binary_dilation
 def dilate_obstacles(occupancy_grid, dilation_distance, x_vals):
     # Create a structuring element for dilation (3D cube of size dilation_distance)
     dilation_size = int(np.ceil(dilation_distance / (x_vals[1] - x_vals[0])))  # Convert distance to grid units
+    print(f"[dilate_obstacles] Grid shape: {occupancy_grid.shape}, dilation_size: {dilation_size}")
+    
+    if dilation_size == 0:
+        print("[dilate_obstacles] Dilation size is 0, returning original grid")
+        return occupancy_grid
+    
     struct_element = np.ones((dilation_size, dilation_size, dilation_size), dtype=np.uint8)
+    print(f"[dilate_obstacles] Starting binary_dilation...")
     
     # Perform 3D dilation
     dilated_grid = binary_dilation(occupancy_grid, structure=struct_element).astype(np.uint8)
+    print(f"[dilate_obstacles] Dilation complete")
     return dilated_grid
+
+def _coord_to_grid_index_and_in_bounds(coord, vals):
+    """
+    Map a scalar coordinate to the nearest voxel-center index and report
+    whether the coordinate lies within the grid extents.
+
+    The grid values represent voxel centers, so the valid continuous extent
+    includes half a voxel beyond the first and last centers.
+    """
+    idx = int(np.argmin(np.abs(vals - coord)))
+
+    if len(vals) > 1:
+        half_step = float(vals[1] - vals[0]) / 2.0
+    else:
+        half_step = 0.0
+
+    lower_bound = float(vals[0]) - half_step
+    upper_bound = float(vals[-1]) + half_step
+    in_bounds = lower_bound <= float(coord) <= upper_bound
+    return idx, in_bounds
 
 def world_to_grid(x, y, z, x_vals, y_vals, z_vals):
     """
@@ -24,10 +52,19 @@ def world_to_grid(x, y, z, x_vals, y_vals, z_vals):
     x,y: real-world coordinates
     x_vals,y_vals: 1D arrays of grid coordinates along x and y (create_2d_grid)
     """
-    i = np.argmin(np.abs(x_vals - x))   # find closest x in the grid
-    j = np.argmin(np.abs(y_vals - y))   # find closest y in the grid
-    k = np.argmin(np.abs(z_vals - z))   # find closest z in the grid
+    i, _ = _coord_to_grid_index_and_in_bounds(x, x_vals)
+    j, _ = _coord_to_grid_index_and_in_bounds(y, y_vals)
+    k, _ = _coord_to_grid_index_and_in_bounds(z, z_vals)
     return i, j, k
+
+def world_to_grid_checked(x, y, z, x_vals, y_vals, z_vals):
+    """
+    Return the nearest voxel-center indices together with an in-bounds flag.
+    """
+    i, x_in_bounds = _coord_to_grid_index_and_in_bounds(x, x_vals)
+    j, y_in_bounds = _coord_to_grid_index_and_in_bounds(y, y_vals)
+    k, z_in_bounds = _coord_to_grid_index_and_in_bounds(z, z_vals)
+    return (i, j, k), (x_in_bounds and y_in_bounds and z_in_bounds)
 
 # i, j = world_to_grid(0.0, -0.5, x_vals, y_vals)
 # print(i, j)  # might print something like (381, 208)
@@ -189,13 +226,13 @@ def check_dual_frame_collision(
     tool0_world = T_world_tool0[:3, 3]
     
     # Convert tool0 to grid indices
-    ti = np.argmin(np.abs(x_vals - tool0_world[0]))
-    tj = np.argmin(np.abs(y_vals - tool0_world[1]))
-    tk = np.argmin(np.abs(z_vals - tool0_world[2]))
+    (ti, tj, tk), tool0_in_bounds = world_to_grid_checked(
+        tool0_world[0], tool0_world[1], tool0_world[2], x_vals, y_vals, z_vals
+    )
     
     # Check tool0 collision ONLY if within grid bounds
     # If tool0 extends beyond workspace, we allow it (can't verify collision, but wrist_3 is safe)
-    if (0 <= ti < rows and 0 <= tj < cols and 0 <= tk < depth):
+    if tool0_in_bounds and (0 <= ti < rows and 0 <= tj < cols and 0 <= tk < depth):
         if grid[ti, tj, tk] == 1:
             return False  # Tool0 in collision (within checkable region)
     # else: tool0 outside grid bounds - allowed (wrist_3 is reachable, tool is just extended)

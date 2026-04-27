@@ -534,12 +534,12 @@ void PathCollisionChecking::checkCollisionPoseCallback(const std::shared_ptr<arm
     catch (const std::exception& e) 
     {
         RCLCPP_ERROR(this->get_logger(), "Error in checkCollisionPoseCallback: %s", e.what());
-        res->in_collision = false;  // opción conservadora
+        res->in_collision = true;
     }
     catch (...)
     {
         RCLCPP_ERROR(this->get_logger(), "Unknown error in checkCollisionPoseCallback");
-        res->in_collision = false;
+        res->in_collision = true;
     }
 }
 
