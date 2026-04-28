@@ -380,7 +380,13 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
     open_dict = {start: start_node}         # For quick node lookup
     closed_set = set()                      # Explored nodes
     
-    while open_list:
+    # Add max iterations to prevent infinite loops
+    MAX_ITERATIONS = 100000  # Reasonable limit for most paths
+    iterations = 0
+    
+    while open_list and iterations < MAX_ITERATIONS:
+        iterations += 1
+        
         # Get node with lowest f value
         _, current_pos = heapq.heappop(open_list)
         current_node = open_dict[current_pos]
@@ -422,6 +428,9 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
                 neighbor['f'] = tentative_g + neighbor['h']
                 neighbor['parent'] = current_node
     
+    # No path found (either open list empty or max iterations reached)
+    if iterations >= MAX_ITERATIONS:
+        print(f"WARNING: A* search terminated after {MAX_ITERATIONS} iterations without finding a path")
     return []  # No path found
 
 def visualize_path(grid: np.ndarray, path: List[Tuple[int, int, int]]):
