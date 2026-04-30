@@ -30,6 +30,17 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     // Populate private properties
     base_link_ = this->declare_parameter<std::string>("root", "base_link");
     tip_ = this->declare_parameter<std::string>("tip", "ee_link");
+    
+    // For collision node in /collision namespace, prefix visualization frames
+    std::string node_namespace = this->get_namespace();
+    if (node_namespace == "/collision" || node_namespace.find("/collision") != std::string::npos)
+    {
+        visualization_frame_ = "collision/" + base_link_;
+    }
+    else
+    {
+        visualization_frame_ = base_link_;
+    }
 
     distance_threshold_ = this->declare_parameter<double>("distance_threshold", 0.3);
     dangerfield_ = this->declare_parameter<double>("dangerfield", 10.0);
@@ -156,20 +167,60 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
 
         if (kdl_joint.getType() != KDL::Joint::None)
         {
-            // No limits so assign max
-            if (urdf_joint->type == urdf::Joint::CONTINUOUS)
+            // Check if URDF joint exists
+            if (!urdf_joint)
             {
-                qmax_[mvable_jnt] = 2.0 * M_PI;
-                qmin_[mvable_jnt] = -2.0 * M_PI;
+                RCLCPP_ERROR(this->get_logger(), "Joint '%s' not found in URDF model!", kdl_joint.getName().c_str());
+                rclcpp::shutdown();
+                return;
+            }
+            
+            // Handle joints without limits (common for continuous joints or base joints)
+            if (!urdf_joint->limits)
+            {
+                RCLCPP_WARN(this->get_logger(), "Joint '%s' has no limits defined in URDF, using defaults", kdl_joint.getName().c_str());
+                
+                // Continuous joint or joint without limits - assign reasonable defaults
+                if (urdf_joint->type == urdf::Joint::CONTINUOUS)
+                {
+                    qmax_[mvable_jnt] = 2.0 * M_PI;
+                    qmin_[mvable_jnt] = -2.0 * M_PI;
+                }
+                else if (urdf_joint->type == urdf::Joint::PRISMATIC)
+                {
+                    // Default limits for prismatic joints (e.g., column)
+                    qmax_[mvable_jnt] = 1.0;  // 1 meter
+                    qmin_[mvable_jnt] = 0.0;
+                }
+                else
+                {
+                    // Revolute joint without limits
+                    qmax_[mvable_jnt] = M_PI;
+                    qmin_[mvable_jnt] = -M_PI;
+                }
+                
+                // Default velocity limit
+                qdotmax_[mvable_jnt] = 1.0;  // 1 rad/s or m/s
+                qdotmin_[mvable_jnt] = -1.0;
             }
             else
             {
-                qmax_[mvable_jnt] = model_->joints_.at(kdl_joint.getName())->limits->upper;
-                qmin_[mvable_jnt] = model_->joints_.at(kdl_joint.getName())->limits->lower;
-            }
+                // Normal case: joint has limits defined
+                if (urdf_joint->type == urdf::Joint::CONTINUOUS)
+                {
+                    qmax_[mvable_jnt] = 2.0 * M_PI;
+                    qmin_[mvable_jnt] = -2.0 * M_PI;
+                }
+                else
+                {
+                    qmax_[mvable_jnt] = urdf_joint->limits->upper;
+                    qmin_[mvable_jnt] = urdf_joint->limits->lower;
+                }
 
-            qdotmax_[mvable_jnt] = model_->joints_.at(kdl_joint.getName())->limits->velocity;
-            qdotmin_[mvable_jnt] = -model_->joints_.at(kdl_joint.getName())->limits->velocity;
+                qdotmax_[mvable_jnt] = urdf_joint->limits->velocity;
+                qdotmin_[mvable_jnt] = -urdf_joint->limits->velocity;
+            }
+            
             joint_names[mvable_jnt] = kdl_joint.getName();
             mvable_jnt++;
         }
@@ -221,17 +272,20 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     "update_collision_pose_stamped",
     std::bind(&PathCollisionChecking::updateCollisionObjectPoseStampedCallback, this, std::placeholders::_1, std::placeholders::_2));
 
-    rclcpp::SubscriptionOptions joint_sub_options;
-    joint_sub_options.callback_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    // DISABLED: joint_sub_ creates feedback loop - node publishes to /collision/joint_states
+    // and would immediately receive its own messages. Visualization is handled by
+    // robot_state_publisher subscribing to /collision/joint_states that we publish.
+    // rclcpp::SubscriptionOptions joint_sub_options;
+    // joint_sub_options.callback_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    // joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+    //     "/collision/joint_states", rclcpp::QoS(1),
+    //     std::bind(&PathCollisionChecking::jointStateCallback, this, std::placeholders::_1),
+    //     joint_sub_options);
+    
     rclcpp::SubscriptionOptions octo_sub_options;
     octo_sub_options.callback_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     rclcpp::SubscriptionOptions lin_lim_sub_options;
     lin_lim_sub_options.callback_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-    
-    joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-        "joint_states", rclcpp::QoS(1), 
-        std::bind(&PathCollisionChecking::jointStateCallback, this, std::placeholders::_1),
-        joint_sub_options);
     octomap_filter_sub_ = this->create_subscription<octomap_msgs::msg::Octomap>(
         "/octomap_filtered", rclcpp::QoS(1), 
         std::bind(&PathCollisionChecking::octomapCallback, this, std::placeholders::_1),
@@ -523,7 +577,9 @@ void PathCollisionChecking::checkCollisionPoseCallback(const std::shared_ptr<arm
 {
     try 
     {
-        sensor_msgs::msg::JointState prefixed_state = convertToNamespaceJointState(req->joint_state);
+        // Merge incoming partial joint state with current real robot state
+        sensor_msgs::msg::JointState merged_state = mergeJointStates(req->joint_state);
+        sensor_msgs::msg::JointState prefixed_state = convertToNamespaceJointState(merged_state);
 
         bool self_col, env_col;
         res->in_collision = evaluateCollisionState(prefixed_state, self_col, env_col, req->publish_visualization);
@@ -543,6 +599,70 @@ void PathCollisionChecking::checkCollisionPoseCallback(const std::shared_ptr<arm
     }
 }
 
+sensor_msgs::msg::JointState PathCollisionChecking::mergeJointStates(const sensor_msgs::msg::JointState& partial) const
+{
+    // Start with current real robot joint state
+    joint_state_mutex_.lock();
+    sensor_msgs::msg::JointState merged = joint_state_;
+    joint_state_mutex_.unlock();
+    
+    // Build a map of joint name -> index in merged state for fast lookup
+    std::map<std::string, size_t> joint_index_map;
+    for (size_t i = 0; i < merged.name.size(); ++i)
+    {
+        joint_index_map[merged.name[i]] = i;
+    }
+    
+    // Override with values from partial joint state
+    for (size_t i = 0; i < partial.name.size(); ++i)
+    {
+        std::string joint_name = partial.name[i];
+        
+        // Try to find joint as-is first
+        auto it = joint_index_map.find(joint_name);
+        
+        // If not found and doesn't have arm_ prefix, try adding it
+        if (it == joint_index_map.end() && joint_name.find("arm_") != 0)
+        {
+            std::string prefixed_name = "arm_" + joint_name;
+            it = joint_index_map.find(prefixed_name);
+            if (it != joint_index_map.end())
+            {
+                RCLCPP_DEBUG(this->get_logger(), "Auto-prefixed joint: %s -> %s", 
+                            joint_name.c_str(), prefixed_name.c_str());
+                joint_name = prefixed_name;
+            }
+        }
+        
+        // Update position if joint found
+        if (it != joint_index_map.end())
+        {
+            size_t idx = it->second;
+            if (i < partial.position.size())
+            {
+                merged.position[idx] = partial.position[i];
+                RCLCPP_DEBUG(this->get_logger(), "Updated joint '%s' to position %.3f", 
+                            joint_name.c_str(), partial.position[i]);
+            }
+            if (i < partial.velocity.size() && idx < merged.velocity.size())
+            {
+                merged.velocity[idx] = partial.velocity[i];
+            }
+            if (i < partial.effort.size() && idx < merged.effort.size())
+            {
+                merged.effort[idx] = partial.effort[i];
+            }
+        }
+        else
+        {
+            RCLCPP_WARN_ONCE(this->get_logger(), "Joint '%s' not found in robot model", joint_name.c_str());
+        }
+    }
+    
+    merged.header.stamp = this->now();
+    return merged;
+}
+
 sensor_msgs::msg::JointState PathCollisionChecking::convertToNamespaceJointState(const sensor_msgs::msg::JointState& input) const
 {
     sensor_msgs::msg::JointState visual;
@@ -550,8 +670,8 @@ sensor_msgs::msg::JointState PathCollisionChecking::convertToNamespaceJointState
     visual.position = input.position;
     visual.velocity = input.velocity;
     visual.effort = input.effort;
-    for (const auto& name : input.name)
-        visual.name.push_back("collision_" + name);
+    // Joint names should match the collision URDF exactly (no prefix needed - namespace handled by topic)
+    visual.name = input.name;
     return visual;
 }
 
@@ -560,10 +680,10 @@ void PathCollisionChecking::warmupCollisionModelFromJointState(const sensor_msgs
     bool self_col = false;
     bool env_col = false;
 
-    // Build robot_collision_geometry_ and exclusions; prefixed_joint_state already has collision_ names.
-    evaluateCollisionState(prefixed_joint_state, self_col, env_col, false);
+    // Build robot_collision_geometry_ and exclusions; enable visualization to show green meshes
+    evaluateCollisionState(prefixed_joint_state, self_col, env_col, true);
 
-    // Seed /collision/joint_states so jointStateCallback fires and visualization starts.
+    // Seed /collision/joint_states so robot_state_publisher updates TF
     evaluated_joint_pub_->publish(prefixed_joint_state);
 
     RCLCPP_INFO(this->get_logger(),
@@ -577,27 +697,23 @@ void PathCollisionChecking::warmupFromRealJointState(const sensor_msgs::msg::Joi
     // Unsubscribe immediately — we only need the first message.
     real_joint_sub_.reset();
 
-    // Convert real robot joint names (e.g. arm_shoulder_pan_joint) to collision names
-    // (collision_shoulder_pan_joint) by stripping main_tf_prefix_ and adding collision_.
-    sensor_msgs::msg::JointState prefixed;
-    prefixed.header = msg->header;
-    prefixed.position = msg->position;
-    prefixed.velocity = msg->velocity;
-    prefixed.effort   = msg->effort;
-    for (const auto& name : msg->name)
-    {
-        std::string base = name;
-        if (!main_tf_prefix_.empty() &&
-            name.compare(0, main_tf_prefix_.size(), main_tf_prefix_) == 0)
-        {
-            base = name.substr(main_tf_prefix_.size());
-        }
-        prefixed.name.push_back("collision_" + base);
-    }
+    // Store real robot joint state for later merging with service requests
+    joint_state_mutex_.lock();
+    joint_state_ = *msg;
+    joint_state_mutex_.unlock();
+
+    // Use joint names as-is from real robot - they should match the collision URDF
+    // The namespace separation is handled by publishing to /collision/joint_states
+    sensor_msgs::msg::JointState collision_state;
+    collision_state.header = msg->header;
+    collision_state.position = msg->position;
+    collision_state.velocity = msg->velocity;
+    collision_state.effort   = msg->effort;
+    collision_state.name = msg->name;  // Joint names should match collision URDF exactly
 
     try
     {
-        warmupCollisionModelFromJointState(prefixed);
+        warmupCollisionModelFromJointState(collision_state);
     }
     catch (const std::exception& e)
     {
@@ -625,11 +741,16 @@ void PathCollisionChecking::jointStateCallback(const sensor_msgs::msg::JointStat
     joint_state_ = *msg;
     KDL::JntArray kdl_joint_positions(ndof_);
     jointStatetoKDLJointArray(chain_, joint_state_, kdl_joint_positions);
+    
+    // Also create tree joint array for branch collision geometry
+    KDL::JntArray kdl_tree_joint_positions(tree_.getNrOfJoints());
+    kdl_tree_joint_positions.data.setZero();
+    jointStatetoKDLTreeJointArray(tree_, joint_state_, kdl_tree_joint_positions);
     joint_state_mutex_.unlock();
 
     GeometryInformation geometry_information;
     getCollisionModel(kdl_joint_positions, geometry_information);
-    std::vector<std::string> branch_link_names = addBranchCollisionGeometry(kdl_joint_positions, geometry_information);
+    std::vector<std::string> branch_link_names = addBranchCollisionGeometry(kdl_tree_joint_positions, geometry_information);
 
     std::vector<shapes::ShapeMsg> current_shapes;
     std::vector<geometry_msgs::msg::Pose> shapes_poses;
@@ -642,7 +763,7 @@ void PathCollisionChecking::jointStateCallback(const sensor_msgs::msg::JointStat
         {
             geometry_msgs::msg::PoseStamped shape_stamped;
             shape_stamped.header.stamp = msg->header.stamp;
-            shape_stamped.header.frame_id = base_link_;
+            shape_stamped.header.frame_id = visualization_frame_;
             shape_stamped.pose = shapes_poses[i];
             // Filter robot from octomap
             if (current_shapes[i].which() == 0)
@@ -1038,11 +1159,16 @@ bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::Joint
     RCLCPP_INFO(this->get_logger(), "=== evaluateCollisionState START ===");
     KDL::JntArray kdl_joint_positions(ndof_);
     jointStatetoKDLJointArray(chain_, joint_state, kdl_joint_positions);
+    
+    // Also create tree joint array for branch collision geometry
+    KDL::JntArray kdl_tree_joint_positions(tree_.getNrOfJoints());
+    kdl_tree_joint_positions.data.setZero();
+    jointStatetoKDLTreeJointArray(tree_, joint_state, kdl_tree_joint_positions);
 
     RCLCPP_INFO(this->get_logger(), "Getting collision model...");
     GeometryInformation geometry_information;
     getCollisionModel(kdl_joint_positions, geometry_information);
-    std::vector<std::string> branch_link_names = addBranchCollisionGeometry(kdl_joint_positions, geometry_information);
+    std::vector<std::string> branch_link_names = addBranchCollisionGeometry(kdl_tree_joint_positions, geometry_information);
     
     RCLCPP_INFO(this->get_logger(), "Collision model retrieved: %zu shapes (%zu from branches), %zu transforms, %zu jacobians",
                 geometry_information.shapes.size(), branch_link_names.size(),
@@ -1204,10 +1330,15 @@ bool PathCollisionChecking::checkSelfCollision(const GeometryInformation& geomet
                                 link_i_name.c_str(), i, link_j_name.c_str(), j);
                 }
             }
-            // Registrar si hay alguna colisión activa
-            if (collision_detected)
+            // Log active collisions even if state didn't change (for service call debugging)
+            if (collision_detected && !isAdjacent(i, j))
             {
                 any_collision_active = true;
+                std::string link_i_name = (i < n_names) ? collision_link_names_[i] : "link_" + std::to_string(i);
+                std::string link_j_name = (j < n_names) ? collision_link_names_[j] : "link_" + std::to_string(j);
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
+                    "Active collision: '%s' (index %d) <-> '%s' (index %d)",
+                    link_i_name.c_str(), i, link_j_name.c_str(), j);
             }
         }
     }
@@ -1235,37 +1366,40 @@ void PathCollisionChecking::buildCollisionExclusions()
         link_name_to_index[collision_link_names_[i]] = i;
     }
     
-    // 1. Add adjacent chain links (consecutive in the kinematic chain)
-    for (int i = 0; i < static_cast<int>(chain_.getNrOfSegments()) - 1; ++i)
+    // 1. Add adjacent chain links (within 2 hops in the kinematic chain)
+    // This catches links separated by non-collision segments (e.g., column_link -> arm_base_link -> arm_base_link_inertia)
+    int hop_distance = 2;  // Exclude links within this many segments in the chain
+    for (int i = 0; i < static_cast<int>(chain_.getNrOfSegments()); ++i)
     {
         std::string link_i = chain_.getSegment(i).getName();
-        std::string link_j = chain_.getSegment(i + 1).getName();
-        
-        // Find indices in collision_link_names_
         auto it_i = link_name_to_index.find(link_i);
-        auto it_j = link_name_to_index.find(link_j);
+        if (it_i == link_name_to_index.end()) continue;  // Skip segments without collision geometry
         
-        if (it_i != link_name_to_index.end() && it_j != link_name_to_index.end())
+        // Check all segments within hop_distance
+        for (int j = i + 1; j <= i + hop_distance && j < static_cast<int>(chain_.getNrOfSegments()); ++j)
         {
+            std::string link_j = chain_.getSegment(j).getName();
+            auto it_j = link_name_to_index.find(link_j);
+            if (it_j == link_name_to_index.end()) continue;  // Skip segments without collision geometry
+            
             int idx_i = it_i->second;
             int idx_j = it_j->second;
             collision_exclusions_.insert(std::make_pair(std::min(idx_i, idx_j), std::max(idx_i, idx_j)));
-            RCLCPP_DEBUG(this->get_logger(), "Excluding adjacent chain links: %s (%d) <-> %s (%d)", 
-                        link_i.c_str(), idx_i, link_j.c_str(), idx_j);
+            RCLCPP_INFO(this->get_logger(), "Excluding chain-adjacent links: %s (%d) <-> %s (%d) [%d hops]", 
+                        link_i.c_str(), idx_i, link_j.c_str(), idx_j, j - i);
         }
     }
     
     // 2. Add parent-child relationships for all links (especially branches)
-    // Build parent map from URDF joints
+    // Build parent map from URDF joints - include ALL joint types since adjacent links
+    // in the kinematic tree should always be excluded (they're mechanically connected)
     std::map<std::string, std::string> child_to_parent;
+    std::map<std::string, int> child_to_joint_type;
     for (const auto& joint_pair : model_->joints_)
     {
         const urdf::JointSharedPtr& joint = joint_pair.second;
-        // Skip if this is not a fixed joint (we only care about rigidly connected links)
-        if (joint->type == urdf::Joint::FIXED)
-        {
-            child_to_parent[joint->child_link_name] = joint->parent_link_name;
-        }
+        child_to_parent[joint->child_link_name] = joint->parent_link_name;
+        child_to_joint_type[joint->child_link_name] = joint->type;
     }
     
     // For each link with collision geometry, exclude it from its parent if fixed joint
@@ -1283,7 +1417,7 @@ void PathCollisionChecking::buildCollisionExclusions()
                 int parent_idx = parent_idx_it->second;
                 int child_idx = child_idx_it->second;
                 collision_exclusions_.insert(std::make_pair(std::min(parent_idx, child_idx), std::max(parent_idx, child_idx)));
-                RCLCPP_DEBUG(this->get_logger(), "Excluding fixed parent-child: %s (%d) <-> %s (%d)", 
+                RCLCPP_INFO(this->get_logger(), "Excluding parent-child: %s (%d) <-> %s (%d)", 
                             parent_name.c_str(), parent_idx, link_name.c_str(), child_idx);
             }
         }
@@ -1312,10 +1446,117 @@ void PathCollisionChecking::buildCollisionExclusions()
                     int idx_i = idx_i_it->second;
                     int idx_j = idx_j_it->second;
                     collision_exclusions_.insert(std::make_pair(std::min(idx_i, idx_j), std::max(idx_i, idx_j)));
-                    RCLCPP_DEBUG(this->get_logger(), "Excluding siblings: %s (%d) <-> %s (%d)", 
+                    RCLCPP_INFO(this->get_logger(), "Excluding siblings: %s (%d) <-> %s (%d)", 
                                 siblings[i].c_str(), idx_i, siblings[j].c_str(), idx_j);
                 }
             }
+        }
+    }
+    
+    // 4. Exclude all mobile base links from colliding with each other
+    // Find all links up to and including column_link in the kinematic chain
+    std::set<std::string> mobile_base_links;
+    bool found_column_link = false;
+    
+    for (int i = 0; i < static_cast<int>(chain_.getNrOfSegments()); ++i)
+    {
+        std::string link_name = chain_.getSegment(i).getName();
+        mobile_base_links.insert(link_name);
+        
+        if (link_name == "column_link")
+        {
+            found_column_link = true;
+            RCLCPP_INFO(this->get_logger(), "Found column_link at chain segment %d", i);
+            break;  // Stop after column_link
+        }
+    }
+    
+    // Also add links that are branches off the base/turret (lidars, casters, wheels, etc)
+    // These are children/descendants of mobile_base_links but not in the main chain
+    // Use iterative approach to catch all descendants (including grandchildren)
+    bool added_new_links = true;
+    int iteration = 0;
+    while (added_new_links && iteration < 10)  // Max 10 iterations to prevent infinite loops
+    {
+        added_new_links = false;
+        iteration++;
+        
+        for (const auto& pair : child_to_parent)
+        {
+            const std::string& child = pair.first;
+            const std::string& parent = pair.second;
+            
+            // If parent is a mobile base link and child is not already added
+            if (mobile_base_links.find(parent) != mobile_base_links.end() && 
+                mobile_base_links.find(child) == mobile_base_links.end())
+            {
+                // Check if child is NOT in the main chain after column_link
+                bool child_is_in_arm_chain = false;
+                if (found_column_link)
+                {
+                    for (int i = 0; i < static_cast<int>(chain_.getNrOfSegments()); ++i)
+                    {
+                        std::string chain_link = chain_.getSegment(i).getName();
+                        if (chain_link == "column_link")
+                        {
+                            // Check segments after column_link (the arm chain)
+                            for (int j = i + 1; j < static_cast<int>(chain_.getNrOfSegments()); ++j)
+                            {
+                                if (chain_.getSegment(j).getName() == child)
+                                {
+                                    child_is_in_arm_chain = true;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                
+                if (!child_is_in_arm_chain)
+                {
+                    mobile_base_links.insert(child);
+                    added_new_links = true;
+                    RCLCPP_DEBUG(this->get_logger(), "Added descendant to mobile base: %s (parent: %s, iteration %d)", 
+                                child.c_str(), parent.c_str(), iteration);
+                }
+            }
+        }
+    }
+    
+    if (iteration >= 10)
+    {
+        RCLCPP_WARN(this->get_logger(), "Mobile base link detection reached max iterations");
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "Identified %zu mobile base links", mobile_base_links.size());
+    
+    // Convert link names to indices and exclude all pairs
+    std::vector<int> base_link_indices;
+    for (const auto& base_link : mobile_base_links)
+    {
+        auto it = link_name_to_index.find(base_link);
+        if (it != link_name_to_index.end())
+        {
+            base_link_indices.push_back(it->second);
+            RCLCPP_INFO(this->get_logger(), "Mobile base link: %s (index %d)", 
+                        base_link.c_str(), it->second);
+        }
+    }
+    
+    // Exclude all pairs of mobile base links
+    for (size_t i = 0; i < base_link_indices.size(); ++i)
+    {
+        for (size_t j = i + 1; j < base_link_indices.size(); ++j)
+        {
+            int idx_i = base_link_indices[i];
+            int idx_j = base_link_indices[j];
+            collision_exclusions_.insert(std::make_pair(std::min(idx_i, idx_j), std::max(idx_i, idx_j)));
+            
+            std::string link_i_name = collision_link_names_[idx_i];
+            std::string link_j_name = collision_link_names_[idx_j];
+            RCLCPP_INFO(this->get_logger(), "Excluding mobile base pair: %s (%d) <-> %s (%d)", 
+                        link_i_name.c_str(), idx_i, link_j_name.c_str(), idx_j);
         }
     }
     
@@ -1333,7 +1574,7 @@ void PathCollisionChecking::displayCollisionModel(const GeometryInformation& geo
         visualization_msgs::msg::Marker mkr;
         shapes::constructMarkerFromShape(geometry_information.shapes[i].get(), mkr);
         mkr.ns = "collision_body";
-        mkr.header.frame_id = base_link_;
+        mkr.header.frame_id = visualization_frame_;
         mkr.action = visualization_msgs::msg::Marker::ADD;
         mkr.lifetime = rclcpp::Duration(0, 0);
         mkr.id = i;
@@ -1388,7 +1629,7 @@ void PathCollisionChecking::publishWorldObstacles()
         auto world_obj = world_objects[i];
         visualization_msgs::msg::Marker mkr;
         mkr.ns = "collision_objects";
-        mkr.header.frame_id = base_link_;
+        mkr.header.frame_id = visualization_frame_;
         mkr.action = visualization_msgs::msg::Marker::ADD;
         mkr.lifetime = rclcpp::Duration(0, 0);
         std::string obj_type = world_obj->object->getTypeString();

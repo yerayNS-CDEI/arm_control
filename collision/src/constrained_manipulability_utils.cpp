@@ -86,6 +86,78 @@ void jointStatetoKDLJointArray(const KDL::Chain& chain,
     }
 }
 
+// Convert joint state to KDL joint array for the full tree (all joints)
+// Helper function to recursively walk tree and collect joints in kinematic order
+void walkTreeForJoints(const KDL::SegmentMap::const_iterator& segment_it,
+                       const KDL::SegmentMap& segment_map,
+                       std::vector<std::string>& joint_names,
+                       const rclcpp::Logger& logger,
+                       bool log_output)
+{
+    const KDL::Segment& segment = segment_it->second.segment;
+    const KDL::Joint& joint = segment.getJoint();
+    
+    // Add this joint if it's not a fixed joint
+    if (joint.getType() != KDL::Joint::None)
+    {
+        joint_names.push_back(joint.getName());
+        if (log_output)
+        {
+            RCLCPP_INFO(logger, "Tree joint[%zu] = '%s' (kinematic order)", 
+                       joint_names.size() - 1, joint.getName().c_str());
+        }
+    }
+    
+    // Recursively process all children
+    for (const auto& child_it : segment_it->second.children)
+    {
+        walkTreeForJoints(child_it, segment_map, joint_names, logger, log_output);
+    }
+}
+
+void jointStatetoKDLTreeJointArray(const KDL::Tree& tree,
+                                    const sensor_msgs::msg::JointState& joint_state,
+                                    KDL::JntArray& kdl_joint_positions)
+{
+    static rclcpp::Logger logger = rclcpp::get_logger("jointStatetoKDLTreeJointArray");
+    static bool first_call = true;
+    
+    // Walk the tree from root to collect joints in kinematic order
+    KDL::SegmentMap segment_map = tree.getSegments();
+    std::vector<std::string> tree_joint_names;
+    
+    // Start from root segment
+    auto root_it = segment_map.find(tree.getRootSegment()->first);
+    if (root_it != segment_map.end())
+    {
+        walkTreeForJoints(root_it, segment_map, tree_joint_names, logger, first_call);
+    }
+    
+    // Build joint name to index mapping
+    std::map<std::string, unsigned int> joint_name_to_index;
+    for (unsigned int i = 0; i < tree_joint_names.size(); ++i)
+    {
+        joint_name_to_index[tree_joint_names[i]] = i;
+    }
+    
+    // Fill joint positions from joint_state
+    for (unsigned int i = 0; i < joint_state.name.size(); ++i)
+    {
+        auto it = joint_name_to_index.find(joint_state.name[i]);
+        if (it != joint_name_to_index.end())
+        {
+            kdl_joint_positions(it->second) = joint_state.position[i];
+            if (first_call)
+            {
+                RCLCPP_INFO(logger, "  Mapped joint_state['%s'] = %.3f -> kdl_tree[%u]", 
+                           joint_state.name[i].c_str(), joint_state.position[i], it->second);
+            }
+        }
+    }
+    
+    first_call = false;
+}
+
 // Project translational Jacobian matrix along a vector
 bool projectTranslationalJacobian(const Eigen::Vector3d& nT,
                                   const Eigen::Matrix<double, 6, Eigen::Dynamic>& J0N_in,

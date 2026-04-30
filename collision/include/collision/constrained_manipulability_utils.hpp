@@ -8,6 +8,7 @@
 #include <Eigen/Eigen>
 
 #include <kdl/chain.hpp>
+#include <kdl/tree.hpp>
 #include <kdl/chainjnttojacsolver.hpp>
 
 #include <rclcpp/rclcpp.hpp>
@@ -32,6 +33,11 @@ bool screwTransform(const Eigen::Matrix<double, 6, Eigen::Dynamic>& J0N_in,
 void jointStatetoKDLJointArray(const KDL::Chain& chain, 
                                const sensor_msgs::msg::JointState& joint_state, 
                                KDL::JntArray& kdl_joint_positions);
+
+// Convert joint state to KDL joint array for the full tree (all joints)
+void jointStatetoKDLTreeJointArray(const KDL::Tree& tree,
+                                    const sensor_msgs::msg::JointState& joint_state,
+                                    KDL::JntArray& kdl_joint_positions);
 
 // Project translational Jacobian matrix along a vector
 bool projectTranslationalJacobian(const Eigen::Vector3d& nT,

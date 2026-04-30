@@ -127,6 +127,7 @@ class PathCollisionChecking : public rclcpp::Node
         void checkCollisionCallback();
         void polytopePubCallback();
 
+        sensor_msgs::msg::JointState mergeJointStates(const sensor_msgs::msg::JointState& partial) const;
         sensor_msgs::msg::JointState convertToNamespaceJointState(const sensor_msgs::msg::JointState& input) const;
         void warmupCollisionModelFromJointState(const sensor_msgs::msg::JointState& prefixed_joint_state);
         void warmupFromRealJointState(const sensor_msgs::msg::JointState::SharedPtr msg);
@@ -335,6 +336,7 @@ class PathCollisionChecking : public rclcpp::Node
         // Robot's base link and end-effector frame
         std::string base_link_;
         std::string tip_;
+        std::string visualization_frame_;  // Frame for visualization markers (collision/ prefixed)
         // Distance threshold beyond which objects are ignored
         double distance_threshold_;
         // Desired dangerfield value
@@ -386,7 +388,7 @@ class PathCollisionChecking : public rclcpp::Node
         std::vector<std::string> collision_link_names_;  // Link names parallel to robot_collision_geometry_
 
         sensor_msgs::msg::JointState joint_state_;
-        boost::mutex joint_state_mutex_;
+        mutable boost::mutex joint_state_mutex_;  // Mutable to allow locking in const functions
 
         // Transforms to correctly filter objects from octomap (irrespective of frame differences)
         std::unique_ptr<tf2_ros::Buffer> buffer_;
