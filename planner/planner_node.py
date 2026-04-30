@@ -66,6 +66,13 @@ class PlannerNode(Node):
         self.declare_parameter('max_ik_solutions_to_test', 1)
         self.max_ik_solutions_to_test = self.get_parameter('max_ik_solutions_to_test').get_parameter_value().integer_value
 
+        # Number of neighbor layers to mark around collision cells during replanning
+        # 0 = mark only the collision cell itself
+        # 1 = mark cell + 27 neighbors (3x3x3 cube)
+        # Higher values create larger safety margins but may over-constrain the planner
+        self.declare_parameter('collision_avoidance_neighbor_layers', 0)
+        self.collision_avoidance_neighbor_layers = self.get_parameter('collision_avoidance_neighbor_layers').get_parameter_value().integer_value
+
         # --- Parameters for the grid / reachability ---
         self.robot_name = 'ur10e'
         self.filename = "reachability_map_0.05_step_20_orientations"
@@ -503,6 +510,79 @@ class PlannerNode(Node):
             f"Published reachability boundary marker with {len(m.points)} points "
             f"on topic 'reachability_boundary_marker'."
         )
+    
+    def publish_collision_waypoints_markers(self, collision_waypoints_dict):
+        """Publish collision waypoints as red spheres in RViz on goal_pose_marker topic.
+        Uses individual SPHERE markers (not SPHERE_LIST) to match gap_boundaries style.
+        
+        Args:
+            collision_waypoints_dict: Dict mapping grid_idx (i,j,k) -> num_layers
+        """
+        now = self.get_clock().now().to_msg()
+        
+        if not collision_waypoints_dict:
+            # Clear all existing markers using DELETEALL
+            clear_marker = Marker()
+            clear_marker.header.frame_id = "arm_base"
+            clear_marker.header.stamp = now
+            clear_marker.ns = "collision_waypoints"
+            clear_marker.id = 0
+            clear_marker.action = Marker.DELETEALL
+            self.goal_marker_pub.publish(clear_marker)
+            self.get_logger().info("🔴 Cleared collision waypoint markers")
+            return
+        
+        # Publish individual SPHERE markers (like gap_boundaries does)
+        scale = float(self.cart_step) * 2.5  # Larger for better visibility
+        sample_positions = []
+        
+        for marker_id, grid_idx in enumerate(collision_waypoints_dict.keys()):
+            i, j, k = grid_idx
+            world_pos = grid_to_world(i, j, k, self.x_vals, self.y_vals, self.z_vals)
+            
+            m = Marker()
+            m.header.frame_id = "arm_base"
+            m.header.stamp = now
+            m.ns = "collision_waypoints"
+            m.id = marker_id
+            m.type = Marker.SPHERE
+            m.action = Marker.ADD
+            
+            # Position
+            m.pose.position.x = float(world_pos[0])
+            m.pose.position.y = float(world_pos[1])
+            m.pose.position.z = float(world_pos[2])
+            m.pose.orientation.w = 1.0
+            
+            # Size
+            m.scale.x = scale
+            m.scale.y = scale
+            m.scale.z = scale
+            
+            # Bright red color
+            m.color.r = 1.0
+            m.color.g = 0.0
+            m.color.b = 0.0
+            m.color.a = 0.9
+            
+            m.lifetime.sec = 0  # Persist until deleted
+            
+            self.goal_marker_pub.publish(m)
+            
+            # Small delay to avoid flooding (1ms between markers)
+            time.sleep(0.001)
+            
+            # Log first 3 positions for debugging
+            if len(sample_positions) < 3:
+                sample_positions.append(f"grid{grid_idx}→world({world_pos[0]:.3f},{world_pos[1]:.3f},{world_pos[2]:.3f})")
+        
+        num_subscribers = self.goal_marker_pub.get_subscription_count()
+        self.get_logger().info(
+            f"🔴 Published {len(collision_waypoints_dict)} individual collision waypoint spheres:\n"
+            f"   Topic: goal_pose_marker ({num_subscribers} subscriber(s))\n"
+            f"   Frame: arm_base, Namespace: collision_waypoints, Scale: {scale:.3f}m\n"
+            f"   Samples: {sample_positions}"
+        )
 
     def clear_goal_and_path_markers(self):
         """Clear stale goal/path markers before planning a new goal."""
@@ -585,6 +665,120 @@ class PlannerNode(Node):
             )
             m_axes.lifetime.sec = 0
             self.goal_marker_pub.publish(m_axes)
+    
+    def _publish_gap_boundary_markers(self, start_pos, goal_pos, collision_waypoints_dict=None):
+        """Publish markers showing the current A* search boundaries (gap start/goal) 
+        and collision waypoints (red spheres).
+        
+        Args:
+            start_pos: Start boundary position [x, y, z]
+            goal_pos: Goal boundary position [x, y, z]
+            collision_waypoints_dict: Dict of collision waypoint grid indices {(i,j,k): num_layers}
+        """
+        now = rclpy.time.Time().to_msg()
+        
+        # Start boundary marker (blue sphere) - ID 0
+        m_start = Marker()
+        m_start.header.frame_id = "arm_base"
+        m_start.header.stamp = now
+        m_start.ns = "gap_boundaries"
+        m_start.id = 0
+        m_start.type = Marker.SPHERE
+        m_start.action = Marker.ADD
+        m_start.pose.position.x = float(start_pos[0])
+        m_start.pose.position.y = float(start_pos[1])
+        m_start.pose.position.z = float(start_pos[2])
+        m_start.pose.orientation.w = 1.0
+        m_start.scale.x = 0.08
+        m_start.scale.y = 0.08
+        m_start.scale.z = 0.08
+        m_start.color.r = 0.0
+        m_start.color.g = 0.5
+        m_start.color.b = 1.0
+        m_start.color.a = 0.8
+        m_start.lifetime.sec = 0
+        self.goal_marker_pub.publish(m_start)
+        
+        # Goal boundary marker (orange sphere) - ID 1
+        m_goal = Marker()
+        m_goal.header.frame_id = "arm_base"
+        m_goal.header.stamp = now
+        m_goal.ns = "gap_boundaries"
+        m_goal.id = 1
+        m_goal.type = Marker.SPHERE
+        m_goal.action = Marker.ADD
+        m_goal.pose.position.x = float(goal_pos[0])
+        m_goal.pose.position.y = float(goal_pos[1])
+        m_goal.pose.position.z = float(goal_pos[2])
+        m_goal.pose.orientation.w = 1.0
+        m_goal.scale.x = 0.08
+        m_goal.scale.y = 0.08
+        m_goal.scale.z = 0.08
+        m_goal.color.r = 1.0
+        m_goal.color.g = 0.5
+        m_goal.color.b = 0.0
+        m_goal.color.a = 0.8
+        m_goal.lifetime.sec = 0
+        self.goal_marker_pub.publish(m_goal)
+        
+        # Collision waypoint markers (red spheres) - IDs starting from 100
+        if collision_waypoints_dict:
+            scale = 0.04  # Much smaller than boundary markers (0.08) for less visual clutter
+            for marker_id, grid_idx in enumerate(collision_waypoints_dict.keys(), start=100):
+                i, j, k = grid_idx
+                world_pos = grid_to_world(i, j, k, self.x_vals, self.y_vals, self.z_vals)
+                
+                m = Marker()
+                m.header.frame_id = "arm_base"
+                m.header.stamp = now
+                m.ns = "gap_boundaries"  # Same namespace as boundaries!
+                m.id = marker_id  # IDs 100, 101, 102, ...
+                m.type = Marker.SPHERE
+                m.action = Marker.ADD
+                
+                m.pose.position.x = float(world_pos[0])
+                m.pose.position.y = float(world_pos[1])
+                m.pose.position.z = float(world_pos[2])
+                m.pose.orientation.w = 1.0
+                
+                m.scale.x = scale
+                m.scale.y = scale
+                m.scale.z = scale
+                
+                # Bright red color
+                m.color.r = 1.0
+                m.color.g = 0.0
+                m.color.b = 0.0
+                m.color.a = 0.9
+                
+                m.lifetime.sec = 0
+                self.goal_marker_pub.publish(m)
+            
+            # Delete any markers beyond what we just published (if we have fewer now)
+            # This handles the case where we had more markers before
+            for marker_id in range(100 + len(collision_waypoints_dict), 200):
+                clear_m = Marker()
+                clear_m.header.frame_id = "arm_base"
+                clear_m.header.stamp = now
+                clear_m.ns = "gap_boundaries"
+                clear_m.id = marker_id
+                clear_m.action = Marker.DELETE
+                self.goal_marker_pub.publish(clear_m)
+            
+            self.get_logger().info(
+                f"🔴 Visualized {len(collision_waypoints_dict)} collision spheres (IDs 100-{99+len(collision_waypoints_dict)})"
+            )
+        else:
+            # Clear ALL collision markers (IDs 100-199) when dict is empty
+            self.get_logger().info("🗑️  Clearing all collision markers (dict is empty)")
+            for marker_id in range(100, 200):
+                clear_m = Marker()
+                clear_m.header.frame_id = "arm_base"
+                clear_m.header.stamp = now
+                clear_m.ns = "gap_boundaries"
+                clear_m.id = marker_id
+                clear_m.action = Marker.DELETE
+                self.goal_marker_pub.publish(clear_m)
         
     def publish_ee_path_markers(self, path_world, frame_id="map", current_ee_xyz=None, goal_xyz=None,
                                 ns="ee_path", id_offset=0, rgba=(0.0, 0.0, 1.0, 1.0),
@@ -879,46 +1073,44 @@ class PlannerNode(Node):
             self.get_logger().info(f"[prune] result: {before} -> {after} waypoints")
         return pw
     
-    def _mark_cell_and_neighbors_as_obstacles(self, occupancy_grid, i, j, k):
+    def _mark_cell_and_neighbors_as_obstacles(self, occupancy_grid, i, j, k, num_layers=1):
         """
-        Mark a grid cell and its neighbors (3x3x3 cube) as obstacles.
+        Mark a grid cell and optionally its neighbors as obstacles.
         This creates a safety margin around problematic grid cells during replanning.
-        
-        Marks 27 cells total:
-        - 9 cells in current Z-level (center + 8 neighbors)
-        - 9 cells in Z-level above (k+1)
-        - 9 cells in Z-level below (k-1)
         
         Args:
             occupancy_grid: The 3D occupancy grid to modify
             i, j, k: Grid indices of the cell to mark
+            num_layers: Number of neighbor layers to mark:
+                       0 = mark only the cell itself (1 cell)
+                       1 = mark cell + immediate neighbors (3x3x3 cube = 27 cells)
+                       2 = mark cell + 2 layers of neighbors (5x5x5 cube = 125 cells)
+                       etc.
         
         Returns:
             Number of cells marked (including the center cell)
         """
         marked_count = 0
         
-        # Define 3x3 pattern in XY plane
-        xy_offsets = [
-            (-1, -1), (-1, 0), (-1, +1),  # Row above
-            (0,  -1), (0,  0), (0,  +1),  # Center row
-            (+1, -1), (+1, 0), (+1, +1),  # Row below
-        ]
-        
-        # Mark cells in current Z-level, above (k+1), and below (k-1)
-        for z_offset in [-1, 0, +1]:
-            nk = k + z_offset
-            # Check Z bounds
-            if not (0 <= nk < len(self.z_levels)):
-                continue
-            
-            # Mark all 9 cells in this Z-level
-            for di, dj in xy_offsets:
-                ni, nj = i + di, j + dj
-                # Check XY bounds
-                if 0 <= ni < self.grid_size and 0 <= nj < self.grid_size:
-                    occupancy_grid[ni, nj, nk] = 1
-                    marked_count += 1
+        if num_layers == 0:
+            # Mark only the center cell
+            if (0 <= i < occupancy_grid.shape[0] and
+                0 <= j < occupancy_grid.shape[1] and
+                0 <= k < occupancy_grid.shape[2]):
+                occupancy_grid[i, j, k] = 1
+                marked_count = 1
+        else:
+            # Mark cell and neighbors within num_layers radius
+            for di in range(-num_layers, num_layers + 1):
+                for dj in range(-num_layers, num_layers + 1):
+                    for dk in range(-num_layers, num_layers + 1):
+                        ni, nj, nk = i + di, j + dj, k + dk
+                        # Check bounds
+                        if (0 <= ni < occupancy_grid.shape[0] and
+                            0 <= nj < occupancy_grid.shape[1] and
+                            0 <= nk < occupancy_grid.shape[2]):
+                            occupancy_grid[ni, nj, nk] = 1
+                            marked_count += 1
         
         return marked_count
     
@@ -1244,6 +1436,9 @@ class PlannerNode(Node):
                 return
             self.plan_and_send_trajectory(msg, plan_generation=plan_generation)
         except Exception as exc:
+            import traceback
+            tb_str = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            self.get_logger().error(f"Exception traceback:\n{tb_str}")
             self._fail_current_goal(f"Unhandled exception while planning goal: {exc}")
         finally:
             with self._state_lock:
@@ -1687,16 +1882,18 @@ class PlannerNode(Node):
 
         # Apply dilation
         self.get_logger().info(f"Applying obstacle dilation to grid shape {occupancy_grid.shape}...")
-        occupancy_grid_dilated = dilate_obstacles(occupancy_grid, dilation_distance, self.x_vals)
-        self.get_logger().info(f"Obstacle dilation complete.")
+        # occupancy_grid_dilated is now created fresh each replanning iteration (moved into loop)
+        # occupancy_grid_dilated = dilate_obstacles(occupancy_grid, dilation_distance, self.x_vals)
+        self.get_logger().info(f"Obstacle dilation will be applied each iteration.")
         # occupancy_grid_dilated = np.zeros(self.grid_shape, dtype=np.uint8)      # Eliminating all obstacles for now
 
         # Initialize collision waypoint tracking for replanning
         self.get_logger().info("Initializing replanning loop...")
-        # Dict mapping grid_idx -> mark_neighbors (bool)
-        # True: mark cell AND neighbors, False: mark only cell (for boundary collision points)
+        # Dict mapping grid_idx -> num_layers (int)
+        # Number of neighbor layers to mark around this collision cell
+        # Boundary collisions use 0 layers (cell only), interior collisions use configured value
         collision_waypoints_to_avoid = {}
-        MAX_REPLANNING_ATTEMPTS = 20
+        MAX_REPLANNING_ATTEMPTS = 150  # Increased to allow multiple boundary narrowings (each gets 15 attempts) + grid resets
         replanning_attempt = 0
         
         # Track validated collision-free segments across replanning iterations
@@ -1714,6 +1911,22 @@ class PlannerNode(Node):
         current_planning_goal_orientation = goal_orientation_wrist3.as_matrix()
         current_planning_goal_grid = goal_idx
         
+        # Track previous boundaries to detect when gap narrows (for clearing collision waypoints)
+        previous_planning_start_grid = None
+        previous_planning_goal_grid = None
+        
+        # Detect stuck condition: same boundaries with no progress
+        iterations_at_same_boundaries = 0
+        MAX_ITERATIONS_SAME_BOUNDARIES = 15  # More attempts before reset (increased from 7 to explore more alternatives)
+        
+        # Track grid reset attempts for stuck recovery
+        grid_reset_attempts = 0
+        MAX_GRID_RESET_ATTEMPTS = 5  # Reduced since we have more iterations per reset
+        
+        # Track boundary pairs we've already tried with clean grids (to avoid pointless resets)
+        # Set of tuples: (start_grid_idx, goal_grid_idx)
+        tried_clean_boundaries = set()
+        
         self.get_logger().info(f"Starting replanning loop (max {MAX_REPLANNING_ATTEMPTS} attempts)...")
         # Main planning loop with replanning support
         while replanning_attempt < MAX_REPLANNING_ATTEMPTS:
@@ -1721,6 +1934,18 @@ class PlannerNode(Node):
                 return
 
             self.get_logger().info(f"Replanning iteration {replanning_attempt}...")
+            
+            # Initialize previous boundaries on first iteration
+            if replanning_attempt == 0:
+                previous_planning_start_grid = current_planning_start_grid
+                previous_planning_goal_grid = current_planning_goal_grid
+                # Mark initial boundaries as tried with clean grid (iteration 0 always has clean grid)
+                tried_clean_boundaries.add((current_planning_start_grid, current_planning_goal_grid))
+            
+            # Recreate dilated grid fresh each iteration to avoid accumulating old obstacle markings
+            # Only current collision_waypoints_to_avoid will be marked
+            occupancy_grid_dilated = dilate_obstacles(occupancy_grid, dilation_distance, self.x_vals)
+            
             if replanning_attempt > 0:
                 self.get_logger().info(
                     f"🔄 Replanning attempt {replanning_attempt}/{MAX_REPLANNING_ATTEMPTS - 1}: "
@@ -1729,34 +1954,45 @@ class PlannerNode(Node):
                 
             # Mark collision waypoints (and optionally their neighbors) as obstacles in the dilated grid
             total_cells_marked = 0
-            for grid_idx, mark_neighbors in collision_waypoints_to_avoid.items():
+            cells_already_occupied = 0
+            for grid_idx, num_layers in collision_waypoints_to_avoid.items():
                 i, j, k = grid_idx
-                if mark_neighbors:
-                    # Interior collision waypoint: mark cell AND its 27 neighbors
-                    cells_marked = self._mark_cell_and_neighbors_as_obstacles(occupancy_grid_dilated, i, j, k)
-                    total_cells_marked += cells_marked
+                # Check if cell is already occupied by environment obstacle
+                if (0 <= i < occupancy_grid_dilated.shape[0] and
+                    0 <= j < occupancy_grid_dilated.shape[1] and
+                    0 <= k < occupancy_grid_dilated.shape[2]):
+                    current_value = occupancy_grid_dilated[i, j, k]
+                    if current_value == 1:
+                        # Cell is already an obstacle from environment - can't replan through it anyway
+                        cells_already_occupied += 1
+                        self.get_logger().debug(
+                            f"Skipped marking {grid_idx} - already occupied by environment obstacle"
+                        )
+                        continue
+                
+                # Mark cell and neighbors based on num_layers
+                cells_marked = self._mark_cell_and_neighbors_as_obstacles(
+                    occupancy_grid_dilated, i, j, k, num_layers
+                )
+                total_cells_marked += cells_marked
+                
+                if num_layers == 0:
                     self.get_logger().debug(
-                        f"Marked grid cell {grid_idx} and {cells_marked - 1} neighbors as obstacles "
-                        f"({cells_marked} total cells)"
+                        f"Marked grid cell {grid_idx} as obstacle (no neighbors)"
                     )
                 else:
-                    # Boundary collision waypoint: mark ONLY the cell itself (not neighbors)
-                    # to avoid invalidating adjacent collision-free preserved waypoints
-                    if (0 <= i < occupancy_grid_dilated.shape[0] and
-                        0 <= j < occupancy_grid_dilated.shape[1] and
-                        0 <= k < occupancy_grid_dilated.shape[2]):
-                        if occupancy_grid_dilated[i, j, k] == 0:
-                            occupancy_grid_dilated[i, j, k] = 100
-                            total_cells_marked += 1
-                            self.get_logger().debug(
-                                f"Marked boundary grid cell {grid_idx} as obstacle (no neighbors)"
-                            )
+                    self.get_logger().debug(
+                        f"Marked grid cell {grid_idx} with {num_layers} neighbor layer(s) "
+                        f"({cells_marked} total cells)"
+                    )
             
-            if replanning_attempt > 0 and total_cells_marked > 0:
-                self.get_logger().info(
-                    f"🚫 Marked {total_cells_marked} grid cells as obstacles "
-                    f"({len(collision_waypoints_to_avoid)} waypoints, interior+neighbors or boundary-only)"
-                )
+            if replanning_attempt > 0 and (total_cells_marked > 0 or cells_already_occupied > 0):
+                msg = f"🚫 Marked {total_cells_marked} grid cells as obstacles ({len(collision_waypoints_to_avoid)} waypoints)"
+                if cells_already_occupied > 0:
+                    msg += f"\n   ⚠️  {cells_already_occupied} waypoints already at environment obstacles (unreachable!)"
+                self.get_logger().info(msg)
+            
+            # Note: Visualization happens after collision detection (line ~2613) to reduce message rate
             
             # Diagnostic: verify specific cells are marked
             if collision_waypoints_to_avoid and replanning_attempt > 1:
@@ -1865,14 +2101,37 @@ class PlannerNode(Node):
                 return
             
             # Diagnostic: check obstacle grid status
-            total_obstacles = np.sum(occupancy_grid_dilated == 100)
+            total_marked_obstacles = np.sum(occupancy_grid_dilated == 100)  # Collision waypoints marked by us
+            total_env_obstacles = np.sum(occupancy_grid_dilated == 1)  # Environment obstacles from map
+            total_all_obstacles = total_marked_obstacles + total_env_obstacles
+            
+            # Verify collision waypoints dict matches grid markings
+            if len(collision_waypoints_to_avoid) != total_marked_obstacles:
+                self.get_logger().warn(
+                    f"⚠️  MISMATCH: Dict has {len(collision_waypoints_to_avoid)} collision waypoints, "
+                    f"but grid has {total_marked_obstacles} marked cells!"
+                )
+            
+            # Visualize gap boundaries AND collision waypoints in RViz
+            gap_start_world = grid_to_world(*current_planning_start_grid, self.x_vals, self.y_vals, self.z_vals)
+            gap_goal_world = grid_to_world(*current_planning_goal_grid, self.x_vals, self.y_vals, self.z_vals)
+            
+            # Log what we're about to visualize
             self.get_logger().info(
-                f"Running A* pathfinding with dual-frame collision checking (wrist_3 + tool0)...\n"
-                f"  From: {[round(x, 3) for x in current_planning_start_pose]} (grid {current_planning_start_grid})\n"
-                f"  To:   {[round(x, 3) for x in current_planning_goal_pose]} (grid {current_planning_goal_grid})\n"
-                f"  Obstacles in grid: {total_obstacles} cells marked"
+                f"📊 Visualization: Publishing {len(collision_waypoints_to_avoid)} collision waypoints to RViz "
+                f"(Grid has {total_marked_obstacles} marked cells)"
             )
             
+            self._publish_gap_boundary_markers(gap_start_world, gap_goal_world, collision_waypoints_to_avoid)
+            
+            self.get_logger().info(
+                f"Running A* pathfinding with dual-frame collision checking (wrist_3 + tool0)...\n"
+                f"  From: {current_planning_start_grid} → {current_planning_goal_grid}\n"
+                f"  Obstacles in grid: {total_all_obstacles} cells ({total_env_obstacles} environment + {total_marked_obstacles} collision waypoints)"
+            )
+            
+            # A* searches between current planning boundaries (initially full path, later narrowed gap)
+            # Grid dimensions are always the full workspace - only start/goal positions change
             path = find_path(
                 occupancy_grid_dilated,
                 current_planning_start_grid,
@@ -1888,6 +2147,25 @@ class PlannerNode(Node):
                 cylinder_z_range=(self.z_min, self.z_max)
             )
             self.get_logger().info(f"Found path with length {len(path)}")
+            
+            # Diagnostic: check if A* path goes through any marked collision waypoints
+            if replanning_attempt > 0 and path and collision_waypoints_to_avoid:
+                path_grid_indices = set()
+                for waypoint in path:
+                    # Convert waypoint to grid index
+                    wp_i = np.argmin(np.abs(self.x_vals - waypoint[0]))
+                    wp_j = np.argmin(np.abs(self.y_vals - waypoint[1]))
+                    wp_k = np.argmin(np.abs(self.z_vals - waypoint[2]))
+                    path_grid_indices.add((wp_i, wp_j, wp_k))
+                
+                # Check for intersection with collision waypoints
+                collision_grids = set(collision_waypoints_to_avoid.keys())
+                path_through_marked = path_grid_indices.intersection(collision_grids)
+                if path_through_marked:
+                    self.get_logger().warn(
+                        f"⚠️ A* path goes through {len(path_through_marked)} marked collision waypoints: {list(path_through_marked)[:3]}"
+                        f"\n   This suggests gap is too narrow - no alternative path exists!"
+                    )
             
             if not path:
                 self.get_logger().warn(
@@ -2280,27 +2558,130 @@ class PlannerNode(Node):
                         current_planning_goal_orientation = first_goal_wp[1]
                         current_planning_goal_grid = first_goal_wp[2]
                         
-                        self.get_logger().info(
-                            f"📍 Updated planning boundaries for gap replanning:\n"
-                            f"    New start: {[round(x, 3) for x in current_planning_start_pose]} (grid {current_planning_start_grid})\n"
-                            f"    New goal:  {[round(x, 3) for x in current_planning_goal_pose]} (grid {current_planning_goal_grid})"
+                        # Check if planning boundaries actually changed (gap narrowed)
+                        boundaries_changed = (
+                            previous_planning_start_grid != current_planning_start_grid or
+                            previous_planning_goal_grid != current_planning_goal_grid
                         )
-                    
-                    # Clear accumulated collision waypoints before adding new ones
-                    # This prevents indefinite accumulation across iterations
-                    old_count = len(collision_waypoints_to_avoid)
-                    collision_waypoints_to_avoid.clear()
-                    if old_count > 0:
-                        self.get_logger().info(
-                            f"🗑️  Cleared {old_count} accumulated collision waypoints (fresh start for current gap)"
-                        )
+                        
+                        if boundaries_changed:
+                            # Gap narrowed - clear accumulated collision waypoints for fresh start
+                            old_count = len(collision_waypoints_to_avoid)
+                            old_waypoints = list(collision_waypoints_to_avoid.keys())[:5]  # Sample for logging
+                            collision_waypoints_to_avoid.clear()
+                            # Markers will be cleared automatically on next _publish_gap_boundary_markers call
+                            iterations_at_same_boundaries = 0  # Reset stuck counter
+                            
+                            # Track new boundaries as tried with clean grid
+                            tried_clean_boundaries.add((current_planning_start_grid, current_planning_goal_grid))
+                            
+                            self.get_logger().info(
+                                f"📍 Planning boundaries changed (gap narrowed):\n"
+                                f"    New start: {[round(x, 3) for x in current_planning_start_pose]} (grid {current_planning_start_grid})\n"
+                                f"    New goal:  {[round(x, 3) for x in current_planning_goal_pose]} (grid {current_planning_goal_grid})\n"
+                                f"    🗑️  Cleared {old_count} collision waypoints (e.g., {old_waypoints})\n"
+                                f"    ✅ Dict now has {len(collision_waypoints_to_avoid)} waypoints (should be 0)\n"
+                                f"    🔄 Resetting iteration counter (was {iterations_at_same_boundaries}) - fresh start with 0/{MAX_ITERATIONS_SAME_BOUNDARIES} for new boundaries\n"
+                                f"    📊 Global attempt: {replanning_attempt}/{MAX_REPLANNING_ATTEMPTS}"
+                            )
+                            # Update tracked boundaries
+                            previous_planning_start_grid = current_planning_start_grid
+                            previous_planning_goal_grid = current_planning_goal_grid
+                        else:
+                            # Boundaries unchanged - keep accumulating collision waypoints
+                            iterations_at_same_boundaries += 1
+                            self.get_logger().info(
+                                f"📍 Planning boundaries unchanged (iteration {iterations_at_same_boundaries}/{MAX_ITERATIONS_SAME_BOUNDARIES}):\n"
+                                f"    Start: {[round(x, 3) for x in current_planning_start_pose]} (grid {current_planning_start_grid})\n"
+                                f"    Goal:  {[round(x, 3) for x in current_planning_goal_pose]} (grid {current_planning_goal_grid})\n"
+                                f"    Accumulating collision waypoints ({len(collision_waypoints_to_avoid)} existing)\n"
+                                f"    📊 Global attempt: {replanning_attempt}/{MAX_REPLANNING_ATTEMPTS}"
+                            )
+                            
+                            # Early termination if stuck at same boundaries
+                            if iterations_at_same_boundaries >= MAX_ITERATIONS_SAME_BOUNDARIES:
+                                # Check if we've already tried these exact boundaries with a clean grid
+                                boundary_pair = (current_planning_start_grid, current_planning_goal_grid)
+                                
+                                if boundary_pair in tried_clean_boundaries:
+                                    # Already tried this path with clean grid - resetting won't help
+                                    collision_info = list(collision_waypoints_to_avoid.keys())[:3]
+                                    self._fail_current_goal(
+                                        f"❌ Path planning FAILED: Already tried boundaries {current_planning_start_grid} → {current_planning_goal_grid} with clean grid\n"
+                                        f"   {len(collision_waypoints_to_avoid)} collision waypoints prevent path: {collision_info}\n"
+                                        f"   Grid reset would not help (same collisions will occur).\n"
+                                        f"   Suggestion: Goal unreachable from current pose - try different goal or robot starting position."
+                                    )
+                                    return
+                                
+                                # Check if we've already reset too many times
+                                if grid_reset_attempts >= MAX_GRID_RESET_ATTEMPTS:
+                                    collision_info = list(collision_waypoints_to_avoid.keys())[:3]
+                                    self._fail_current_goal(
+                                        f"❌ Path planning FAILED after {replanning_attempt} attempts and {grid_reset_attempts} grid resets\n"
+                                        f"   Final boundaries: {current_planning_start_grid} → {current_planning_goal_grid}\n"
+                                        f"   Gap distance: {np.linalg.norm(np.array(current_planning_goal_grid) - np.array(current_planning_start_grid)):.1f} grid cells\n"
+                                        f"   {len(collision_waypoints_to_avoid)} persistent collision waypoints: {collision_info}\n"
+                                        f"   Multiple grid resets result in same collision waypoints.\n"
+                                        f"   Suggestion: Goal likely unreachable due to kinematic constraints or narrow passage - try different goal or robot starting pose."
+                                    )
+                                    return
+                                
+                                # Stuck at narrow gap - try RESETTING the grid obstacles and starting fresh
+                                grid_reset_attempts += 1
+                                
+                                self.get_logger().warn(
+                                    f"⚠️ Stuck at narrow gap after {iterations_at_same_boundaries} iterations (reset attempt {grid_reset_attempts}/{MAX_GRID_RESET_ATTEMPTS})\n"
+                                    f"   Current boundaries: {current_planning_start_grid} → {current_planning_goal_grid}\n"
+                                    f"   Attempting recovery: RESETTING grid (clearing {len(collision_waypoints_to_avoid)} marked collision cells) and replanning with fresh grid"
+                                )
+                                
+                                # Track that we've now tried these boundaries with a clean grid
+                                tried_clean_boundaries.add(boundary_pair)
+                                
+                                # Clear collision waypoints to allow fresh search with clean grid
+                                num_cleared = len(collision_waypoints_to_avoid)
+                                collision_waypoints_to_avoid.clear()
+                                # Markers will be cleared automatically on next _publish_gap_boundary_markers call
+                                iterations_at_same_boundaries = 0
+                                
+                                self.get_logger().info(
+                                    f"   Cleared {num_cleared} collision waypoints - starting fresh with clean grid\n"
+                                    f"   Boundaries unchanged: {current_planning_start_grid} → {current_planning_goal_grid}"
+                                )
+                                
+                                # Continue replanning with clean grid
+                                continue
+                    else:
+                        # First iteration or only one segment validated - keep existing collision waypoints
+                        if replanning_attempt > 0:
+                            iterations_at_same_boundaries += 1
+                            self.get_logger().info(
+                                f"📍 Continuing with current boundaries (segments not yet converged, iteration {iterations_at_same_boundaries}/{MAX_ITERATIONS_SAME_BOUNDARIES})\n"
+                                f"    Accumulating collision waypoints ({len(collision_waypoints_to_avoid)} existing)\n"
+                                f"    📊 Global attempt: {replanning_attempt}/{MAX_REPLANNING_ATTEMPTS}"
+                            )
+                            
+                            # Early termination if stuck before segments converge
+                            if iterations_at_same_boundaries >= MAX_ITERATIONS_SAME_BOUNDARIES:
+                                # Collect collision waypoint info for diagnostic
+                                collision_info = list(collision_waypoints_to_avoid.keys())[:3]
+                                
+                                self._fail_current_goal(
+                                    f"❌ Path planning STUCK: Cannot converge segments after {replanning_attempt} attempts\n"
+                                    f"   {len(collision_waypoints_to_avoid)} collision waypoints (e.g., {collision_info})\n"
+                                    f"   Unable to find collision-free segments connecting to start/goal.\n"
+                                    f"   Repeated self-collisions at same locations (turret_link <-> arm_plate_link).\n"
+                                    f"   Suggestion: Goal requires different robot configuration or approach angle."
+                                )
+                                return
                     
                     # Mark collision waypoints as obstacles for next iteration
                     # Distinguish between boundary and interior collision waypoints:
                     # - Boundary: first/last waypoint in a collision segment (adjacent to collision-free segments)
-                    #   → Mark ONLY the cell itself to avoid invalidating adjacent preserved waypoints
+                    #   → Mark ONLY the cell itself (0 layers) to avoid invalidating adjacent preserved waypoints
                     # - Interior: waypoints in the middle of a collision segment
-                    #   → Mark cell AND 27 neighbors for stronger avoidance
+                    #   → Mark cell with configured number of neighbor layers for stronger avoidance
                     
                     # Collect all collision waypoint indices
                     collision_waypoint_indices = {wp_idx for wp_idx, is_free, _, _ in waypoint_collision_status if not is_free}
@@ -2315,19 +2696,35 @@ class PlannerNode(Node):
                             boundary_collision_indices.add(segment['waypoints'][-1])
                     
                     # Add collision waypoints to avoid set with appropriate marking strategy
+                    new_collision_waypoints = []
+                    repeated_collision_waypoints = []
                     for wp_idx, is_free, _, grid_idx in waypoint_collision_status:
                         if not is_free and grid_idx is not None:
                             grid_tuple = tuple(grid_idx)
+                            # Track if this is a new or repeated collision
+                            if grid_tuple in collision_waypoints_to_avoid:
+                                repeated_collision_waypoints.append(grid_tuple)
+                            else:
+                                new_collision_waypoints.append(grid_tuple)
+                            
                             # Check if this is a boundary or interior collision waypoint
                             is_boundary = wp_idx in boundary_collision_indices
-                            # False = mark only cell (boundary), True = mark cell + neighbors (interior)
-                            collision_waypoints_to_avoid[grid_tuple] = not is_boundary
+                            # Boundary: 0 layers (cell only), Interior: configured layers
+                            num_layers = 0 if is_boundary else self.collision_avoidance_neighbor_layers
+                            collision_waypoints_to_avoid[grid_tuple] = num_layers
                     
                     self.get_logger().info(
                         f"Identified {len(collision_waypoint_indices)} collision waypoints: "
                         f"{len(boundary_collision_indices)} boundary (cell-only), "
-                        f"{len(collision_waypoint_indices) - len(boundary_collision_indices)} interior (cell+neighbors)"
+                        f"{len(collision_waypoint_indices) - len(boundary_collision_indices)} interior ({self.collision_avoidance_neighbor_layers} layers)"
                     )
+                    # Collision waypoints will be visualized on next A* iteration via gap_boundaries
+                    
+                    if repeated_collision_waypoints:
+                        self.get_logger().warn(
+                            f"⚠️  {len(repeated_collision_waypoints)} waypoints are REPEATED collisions from previous iterations: {repeated_collision_waypoints}"
+                            f"\n   → A* cannot find alternative paths - gap forces path through these waypoints!"
+                        )
             
             # Check if we need to continue replanning
             if waypoints_requiring_replan:
