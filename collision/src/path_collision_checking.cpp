@@ -11,6 +11,8 @@
 #include <shape_msgs/msg/mesh.hpp>
 #include <shape_msgs/msg/solid_primitive.hpp>
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
+
 #include "arm_control/msg/matrix.hpp"
 
 #include "collision/path_collision_checking.hpp"
@@ -30,6 +32,16 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     // Populate private properties
     base_link_ = this->declare_parameter<std::string>("root", "base_link");
     tip_ = this->declare_parameter<std::string>("tip", "ee_link");
+    mode_ = this->declare_parameter<std::string>("mode", "full");
+    
+    // Validate mode parameter
+    if (mode_ != "arm" && mode_ != "full")
+    {
+        RCLCPP_ERROR(this->get_logger(), "Invalid mode '%s'. Must be 'arm' or 'full'. Defaulting to 'full'.", mode_.c_str());
+        mode_ = "full";
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "Collision checking mode: %s", mode_.c_str());
     
     // For collision node in /collision namespace, prefix visualization frames
     std::string node_namespace = this->get_namespace();
@@ -341,6 +353,9 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     real_joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
         "/joint_states", rclcpp::QoS(1),
         std::bind(&PathCollisionChecking::warmupFromRealJointState, this, std::placeholders::_1));
+
+    // Initialize robot base collision object based on mode
+    initializeRobotBaseCollisionObject();
 
     RCLCPP_INFO(this->get_logger(), "Initialized constrained_manipulability");
 }
@@ -670,8 +685,29 @@ sensor_msgs::msg::JointState PathCollisionChecking::convertToNamespaceJointState
     visual.position = input.position;
     visual.velocity = input.velocity;
     visual.effort = input.effort;
-    // Joint names should match the collision URDF exactly (no prefix needed - namespace handled by topic)
-    visual.name = input.name;
+    
+    // In mode:=arm, strip 'arm_' prefix to match ur.urdf.xacro joint names (shoulder_pan_joint, not arm_shoulder_pan_joint)
+    // In mode:=full, keep 'arm_' prefix to match mobile_manipulator.urdf.xacro joint names
+    if (mode_ == "arm")
+    {
+        visual.name.reserve(input.name.size());
+        for (const auto& name : input.name)
+        {
+            if (name.find("arm_") == 0)
+            {
+                visual.name.push_back(name.substr(4));  // Remove "arm_" prefix (4 characters)
+            }
+            else
+            {
+                visual.name.push_back(name);  // Keep as-is if no prefix
+            }
+        }
+    }
+    else
+    {
+        visual.name = input.name;  // mode:=full keeps arm_ prefix
+    }
+    
     return visual;
 }
 
@@ -815,240 +851,213 @@ void PathCollisionChecking::octomapCallback(const octomap_msgs::msg::Octomap::Sh
     collision_world_->addCollisionObject(octo_obj, OCTOMAP_ID);
 }
 
-// void PathCollisionChecking::generateOccupancyGrid()
-// {
-//     boost::mutex::scoped_lock lock(collision_world_mutex_);
-
-//     const double resolution = 0.05;  // tamaño del voxel
-//     const double half_res = resolution / 2.0;
-
-//     std::set<std::tuple<int, int, int>> occupied_cells;
-//     std::vector<Eigen::Vector3d> all_voxel_centers;
-
-//     for (const auto& obj : collision_world_->getCollisionObjects())
-//     {
-//         if (!obj)
-//             continue;
-
-//         const fcl::AABBd& aabb = obj->collision_object->getAABB();
-
-//         double x_start = std::floor(aabb.min_.x() / resolution) * resolution - half_res;
-//         double y_start = std::floor(aabb.min_.y() / resolution) * resolution - half_res;
-//         double z_start = std::floor(aabb.min_.z() / resolution) * resolution - half_res;
-
-//         double x_end = std::ceil(aabb.max_.x() / resolution) * resolution + half_res;
-//         double y_end = std::ceil(aabb.max_.y() / resolution) * resolution + half_res;
-//         double z_end = std::ceil(aabb.max_.z() / resolution) * resolution + half_res;
-
-//         for (double x = x_start; x <= x_end; x += resolution)
-//         {
-//             for (double y = y_start; y <= y_end; y += resolution)
-//             {
-//                 for (double z = z_start; z <= z_end; z += resolution)
-//                 {
-//                     Eigen::Vector3d voxel_center(x + half_res, y + half_res, z + half_res);
-//                     all_voxel_centers.push_back(voxel_center);
-//                     fcl::Transform3d tf = fcl::Transform3d::Identity();
-//                     tf.translation() = voxel_center;
-
-//                     auto voxel_shape = std::make_shared<fcl::Boxd>(resolution, resolution, resolution);
-//                     fcl::CollisionObjectd voxel_box(voxel_shape, tf);
-
-//                     fcl::DistanceRequestd req(true);  // enable signed distance
-//                     fcl::DistanceResultd res;
-//                     double distance = fcl::distance(&voxel_box, obj->collision_object.get(), req, res);
-
-//                     // Tolerancia mayor para considerar interiores
-//                     if (distance < resolution * 0.75)  // por ejemplo 75% del tamaño del voxel
-//                     {
-//                         int xi = static_cast<int>(std::floor(x / resolution));
-//                         int yi = static_cast<int>(std::floor(y / resolution));
-//                         int zi = static_cast<int>(std::floor(z / resolution));
-//                         occupied_cells.emplace(xi, yi, zi);
-//                     }
-//                     if (distance > 0.5 * resolution && distance < 1.5 * resolution)
-//                     {
-//                         // RCLCPP_INFO(this->get_logger(), "Near miss at voxel (%.2f, %.2f, %.2f), distance = %.4f",
-//                         //             voxel_center.x(), voxel_center.y(), voxel_center.z(), distance);
-//                     }
-//                 }
-//             }
-//         }
-//     }
-
-//     // RCLCPP_INFO(this->get_logger(), "Total occupied voxels: %zu", occupied_cells.size());
-//     publishVoxelMarkers(occupied_cells, resolution);
-
-//     sensor_msgs::msg::PointCloud2 cloud_msg;
-//     cloud_msg.header.stamp = this->now();
-//     cloud_msg.header.frame_id = "base_link";  // o el frame correcto
-
-//     sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
-//     modifier.setPointCloud2FieldsByString(1, "xyz");
-//     modifier.resize(occupied_cells.size());
-
-//     sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
-//     sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
-//     sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
-
-//     for (const auto& cell : occupied_cells) {
-//         geometry_msgs::msg::Point32 pt;
-//         pt.x = (static_cast<float>(std::get<0>(cell)) + 0.5f) * resolution;
-//         pt.y = (static_cast<float>(std::get<1>(cell)) + 0.5f) * resolution;
-//         pt.z = (static_cast<float>(std::get<2>(cell)) + 0.5f) * resolution;
-//         *iter_x = pt.x;
-//         *iter_y = pt.y;
-//         *iter_z = pt.z;
-//         ++iter_x;
-//         ++iter_y;
-//         ++iter_z;
-//     }
-
-//     occupied_voxels_pub_->publish(cloud_msg);
-
-//     sensor_msgs::msg::PointCloud2 eval_cloud;
-//     eval_cloud.header.stamp = this->now();
-//     eval_cloud.header.frame_id = "base_link";
-
-//     sensor_msgs::PointCloud2Modifier eval_modifier(eval_cloud);
-//     eval_modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
-//     eval_modifier.resize(all_voxel_centers.size());
-
-//     sensor_msgs::PointCloud2Iterator<float> ex(eval_cloud, "x");
-//     sensor_msgs::PointCloud2Iterator<float> ey(eval_cloud, "y");
-//     sensor_msgs::PointCloud2Iterator<float> ez(eval_cloud, "z");
-//     sensor_msgs::PointCloud2Iterator<uint8_t> er(eval_cloud, "rgb");
-
-//     for (const auto& pt : all_voxel_centers) {
-//         *ex = pt.x();
-//         *ey = pt.y();
-//         *ez = pt.z();
-//         uint8_t r = 255, g = 0, b = 0;
-//         uint32_t rgb = (r << 16) | (g << 8) | b;
-//         *er = *reinterpret_cast<float*>(&rgb);
-//         ++ex; ++ey; ++ez; ++er;
-//     }
-
-//     evaluated_voxels_pub_->publish(eval_cloud);
-
-// }
-
-// void PathCollisionChecking::publishVoxelMarkers(const std::set<std::tuple<int, int, int>>& occupied_cells, double resolution)
-// {
-//     visualization_msgs::msg::MarkerArray marker_array;
-//     int id = 0;
-
-//     for (const auto& [xi, yi, zi] : occupied_cells)
-//     {
-//         visualization_msgs::msg::Marker marker;
-//         marker.header.frame_id = "world";  // usa tu frame adecuado
-//         marker.header.stamp = this->now();
-//         marker.ns = "occupied_voxels";
-//         marker.id = id++;
-//         marker.type = visualization_msgs::msg::Marker::CUBE;
-//         marker.action = visualization_msgs::msg::Marker::ADD;
-//         marker.pose.position.x = (xi + 0.5) * resolution;
-//         marker.pose.position.y = (yi + 0.5) * resolution;
-//         marker.pose.position.z = (zi + 0.5) * resolution;
-//         marker.pose.orientation.w = 1.0;
-//         marker.scale.x = resolution;
-//         marker.scale.y = resolution;
-//         marker.scale.z = resolution;
-//         marker.color.r = 0.0f;
-//         marker.color.g = 0.8f;
-//         marker.color.b = 0.1f;
-//         marker.color.a = 0.5f;
-//         marker.lifetime = rclcpp::Duration::from_seconds(1.0);  // permanente
-
-//         marker_array.markers.push_back(marker);
-//     }
-
-//     occupancy_pub_->publish(marker_array);
-// }
-
-
-// void PathCollisionChecking::linLimitCallback(const std_msgs::msg::Float32::SharedPtr msg)
-// {
-//     setLinearizationLimit(msg->data);    
-// }
-
-// void PathCollisionChecking::checkCollisionCallback()
-// {
-//     // joint_state_mutex_.lock();
-//     // sensor_msgs::msg::JointState curr_joint_state = joint_state_;
-//     // joint_state_mutex_.unlock();
-
-//     // // checkCollision(curr_joint_state);    // opcion original
-
-//     // bool collision_detected = checkCollision(curr_joint_state);  // opcion propia
-//     // if (collision_detected)
-//     // {
-//     //     RCLCPP_WARN(this->get_logger(), "¡Colisión detectada!");
-//     // }
-//     // else
-//     // {
-//     //     RCLCPP_WARN(this->get_logger(), "Sin colisión");
-//     // }  
-
-//     // static bool last_collision_state = false;
-//     // rclcpp::Logger logger = this->get_logger();
-
-//     // joint_state_mutex_.lock();
-//     // sensor_msgs::msg::JointState curr_joint_state = joint_state_;
-//     // joint_state_mutex_.unlock();
-    
-//     // bool collision_detected = checkCollision(curr_joint_state);
-
-//     // if (collision_detected != last_collision_state)
-//     // {
-//     //     last_collision_state = collision_detected;
-//     //     if (collision_detected)
-//     //     {
-//     //         RCLCPP_WARN(logger, "¡Colisión detectada!");
-//     //     }
-//     //     else
-//     //     {
-//     //         RCLCPP_WARN(logger, "Sin colisión");
-//     //     }
-//     // }
-
-//     joint_state_mutex_.lock();
-//     sensor_msgs::msg::JointState curr_joint_state = joint_state_;
-//     joint_state_mutex_.unlock();
-
-
-//     bool collision_detected = false;
-
-//     try
-//     {
-//         collision_detected = checkCollision(curr_joint_state);
-//     }
-//     catch (const std::exception& e)
-//     {
-//         RCLCPP_ERROR(this->get_logger(), "Exception in checkCollision: %s", e.what());
-//         return;
-//     }
-//     catch (...)
-//     {
-//         RCLCPP_ERROR(this->get_logger(), "Unknown exception in checkCollision");
-//         return;
-//     }
-
-//     if (collision_detected != last_collision_state_)
-//     {
-//         last_collision_state_ = collision_detected;
-//         if (collision_detected)
-//         {
-//             RCLCPP_WARN(this->get_logger(), "Collision detected!");
-//         }
-//         else
-//         {
-//             RCLCPP_INFO(this->get_logger(), "All collisions cleared");
-//         }
-//     }
-// }
-
 /// Private member methods (excluding ROS callbacks)
+
+void PathCollisionChecking::initializeRobotBaseCollisionObject()
+{
+    const int MOBILE_BASE_ID = 1001;
+    
+    RCLCPP_INFO(this->get_logger(), "Initializing robot base collision object (mode=%s)", mode_.c_str());
+    
+    if (mode_ == "arm")
+    {
+        // Oriented bounding box matching planner's polygon footprint
+        // Polygon vertices form a rotated rectangle - approximated with oriented box
+        Eigen::Affine3d box_transform = Eigen::Affine3d::Identity();
+        box_transform.translation() = Eigen::Vector3d(0.2037, -0.2028, -0.6060);  // Inverted X and Y signs
+        
+        // Rotate -45 degrees around Z axis (principal axis of polygon)
+        double angle_rad = 45.0 * M_PI / 180.0;  // Positive 45 degrees
+        Eigen::Matrix3d rotation;
+        rotation = Eigen::AngleAxisd(angle_rad, Eigen::Vector3d::UnitZ());
+        box_transform.linear() = rotation;
+        
+        // Create SolidPrimitive box message: oriented bounding box of polygon footprint
+        shape_msgs::msg::SolidPrimitive box_solid;
+        box_solid.type = shape_msgs::msg::SolidPrimitive::BOX;
+        box_solid.dimensions.resize(3);
+        box_solid.dimensions[shape_msgs::msg::SolidPrimitive::BOX_X] = 0.6801;  // Swapped X/Y
+        box_solid.dimensions[shape_msgs::msg::SolidPrimitive::BOX_Y] = 0.8802;  // Swapped X/Y
+        box_solid.dimensions[shape_msgs::msg::SolidPrimitive::BOX_Z] = 1.0120;
+        
+        robot_collision_checking::FCLObjectPtr box_obj = 
+            std::make_shared<robot_collision_checking::FCLObject>(box_solid, box_transform);
+        
+        addCollisionObject(box_obj, MOBILE_BASE_ID);
+        
+        RCLCPP_INFO(this->get_logger(), 
+            "✅ Added oriented robot base box (ID %d): size=[0.680, 0.880, 1.012]m, "
+            "center=[0.204, -0.203, -0.606]m, rotation=+45° Z (oriented bounding box of polygon)",
+            MOBILE_BASE_ID);
+    }
+    else if (mode_ == "full")
+    {
+        // Extract turret_link collision geometry from URDF
+        auto turret_link = model_->getLink("turret_link");
+        
+        if (!turret_link)
+        {
+            RCLCPP_ERROR(this->get_logger(), 
+                "❌ turret_link not found in URDF. Cannot initialize robot base collision object in mode='full'.");
+            return;
+        }
+        
+        if (!turret_link->collision || !turret_link->collision->geometry)
+        {
+            RCLCPP_ERROR(this->get_logger(), 
+                "❌ turret_link has no collision geometry. Cannot initialize robot base collision object.");
+            return;
+        }
+        
+        RCLCPP_INFO(this->get_logger(), "Found turret_link with collision geometry");
+        
+        // Get collision origin pose
+        urdf::Pose collision_origin = turret_link->collision->origin;
+        Eigen::Affine3d collision_transform = Eigen::Affine3d::Identity();
+        collision_transform.translation() = Eigen::Vector3d(
+            collision_origin.position.x,
+            collision_origin.position.y,
+            collision_origin.position.z
+        );
+        
+        // Convert RPY to rotation matrix
+        double roll, pitch, yaw;
+        collision_origin.rotation.getRPY(roll, pitch, yaw);
+        Eigen::Matrix3d rotation;
+        rotation = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ())
+                 * Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY())
+                 * Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX());
+        collision_transform.linear() = rotation;
+        
+        // Convert URDF geometry to SolidPrimitive or Mesh message
+        robot_collision_checking::FCLObjectPtr fcl_obj;
+        
+        if (turret_link->collision->geometry->type == urdf::Geometry::BOX)
+        {
+            auto box = std::static_pointer_cast<urdf::Box>(turret_link->collision->geometry);
+            shape_msgs::msg::SolidPrimitive solid;
+            solid.type = shape_msgs::msg::SolidPrimitive::BOX;
+            solid.dimensions.resize(3);
+            solid.dimensions[shape_msgs::msg::SolidPrimitive::BOX_X] = box->dim.x;
+            solid.dimensions[shape_msgs::msg::SolidPrimitive::BOX_Y] = box->dim.y;
+            solid.dimensions[shape_msgs::msg::SolidPrimitive::BOX_Z] = box->dim.z;
+            
+            fcl_obj = std::make_shared<robot_collision_checking::FCLObject>(solid, collision_transform);
+            RCLCPP_INFO(this->get_logger(), "Extracted BOX: [%.3f, %.3f, %.3f]m", 
+                box->dim.x, box->dim.y, box->dim.z);
+        }
+        else if (turret_link->collision->geometry->type == urdf::Geometry::CYLINDER)
+        {
+            auto cylinder = std::static_pointer_cast<urdf::Cylinder>(turret_link->collision->geometry);
+            shape_msgs::msg::SolidPrimitive solid;
+            solid.type = shape_msgs::msg::SolidPrimitive::CYLINDER;
+            solid.dimensions.resize(2);
+            solid.dimensions[shape_msgs::msg::SolidPrimitive::CYLINDER_HEIGHT] = cylinder->length;
+            solid.dimensions[shape_msgs::msg::SolidPrimitive::CYLINDER_RADIUS] = cylinder->radius;
+            
+            fcl_obj = std::make_shared<robot_collision_checking::FCLObject>(solid, collision_transform);
+            RCLCPP_INFO(this->get_logger(), "Extracted CYLINDER: radius=%.3f, height=%.3f", 
+                cylinder->radius, cylinder->length);
+        }
+        else if (turret_link->collision->geometry->type == urdf::Geometry::SPHERE)
+        {
+            auto sphere = std::static_pointer_cast<urdf::Sphere>(turret_link->collision->geometry);
+            shape_msgs::msg::SolidPrimitive solid;
+            solid.type = shape_msgs::msg::SolidPrimitive::SPHERE;
+            solid.dimensions.resize(1);
+            solid.dimensions[shape_msgs::msg::SolidPrimitive::SPHERE_RADIUS] = sphere->radius;
+            
+            fcl_obj = std::make_shared<robot_collision_checking::FCLObject>(solid, collision_transform);
+            RCLCPP_INFO(this->get_logger(), "Extracted SPHERE: radius=%.3f", sphere->radius);
+        }
+        else if (turret_link->collision->geometry->type == urdf::Geometry::MESH)
+        {
+            auto mesh_urdf = std::static_pointer_cast<urdf::Mesh>(turret_link->collision->geometry);
+            
+            // Load mesh and convert to ROS message
+            std::string mesh_path = mesh_urdf->filename;
+            
+            // Resolve package:// URIs
+            if (mesh_path.find("package://") == 0)
+            {
+                size_t pkg_end = mesh_path.find("/", 10);
+                std::string pkg_name = mesh_path.substr(10, pkg_end - 10);
+                std::string relative_path = mesh_path.substr(pkg_end);
+                
+                // Use ament_index to resolve package path
+                try
+                {
+                    std::string pkg_path = ament_index_cpp::get_package_share_directory(pkg_name);
+                    mesh_path = pkg_path + relative_path;
+                }
+                catch (const std::exception& e)
+                {
+                    RCLCPP_ERROR(this->get_logger(), "Failed to resolve package path for %s: %s", 
+                        pkg_name.c_str(), e.what());
+                    return;
+                }
+            }
+            
+            // Load mesh using geometric_shapes
+            std::unique_ptr<shapes::Shape> shape(shapes::createMeshFromResource(mesh_path));
+            if (!shape)
+            {
+                RCLCPP_ERROR(this->get_logger(), "Failed to load mesh from %s", mesh_path.c_str());
+                return;
+            }
+            
+            // Convert shapes::Mesh to shape_msgs::msg::Mesh
+            shapes::ShapeMsg shape_msg;
+            if (!shapes::constructMsgFromShape(shape.get(), shape_msg))
+            {
+                RCLCPP_ERROR(this->get_logger(), "Failed to convert mesh to ROS message");
+                return;
+            }
+            
+            shape_msgs::msg::Mesh mesh_msg = boost::get<shape_msgs::msg::Mesh>(shape_msg);
+            
+            // Apply scale if specified in URDF
+            if (mesh_urdf->scale.x != 1.0 || mesh_urdf->scale.y != 1.0 || mesh_urdf->scale.z != 1.0)
+            {
+                for (auto& vertex : mesh_msg.vertices)
+                {
+                    vertex.x *= mesh_urdf->scale.x;
+                    vertex.y *= mesh_urdf->scale.y;
+                    vertex.z *= mesh_urdf->scale.z;
+                }
+            }
+            
+            fcl_obj = std::make_shared<robot_collision_checking::FCLObject>(
+                mesh_msg, robot_collision_checking::MESH, collision_transform);
+            
+            RCLCPP_INFO(this->get_logger(), "Extracted MESH: %zu vertices, scale=[%.2f, %.2f, %.2f]", 
+                mesh_msg.vertices.size(), mesh_urdf->scale.x, mesh_urdf->scale.y, mesh_urdf->scale.z);
+        }
+        else
+        {
+            RCLCPP_ERROR(this->get_logger(), "Unsupported turret_link geometry type: %d", 
+                turret_link->collision->geometry->type);
+            return;
+        }
+        
+        if (fcl_obj)
+        {
+            addCollisionObject(fcl_obj, MOBILE_BASE_ID);
+            
+            RCLCPP_INFO(this->get_logger(), 
+                "✅ Added robot base from turret_link URDF (ID %d): "
+                "pose=[%.3f, %.3f, %.3f]m relative to %s frame",
+                MOBILE_BASE_ID,
+                collision_origin.position.x,
+                collision_origin.position.y,
+                collision_origin.position.z,
+                base_link_.c_str());
+        }
+    }
+    
+    // Update visualization
+    publishWorldObstacles();
+}
 
 bool PathCollisionChecking::addCollisionObject(const robot_collision_checking::FCLObjectPtr& obj, int object_id)
 {
@@ -1059,100 +1068,6 @@ bool PathCollisionChecking::removeCollisionObject(int object_id)
 {
     return collision_world_->removeCollisionObject(object_id);
 }
-
-// bool PathCollisionChecking::checkCollision(const sensor_msgs::msg::JointState& joint_state)
-// {
-//     KDL::JntArray kdl_joint_positions(ndof_);
-//     jointStatetoKDLJointArray(chain_, joint_state, kdl_joint_positions);
-
-//     GeometryInformation geometry_information;
-//     getCollisionModel(kdl_joint_positions, geometry_information);
-
-//     std::vector<shapes::ShapeMsg> current_shapes;
-//     std::vector<geometry_msgs::msg::Pose> shapes_poses;
-//     convertCollisionModel(geometry_information, current_shapes, shapes_poses);
-
-//     // Build collision geometry for robot if not yet created
-//     // Assume collision geometry for robot's meshes do not change
-//     if (robot_collision_geometry_.size() == 0)
-//     {
-//         createRobotCollisionModel(geometry_information);
-//     }
-    
-//     boost::mutex::scoped_lock lock(collision_world_mutex_);
-
-//     // Self-collision check
-//     bool self_collision_detected = checkSelfCollision(geometry_information);
-//     if (self_collision_detected != last_self_collision_state_)
-//     {
-//         last_self_collision_state_ = self_collision_detected;
-//         if (self_collision_detected)
-//         {
-//             RCLCPP_WARN(this->get_logger(), "Self-collision detected!");
-//         }
-//         else
-//         {
-//             RCLCPP_INFO(this->get_logger(), "Self-collision cleared.");
-//         }
-//     }
-
-//     // External environement collision check
-//     bool env_collision_detected = false;
-//     int num_shapes = geometry_information.shapes.size();
-//     for (int i = 0; i < num_shapes; i++)
-//     {
-//         Eigen::Affine3d obj_pose;
-//         tf2::fromMsg(shapes_poses[i], obj_pose);
-//         std::vector<int> collision_object_ids;
-//         if (current_shapes[i].which() == 0)
-//         {
-//             robot_collision_checking::FCLObjectPtr obj = std::make_shared<robot_collision_checking::FCLObject>(
-//                 boost::get<shape_msgs::msg::SolidPrimitive>(current_shapes[i]), obj_pose);
-
-//             fcl::Transform3d world_to_fcl;
-//             robot_collision_checking::fcl_interface::transform2fcl(obj->object_transform, world_to_fcl);
-//             robot_collision_checking::FCLCollisionObjectPtr co = std::make_shared<fcl::CollisionObjectd>(robot_collision_geometry_[i], world_to_fcl);
-            
-//             if (collision_world_->checkCollisionObject(co, collision_object_ids))
-//             {
-//                 env_collision_detected = true;
-//             }
-//         }
-//         else if (current_shapes[i].which() == 1)
-//         {
-//             robot_collision_checking::FCLObjectPtr obj = std::make_shared<robot_collision_checking::FCLObject>(
-//                 boost::get<shape_msgs::msg::Mesh>(current_shapes[i]), robot_collision_checking::MESH, obj_pose);
-
-//             fcl::Transform3d world_to_fcl;
-//             robot_collision_checking::fcl_interface::transform2fcl(obj->object_transform, world_to_fcl);
-//             robot_collision_checking::FCLCollisionObjectPtr co = std::make_shared<fcl::CollisionObjectd>(robot_collision_geometry_[i], world_to_fcl);
-
-//             if (collision_world_->checkCollisionObject(co, collision_object_ids))
-//             {
-//                 env_collision_detected = true;
-//             }
-//         }
-//         else
-//         {
-//             RCLCPP_ERROR(this->get_logger(), "Collision geometry not supported");
-//         }
-//     }
-
-//     if (env_collision_detected != last_env_collision_state_)
-//     {
-//         last_env_collision_state_ = env_collision_detected;
-//         if (env_collision_detected)
-//         {
-//             RCLCPP_WARN(this->get_logger(), "Environement collision detected!");
-//         }
-//         else
-//         {
-//             RCLCPP_INFO(this->get_logger(), "Environement collision cleared.");
-//         }
-//     }
-    
-//     return env_collision_detected || self_collision_detected;
-// }
 
 bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::JointState& joint_state, bool& self_collision, bool& env_collision, bool publish_visualization)
 {
@@ -1214,6 +1129,8 @@ bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::Joint
         displayCollisionModel(geometry_information, {0.1, 0.8, 0.1, 0.6});  // Green with transparency
     }
 
+    RCLCPP_INFO(this->get_logger(), "Checking environment collision against %d world objects...", 
+                collision_world_->getNumObjects());
     env_collision = false;
     int num_shapes = geometry_information.shapes.size();
     for (int i = 0; i < num_shapes; i++)
@@ -1247,9 +1164,13 @@ bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::Joint
         if (collision_world_->checkCollisionObject(co, collision_object_ids))
         {
             env_collision = true;
+            RCLCPP_WARN(this->get_logger(), "Environment collision detected for link %s with object IDs: %zu objects",
+                       collision_link_names_[i].c_str(), collision_object_ids.size());
             break;
         }
     }
+    
+    RCLCPP_INFO(this->get_logger(), "Environment collision check complete: %s", env_collision ? "COLLISION" : "clear");
 
     return self_collision || env_collision;
 }
@@ -1992,24 +1913,4 @@ void PathCollisionChecking::getJacobian(const sensor_msgs::msg::JointState& join
     getKDLKinematicInformation(kdl_joint_positions, base_T_ee, Jac);
 }
 
-// void PathCollisionChecking::getTransform(const sensor_msgs::msg::JointState& joint_state, Eigen::Affine3d& T) const
-// {
-//     KDL::JntArray kdl_joint_positions(ndof_);
-//     Eigen::Matrix<double, 6, Eigen::Dynamic> Jac;
-//     jointStatetoKDLJointArray(chain_, joint_state, kdl_joint_positions);
-//     getKDLKinematicInformation(kdl_joint_positions, T, Jac);
-// }
-
-// void PathCollisionChecking::getCartPos(const sensor_msgs::msg::JointState& joint_state, geometry_msgs::msg::Pose& geo_pose) const
-// {
-//     KDL::JntArray kdl_joint_positions(ndof_);
-//     jointStatetoKDLJointArray(chain_, joint_state, kdl_joint_positions);
-
-//     KDL::Frame cartpos;
-//     kdl_fk_solver_->JntToCart(kdl_joint_positions, cartpos);
-
-//     Eigen::Affine3d T;
-//     tf2::transformKDLToEigen(cartpos, T);
-//     geo_pose = tf2::toMsg(T);
-// }
 } // namespace constrained_manipulability

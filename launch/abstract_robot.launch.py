@@ -43,6 +43,14 @@ def generate_launch_description():
     )
     main_tf_prefix = LaunchConfiguration('main_tf_prefix')
 
+    mode_arg = DeclareLaunchArgument(
+        'mode',
+        default_value='full',
+        choices=['full', 'arm'],
+        description='Collision mode: arm (hardcoded box) or full (mobile manipulator)'
+    )
+    mode = LaunchConfiguration('mode')
+
     constrained_manip_params = {
         'root': root,
         'tip': tip,
@@ -51,6 +59,7 @@ def generate_launch_description():
         'root': root_col,
         'tip': tip_col,
         'main_tf_prefix': main_tf_prefix,
+        'mode': mode,
     }
 
     constrained_manip_node = Node(
@@ -76,6 +85,7 @@ def generate_launch_description():
         root_arg,
         tip_arg,
         main_tf_prefix_arg,
-        constrained_manip_node,
+        mode_arg,
+        # constrained_manip_node,
         path_collision_node,
     ])

@@ -134,6 +134,9 @@ class PathCollisionChecking : public rclcpp::Node
 
         /// Constrained manipulability private methods
 
+        // Initialize robot base collision object based on mode parameter
+        void initializeRobotBaseCollisionObject();
+
         // Add an FCLObject to FCLInterface collision world transform w.r.t base_link of chain
         bool addCollisionObject(const robot_collision_checking::FCLObjectPtr& obj, int object_id);
 
@@ -337,6 +340,8 @@ class PathCollisionChecking : public rclcpp::Node
         std::string base_link_;
         std::string tip_;
         std::string visualization_frame_;  // Frame for visualization markers (collision/ prefixed)
+        // Mode parameter for robot base collision: 'arm' (hardcoded box) or 'full' (mobile manipulator)
+        std::string mode_;
         // Distance threshold beyond which objects are ignored
         double distance_threshold_;
         // Desired dangerfield value
