@@ -6,12 +6,14 @@ import math
 import os
 import threading
 import time
+import xml.etree.ElementTree as ET
 
 import rclpy
 from rclpy.node import Node
+from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, Point
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, ColorRGBA
+from std_msgs.msg import Bool, ColorRGBA, String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from std_msgs.msg import Float64MultiArray
 from visualization_msgs.msg import Marker
@@ -33,7 +35,7 @@ from scipy.spatial.transform import Rotation as R, Slerp
 from scipy.ndimage import binary_erosion
 
 # Import collision checking services
-from arm_control.srv import CheckCollisionPose, AddRemoveCollisionSolid
+from arm_control.srv import CheckCollisionPose
 from shape_msgs.msg import SolidPrimitive
 from geometry_msgs.msg import Pose
 
@@ -70,12 +72,20 @@ class PlannerNode(Node):
         # 0 = mark only the collision cell itself
         # 1 = mark cell + 27 neighbors (3x3x3 cube)
         # Higher values create larger safety margins but may over-constrain the planner
-        self.declare_parameter('collision_avoidance_neighbor_layers', 0)
+        self.declare_parameter('collision_avoidance_neighbor_layers', 1)
         self.collision_avoidance_neighbor_layers = self.get_parameter('collision_avoidance_neighbor_layers').get_parameter_value().integer_value
+
+        # Mode parameter: 'arm' = hardcoded box, 'full' = extract from URDF turret_link
+        self.declare_parameter('mode', 'full')
+        self.mode = self.get_parameter('mode').get_parameter_value().string_value
+        if self.mode not in ['arm', 'full']:
+            self.get_logger().error(f"Invalid mode '{self.mode}'. Must be 'arm' or 'full'. Defaulting to 'full'.")
+            self.mode = 'full'
 
         # --- Parameters for the grid / reachability ---
         self.robot_name = 'ur10e'
         self.filename = "reachability_map_0.05_step_20_orientations"
+        # self.filename = "reachability_map_0.1_step_20_orientations"
         fn_npy = f"{self.filename}.npy"
         self.cart_step = float(self.filename.split('_')[2])
         self.cart_min, self.cart_max = -1.6, 1.6
@@ -123,6 +133,28 @@ class PlannerNode(Node):
         ]
         self.base_z_min = -1.112
         self.base_z_max =-0.1
+        
+        # Storage for URDF-extracted base collision geometry (used in 'full' mode)
+        self.urdf_base_solid = None  # SolidPrimitive
+        self.urdf_base_pose = None   # Pose
+        self.robot_description_received = False  # Flag to track if URDF has been received
+        
+        # Subscribe to /robot_description topic to get URDF
+        if self.mode == 'full':
+            self.get_logger().info("Mode is 'full' - subscribing to /robot_description topic...")
+            self.create_subscription(
+                String,
+                '/robot_description',
+                self._robot_description_callback,
+                QoSProfile(
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=1
+                )
+            )
+        else:
+            self.get_logger().info(f"Mode is '{self.mode}' - using hardcoded box geometry")
         
         # Expected joint names in desired order
         self.expected_joint_names = [
@@ -176,10 +208,9 @@ class PlannerNode(Node):
         # Create collision checking service clients
         # Note: path_collision_checking node is launched with namespace 'collision'
         self.collision_check_client = self.create_client(CheckCollisionPose, '/collision/check_collision_pose')
-        self.collision_add_object_client = self.create_client(AddRemoveCollisionSolid, '/collision/add_remove_collision_solid')
         
         # Collision checking configuration
-        self.declare_parameter('enable_collision_checking', True)  # Disabled by default due to callback deadlock issues
+        self.declare_parameter('enable_collision_checking', True)
         self.enable_collision_checking = self.get_parameter('enable_collision_checking').get_parameter_value().bool_value
         
         if self.enable_collision_checking:
@@ -192,9 +223,6 @@ class PlannerNode(Node):
         self._collision_service_check_count = 0
         self._collision_service_max_retries = 15  # 15 attempts * 2 seconds = 30 seconds max wait
         self._collision_service_check_interval = 2.0  # seconds between checks
-        
-        # Robot base collision objects setup
-        self._base_collision_objects_added = False
         
         if self.enable_collision_checking:
             self._collision_check_timer = self.create_timer(
@@ -230,9 +258,6 @@ class PlannerNode(Node):
                 f"(found after {self._collision_service_check_count} attempts, "
                 f"{self._collision_service_check_count * self._collision_service_check_interval:.1f}s)"
             )
-            
-            # Now that collision service is available, add robot base collision objects
-            self._add_robot_base_to_collision_world()
         else:
             # Service not yet available
             if self._collision_service_check_count <= 3:
@@ -264,105 +289,307 @@ class PlannerNode(Node):
                         f"{self._collision_service_check_count * self._collision_service_check_interval:.1f}s)"
                     )
 
-    def _add_robot_base_to_collision_world(self):
+    def _load_mesh_bounding_box(self, mesh_filename, mesh_scale=(1.0, 1.0, 1.0)):
         """
-        Add robot base collision geometry to the collision world.
-        Called once when collision service becomes available.
+        Load a mesh file and compute its axis-aligned bounding box.
         
-        Models the UR10e robot base and mobile platform as primitive shapes
-        to match the collision world with the planner's occupancy grid.
-        """
-        if self._base_collision_objects_added:
-            return
-        
-        if not self.collision_add_object_client.service_is_ready():
-            self.get_logger().warn("Collision object service not ready, cannot add robot base")
-            return
-        
-        self.get_logger().info("Adding robot base collision geometry to collision world...")
-        
-        # Object ID constants (avoid conflicts with dynamic objects)
-        MOBILE_BASE_ID = 1001
-        
-        collision_objects = []
-        
-        # Mobile platform base (box approximation of polygon footprint)
-        # Compute bounding box dimensions from the actual polygon vertices
-        x_coords = [-0.4, 0.4]
-        y_coords = [-0.3, 0.3]
-        
-        min_x, max_x = min(x_coords), max(x_coords)
-        min_y, max_y = min(y_coords), max(y_coords)
-        
-        box_size_x = max_x - min_x  # Width in X
-        box_size_y = max_y - min_y  # Depth in Y
-        box_size_z = self.base_z_max - self.base_z_min  # Height in Z
-        
-        box_center_x = (-min_x + max_x) / 2.0 -0.2
-        box_center_y = -(-min_y + max_y) / 2.0 + 0.1
-        box_center_z = (self.base_z_min + self.base_z_max) / 2.0
-        
-        # From self.base_footprint_xy: approximate as bounding box
-        # X range: -0.7553 to 0.3478 → width ~1.103m, center ~-0.204
-        # Y range: -0.3487 to 0.7544 → depth ~1.103m, center ~0.203
-        # Z range: self.base_z_min=-1.112 to self.base_z_max=-0.1 → height 1.012m
-        mobile_base_box = SolidPrimitive()
-        mobile_base_box.type = SolidPrimitive.BOX
-        mobile_base_box.dimensions = [box_size_x, box_size_y, box_size_z]  # [x, y, z] size
-        
-        mobile_base_pose = Pose()
-        mobile_base_pose.position.x = box_center_x
-        mobile_base_pose.position.y = box_center_y
-        mobile_base_pose.position.z = box_center_z
-        
-        # Rotate 45 degrees around Z axis
-        angle_rad = math.radians(-45)
-        mobile_base_pose.orientation.x = 0.0
-        mobile_base_pose.orientation.y = 0.0
-        mobile_base_pose.orientation.z = math.sin(angle_rad / 2.0)
-        mobile_base_pose.orientation.w = math.cos(angle_rad / 2.0)
-        
-        self.get_logger().info(
-            f"Mobile base box: size=[{box_size_x:.3f}, {box_size_y:.3f}, {box_size_z:.3f}]m, "
-            f"center=[{box_center_x:.3f}, {box_center_y:.3f}, {box_center_z:.3f}]m"
-        )
-        
-        collision_objects.append({
-            'solid': mobile_base_box,
-            'pose': mobile_base_pose,
-            'object_id': MOBILE_BASE_ID,
-            'name': 'Mobile platform base'
-        })
-        
-        # Send requests asynchronously
-        for obj_info in collision_objects:
-            request = AddRemoveCollisionSolid.Request()
-            request.solid = obj_info['solid']
-            request.pose = obj_info['pose']
-            request.object_id = obj_info['object_id']
-            request.remove = False
+        Args:
+            mesh_filename: Path to mesh file (absolute or relative to package)
+            mesh_scale: Tuple of (x, y, z) scale factors
             
-            # Send async request with callback
-            future = self.collision_add_object_client.call_async(request)
-            future.add_done_callback(
-                lambda f, name=obj_info['name'], obj_id=obj_info['object_id']: 
-                    self._on_add_collision_object_response(f, name, obj_id)
-            )
-        
-        self._base_collision_objects_added = True
-        self.get_logger().info(f"Robot base collision objects sent to collision world ({len(collision_objects)} objects)")
-    
-    def _on_add_collision_object_response(self, future, object_name, object_id):
-        """Callback for add collision object service response."""
+        Returns:
+            Tuple of (size_x, size_y, size_z, center_x, center_y, center_z) or None if failed
+        """
         try:
-            response = future.result()
-            if response.result:
-                self.get_logger().info(f"\u2705 Added collision object: {object_name} (ID: {object_id})")
-            else:
-                self.get_logger().error(f"\u274c Failed to add collision object: {object_name} (ID: {object_id})")
+            # Try to import trimesh for mesh loading
+            try:
+                import trimesh
+            except ImportError:
+                self.get_logger().error(
+                    "trimesh library not installed. Install with: pip3 install trimesh\n"
+                    "Cannot load mesh file - falling back to default box."
+                )
+                return None
+            
+            # Resolve mesh file path
+            # URDF mesh paths can be:
+            # - Absolute paths
+            # - package:// URIs
+            # - file:// URIs
+            # - Relative paths
+            
+            resolved_path = mesh_filename
+            
+            if mesh_filename.startswith('package://'):
+                # Extract package name and relative path
+                parts = mesh_filename.replace('package://', '').split('/', 1)
+                if len(parts) == 2:
+                    package_name, rel_path = parts
+                    try:
+                        package_path = get_package_share_directory(package_name)
+                        resolved_path = os.path.join(package_path, rel_path)
+                    except Exception as e:
+                        self.get_logger().error(f"Failed to resolve package path for {package_name}: {e}")
+                        return None
+            elif mesh_filename.startswith('file://'):
+                resolved_path = mesh_filename.replace('file://', '')
+            
+            # Check if file exists
+            if not os.path.isfile(resolved_path):
+                self.get_logger().error(f"Mesh file not found: {resolved_path}")
+                return None
+            
+            # Load mesh
+            self.get_logger().info(f"Loading mesh from: {resolved_path}")
+            mesh = trimesh.load(resolved_path)
+            
+            # Handle multi-mesh files (like DAE)
+            if isinstance(mesh, trimesh.Scene):
+                # Combine all geometries in the scene
+                mesh = mesh.dump(concatenate=True)
+            
+            # Apply scale
+            if mesh_scale != (1.0, 1.0, 1.0):
+                mesh.apply_scale(mesh_scale)
+                self.get_logger().info(f"Applied scale: {mesh_scale}")
+            
+            # Compute bounding box
+            bounds = mesh.bounds  # [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+            min_corner = bounds[0]
+            max_corner = bounds[1]
+            
+            size_x = max_corner[0] - min_corner[0]
+            size_y = max_corner[1] - min_corner[1]
+            size_z = max_corner[2] - min_corner[2]
+            
+            center_x = (min_corner[0] + max_corner[0]) / 2.0
+            center_y = (min_corner[1] + max_corner[1]) / 2.0
+            center_z = (min_corner[2] + max_corner[2]) / 2.0
+            
+            self.get_logger().info(
+                f"Mesh bounding box: size=[{size_x:.3f}, {size_y:.3f}, {size_z:.3f}]m, "
+                f"center=[{center_x:.3f}, {center_y:.3f}, {center_z:.3f}]m"
+            )
+            
+            return (size_x, size_y, size_z, center_x, center_y, center_z)
+            
         except Exception as e:
-            self.get_logger().error(f"\u274c Exception adding collision object {object_name}: {e}")
-
+            self.get_logger().error(f"Failed to load mesh {mesh_filename}: {e}")
+            return None
+    
+    def _robot_description_callback(self, msg: String):
+        """
+        Callback for /robot_description topic.
+        Extracts turret_link collision geometry from the received URDF.
+        """
+        if self.robot_description_received:
+            return  # Already processed
+        
+        self.get_logger().info(f"📥 Received robot_description from topic (length: {len(msg.data)} bytes)")
+        
+        # Extract geometry from the URDF
+        self._extract_turret_link_collision_geometry_from_string(msg.data)
+        self.robot_description_received = True
+    
+    def _extract_turret_link_collision_geometry_from_string(self, robot_description: str):
+        """
+        Extract collision geometry from turret_link in the URDF string.
+        Stores extracted geometry in self.urdf_base_solid and self.urdf_base_pose.
+        If geometry is a mesh, approximates it as an axis-aligned bounding box.
+        """
+        try:
+            if not robot_description:
+                self.get_logger().error("❌ Empty robot_description received")
+                return
+            
+            self.get_logger().info("🔍 Parsing URDF XML...")
+            
+            # Parse URDF XML
+            root = ET.fromstring(robot_description)
+            
+            # List all links for debugging
+            all_links = [link.get('name') for link in root.findall('link')]
+            self.get_logger().info(f"Found {len(all_links)} links in URDF: {all_links[:10]}...")
+            
+            # Find turret_link
+            turret_link = None
+            for link in root.findall('link'):
+                if link.get('name') == 'turret_link':
+                    turret_link = link
+                    break
+            
+            if turret_link is None:
+                self.get_logger().error(
+                    f"❌ turret_link not found in URDF. Available links: {all_links}"
+                )
+                return
+            
+            self.get_logger().info("✅ Found turret_link in URDF")
+            
+            # Find collision element
+            collision = turret_link.find('collision')
+            if collision is None:
+                self.get_logger().error("No collision element in turret_link")
+                return
+            
+            # Extract geometry
+            geometry = collision.find('geometry')
+            if geometry is None:
+                self.get_logger().error("No geometry in turret_link collision")
+                return
+            
+            # Extract origin (pose)
+            origin = collision.find('origin')
+            pose = Pose()
+            if origin is not None:
+                xyz = origin.get('xyz', '0 0 0').split()
+                rpy = origin.get('rpy', '0 0 0').split()
+                pose.position.x = float(xyz[0])
+                pose.position.y = float(xyz[1])
+                pose.position.z = float(xyz[2])
+                
+                # Convert RPY to quaternion
+                r = R.from_euler('xyz', [float(rpy[0]), float(rpy[1]), float(rpy[2])], degrees=False)
+                quat = r.as_quat()  # [x, y, z, w]
+                pose.orientation.x = quat[0]
+                pose.orientation.y = quat[1]
+                pose.orientation.z = quat[2]
+                pose.orientation.w = quat[3]
+            else:
+                # Default identity pose
+                pose.orientation.w = 1.0
+            
+            # Parse geometry type
+            solid = SolidPrimitive()
+            
+            box = geometry.find('box')
+            if box is not None:
+                size = box.get('size', '0 0 0').split()
+                solid.type = SolidPrimitive.BOX
+                solid.dimensions = [float(size[0]), float(size[1]), float(size[2])]
+                self.get_logger().info(
+                    f"Extracted BOX from turret_link: size=[{solid.dimensions[0]:.3f}, "
+                    f"{solid.dimensions[1]:.3f}, {solid.dimensions[2]:.3f}]m, "
+                    f"pose=[{pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f}]m"
+                )
+                # Store for occupancy grid use
+                self.urdf_base_solid = solid
+                self.urdf_base_pose = pose
+                self.get_logger().info(
+                    f"✅ Successfully extracted BOX geometry: "
+                    f"Type={solid.type}, Dims={solid.dimensions}"
+                )
+                return
+            
+            cylinder = geometry.find('cylinder')
+            if cylinder is not None:
+                radius = float(cylinder.get('radius', '0'))
+                length = float(cylinder.get('length', '0'))
+                solid.type = SolidPrimitive.CYLINDER
+                solid.dimensions = [length, radius]  # [height, radius]
+                self.get_logger().info(
+                    f"Extracted CYLINDER from turret_link: radius={radius:.3f}m, "
+                    f"length={length:.3f}m, pose=[{pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f}]m"
+                )
+                # Store for occupancy grid use
+                self.urdf_base_solid = solid
+                self.urdf_base_pose = pose
+                self.get_logger().info(
+                    f"✅ Successfully extracted CYLINDER geometry: "
+                    f"Type={solid.type}, Dims={solid.dimensions}"
+                )
+                return
+            
+            sphere = geometry.find('sphere')
+            if sphere is not None:
+                radius = float(sphere.get('radius', '0'))
+                solid.type = SolidPrimitive.SPHERE
+                solid.dimensions = [radius]
+                self.get_logger().info(
+                    f"Extracted SPHERE from turret_link: radius={radius:.3f}m, "
+                    f"pose=[{pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f}]m"
+                )
+                # Store for occupancy grid use
+                self.urdf_base_solid = solid
+                self.urdf_base_pose = pose
+                self.get_logger().info(
+                    f"✅ Successfully extracted SPHERE geometry: "
+                    f"Type={solid.type}, Dims={solid.dimensions}"
+                )
+                return
+            
+            # Handle mesh geometry - approximate as bounding box
+            mesh = geometry.find('mesh')
+            if mesh is not None:
+                mesh_filename = mesh.get('filename', '')
+                if not mesh_filename:
+                    self.get_logger().error("Mesh element has no filename attribute")
+                    return
+                
+                # Parse scale attribute (optional)
+                scale_str = mesh.get('scale', '1 1 1')
+                scale_parts = scale_str.split()
+                mesh_scale = (float(scale_parts[0]), float(scale_parts[1]), float(scale_parts[2]))
+                
+                self.get_logger().info(
+                    f"Found MESH in turret_link: {mesh_filename}, scale={mesh_scale}"
+                )
+                
+                # Load mesh and compute bounding box
+                bbox = self._load_mesh_bounding_box(mesh_filename, mesh_scale)
+                
+                if bbox is None:
+                    self.get_logger().error("Failed to compute mesh bounding box")
+                    return
+                
+                size_x, size_y, size_z, center_x, center_y, center_z = bbox
+                
+                # Create box primitive from bounding box
+                solid.type = SolidPrimitive.BOX
+                solid.dimensions = [size_x, size_y, size_z]
+                
+                # Adjust pose to account for mesh's bounding box center offset
+                # The mesh center might not be at origin in mesh frame
+                # We need to transform the bbox center through the collision origin
+                
+                # Get rotation matrix from collision origin
+                if origin is not None:
+                    rpy = origin.get('rpy', '0 0 0').split()
+                    rot = R.from_euler('xyz', [float(rpy[0]), float(rpy[1]), float(rpy[2])], degrees=False)
+                    rot_matrix = rot.as_matrix()
+                else:
+                    rot_matrix = np.eye(3)
+                
+                # Transform bbox center through collision origin rotation
+                bbox_center_local = np.array([center_x, center_y, center_z])
+                bbox_center_global = rot_matrix @ bbox_center_local
+                
+                # Update pose to place box at bbox center (not mesh origin)
+                pose.position.x += bbox_center_global[0]
+                pose.position.y += bbox_center_global[1]
+                pose.position.z += bbox_center_global[2]
+                
+                self.get_logger().info(
+                    f"Approximated MESH as BOX: size=[{size_x:.3f}, {size_y:.3f}, {size_z:.3f}]m, "
+                    f"pose=[{pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f}]m"
+                )
+                
+                # Store for occupancy grid use
+                self.urdf_base_solid = solid
+                self.urdf_base_pose = pose
+                self.get_logger().info(
+                    f"✅ Successfully approximated MESH as BOX: "
+                    f"Type={solid.type}, Dims={solid.dimensions}"
+                )
+                return
+            
+            self.get_logger().error("Unsupported geometry type in turret_link (only box, cylinder, sphere, mesh supported)")
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to extract turret_link collision geometry: {e}")
+            import traceback
+            self.get_logger().error(f"Traceback: {traceback.format_exc()}")
+    
     def _update_wrist3_tool0_transform(self):
         """
         Query the TF tree for the transform from arm_wrist_3_link to arm_tool0.
@@ -668,12 +895,18 @@ class PlannerNode(Node):
     
     def _publish_gap_boundary_markers(self, start_pos, goal_pos, collision_waypoints_dict=None):
         """Publish markers showing the current A* search boundaries (gap start/goal) 
-        and collision waypoints (red spheres).
+        and collision waypoints (red spheres) with their marked neighbors (orange spheres).
         
         Args:
             start_pos: Start boundary position [x, y, z]
             goal_pos: Goal boundary position [x, y, z]
             collision_waypoints_dict: Dict of collision waypoint grid indices {(i,j,k): num_layers}
+        
+        Visualization:
+            - Blue sphere (ID 0): Start boundary
+            - Orange sphere (ID 1): Goal boundary  
+            - Red spheres (IDs 100+): Center collision waypoint cells
+            - Orange spheres (IDs 100+): Neighbor cells marked as obstacles (if num_layers > 0)
         """
         now = rclpy.time.Time().to_msg()
         
@@ -724,15 +957,19 @@ class PlannerNode(Node):
         # Collision waypoint markers (red spheres) - IDs starting from 100
         if collision_waypoints_dict:
             scale = 0.04  # Much smaller than boundary markers (0.08) for less visual clutter
-            for marker_id, grid_idx in enumerate(collision_waypoints_dict.keys(), start=100):
+            neighbor_scale = 0.03  # Even smaller for neighbor cells
+            marker_id = 100
+            
+            for grid_idx, num_layers in collision_waypoints_dict.items():
                 i, j, k = grid_idx
                 world_pos = grid_to_world(i, j, k, self.x_vals, self.y_vals, self.z_vals)
                 
+                # Publish center collision waypoint (bright red)
                 m = Marker()
                 m.header.frame_id = "arm_base"
                 m.header.stamp = now
-                m.ns = "gap_boundaries"  # Same namespace as boundaries!
-                m.id = marker_id  # IDs 100, 101, 102, ...
+                m.ns = "gap_boundaries"
+                m.id = marker_id
                 m.type = Marker.SPHERE
                 m.action = Marker.ADD
                 
@@ -745,7 +982,7 @@ class PlannerNode(Node):
                 m.scale.y = scale
                 m.scale.z = scale
                 
-                # Bright red color
+                # Bright red color for center cell
                 m.color.r = 1.0
                 m.color.g = 0.0
                 m.color.b = 0.0
@@ -753,25 +990,72 @@ class PlannerNode(Node):
                 
                 m.lifetime.sec = 0
                 self.goal_marker_pub.publish(m)
+                marker_id += 1
+                
+                # Publish neighbor cells if num_layers > 0 (orange/yellow)
+                if num_layers > 0:
+                    for di in range(-num_layers, num_layers + 1):
+                        for dj in range(-num_layers, num_layers + 1):
+                            for dk in range(-num_layers, num_layers + 1):
+                                # Skip center cell (already published)
+                                if di == 0 and dj == 0 and dk == 0:
+                                    continue
+                                
+                                ni, nj, nk = i + di, j + dj, k + dk
+                                
+                                # Check bounds
+                                if (0 <= ni < len(self.x_vals) and
+                                    0 <= nj < len(self.y_vals) and
+                                    0 <= nk < len(self.z_vals)):
+                                    
+                                    neighbor_world_pos = grid_to_world(ni, nj, nk, self.x_vals, self.y_vals, self.z_vals)
+                                    
+                                    m_neighbor = Marker()
+                                    m_neighbor.header.frame_id = "arm_base"
+                                    m_neighbor.header.stamp = now
+                                    m_neighbor.ns = "gap_boundaries"
+                                    m_neighbor.id = marker_id
+                                    m_neighbor.type = Marker.SPHERE
+                                    m_neighbor.action = Marker.ADD
+                                    
+                                    m_neighbor.pose.position.x = float(neighbor_world_pos[0])
+                                    m_neighbor.pose.position.y = float(neighbor_world_pos[1])
+                                    m_neighbor.pose.position.z = float(neighbor_world_pos[2])
+                                    m_neighbor.pose.orientation.w = 1.0
+                                    
+                                    m_neighbor.scale.x = neighbor_scale
+                                    m_neighbor.scale.y = neighbor_scale
+                                    m_neighbor.scale.z = neighbor_scale
+                                    
+                                    # Orange color for neighbor cells (less prominent)
+                                    m_neighbor.color.r = 1.0
+                                    m_neighbor.color.g = 0.5
+                                    m_neighbor.color.b = 0.0
+                                    m_neighbor.color.a = 0.6
+                                    
+                                    m_neighbor.lifetime.sec = 0
+                                    self.goal_marker_pub.publish(m_neighbor)
+                                    marker_id += 1
             
-            # Delete any markers beyond what we just published (if we have fewer now)
-            # This handles the case where we had more markers before
-            for marker_id in range(100 + len(collision_waypoints_dict), 200):
+            # Delete any markers beyond what we just published
+            for del_id in range(marker_id, 2000):  # Increased upper limit for neighbors
                 clear_m = Marker()
                 clear_m.header.frame_id = "arm_base"
                 clear_m.header.stamp = now
                 clear_m.ns = "gap_boundaries"
-                clear_m.id = marker_id
+                clear_m.id = del_id
                 clear_m.action = Marker.DELETE
                 self.goal_marker_pub.publish(clear_m)
             
+            # Count total markers published (collision centers + neighbors)
+            total_markers = marker_id - 100
             self.get_logger().info(
-                f"🔴 Visualized {len(collision_waypoints_dict)} collision spheres (IDs 100-{99+len(collision_waypoints_dict)})"
+                f"🔴 Visualized {len(collision_waypoints_dict)} collision waypoints ({total_markers} total markers: red=centers, orange=neighbors)"
             )
         else:
-            # Clear ALL collision markers (IDs 100-199) when dict is empty
+            # Clear ALL collision markers (IDs 100-1999) when dict is empty
             self.get_logger().info("🗑️  Clearing all collision markers (dict is empty)")
-            for marker_id in range(100, 200):
+            for marker_id in range(100, 2000):
                 clear_m = Marker()
                 clear_m.header.frame_id = "arm_base"
                 clear_m.header.stamp = now
@@ -1865,16 +2149,109 @@ class PlannerNode(Node):
         ) & (Z >= self.z_min) & (Z <= self.z_max)
         occupancy_grid[cyl_mask] = 1
 
-        # Create mask for mobile manipulator base
-        base_footprint_mask = (
-            self._point_in_polygon_mask(X[:, :, 0], Y[:, :, 0], self.base_footprint_xy)[:, :, np.newaxis]
-            & (Z >= self.base_z_min) & (Z <= self.base_z_max)
-        )
-        occupancy_grid[base_footprint_mask] = 1
+        # Create mask for mobile manipulator base (mode-dependent)
+        if self.mode == 'full' and self.urdf_base_solid is not None and self.urdf_base_pose is not None:
+            # CRITICAL: Transform URDF pose from turret_link frame to arm_base frame
+            # The URDF collision origin is relative to turret_link, but occupancy grid is in arm_base
+            try:
+                # Look up current turret_link position in arm_base frame
+                transform = self.tf_buffer.lookup_transform(
+                    'arm_base',  # target frame
+                    'turret_link',  # source frame
+                    rclpy.time.Time(),  # latest available
+                    timeout=rclpy.duration.Duration(seconds=0.5)
+                )
+                
+                # Transform URDF collision pose from turret_link to arm_base
+                # Step 1: Create 4x4 transform matrix for turret_link -> arm_base
+                turret_pos = np.array([
+                    transform.transform.translation.x,
+                    transform.transform.translation.y,
+                    transform.transform.translation.z
+                ])
+                turret_quat = [
+                    transform.transform.rotation.x,
+                    transform.transform.rotation.y,
+                    transform.transform.rotation.z,
+                    transform.transform.rotation.w
+                ]
+                turret_rot = R.from_quat(turret_quat).as_matrix()
+                
+                # Step 2: Create 4x4 transform for URDF collision origin (turret_link frame)
+                urdf_pos_local = np.array([
+                    self.urdf_base_pose.position.x,
+                    self.urdf_base_pose.position.y,
+                    self.urdf_base_pose.position.z
+                ])
+                urdf_quat_local = [
+                    self.urdf_base_pose.orientation.x,
+                    self.urdf_base_pose.orientation.y,
+                    self.urdf_base_pose.orientation.z,
+                    self.urdf_base_pose.orientation.w
+                ]
+                urdf_rot_local = R.from_quat(urdf_quat_local).as_matrix()
+                
+                # Step 3: Transform to arm_base frame
+                urdf_pos_global = turret_pos + turret_rot @ urdf_pos_local
+                urdf_rot_global = turret_rot @ urdf_rot_local
+                
+                # Step 4: Create transformed pose
+                pose_in_arm_base = Pose()
+                pose_in_arm_base.position.x = urdf_pos_global[0]
+                pose_in_arm_base.position.y = urdf_pos_global[1]
+                pose_in_arm_base.position.z = urdf_pos_global[2]
+                urdf_quat_global = R.from_matrix(urdf_rot_global).as_quat()
+                pose_in_arm_base.orientation.x = urdf_quat_global[0]
+                pose_in_arm_base.orientation.y = urdf_quat_global[1]
+                pose_in_arm_base.orientation.z = urdf_quat_global[2]
+                pose_in_arm_base.orientation.w = urdf_quat_global[3]
+                
+                # Create mask using transformed pose (now in arm_base frame)
+                base_mask = self._create_urdf_base_mask(X, Y, Z, self.urdf_base_solid, pose_in_arm_base)
+                occupancy_grid[base_mask] = 1
+                self.get_logger().info(
+                    f"✅ Using URDF turret_link geometry for occupancy grid: "
+                    f"Type={self.urdf_base_solid.type}, Dims={self.urdf_base_solid.dimensions}\n"
+                    f"   Turret position in arm_base: [{turret_pos[0]:.3f}, {turret_pos[1]:.3f}, {turret_pos[2]:.3f}]m\n"
+                    f"   Collision geometry in arm_base: [{urdf_pos_global[0]:.3f}, {urdf_pos_global[1]:.3f}, {urdf_pos_global[2]:.3f}]m"
+                )
+            except (TransformException, tf2_ros.LookupException, 
+                    tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as ex:
+                self.get_logger().error(
+                    f"❌ Failed to transform URDF geometry to arm_base frame: {ex}\n"
+                    f"   Cannot create occupancy grid mask - turret_link transform not available.\n"
+                    f"   Falling back to no base obstacle (unsafe!)"
+                )
+        else:
+            # Use polygon footprint (arm mode or fallback)
+            base_footprint_mask = (
+                self._point_in_polygon_mask(X[:, :, 0], Y[:, :, 0], self.base_footprint_xy)[:, :, np.newaxis]
+                & (Z >= self.base_z_min) & (Z <= self.base_z_max)
+            )
+            occupancy_grid[base_footprint_mask] = 1
+            if self.mode == 'arm':
+                self.get_logger().info("Using hardcoded polygon footprint for occupancy grid base obstacle")
+            else:
+                self.get_logger().warn(
+                    f"⚠️ Mode is '{self.mode}' but URDF geometry not available "
+                    f"(solid={self.urdf_base_solid is not None}, pose={self.urdf_base_pose is not None}). "
+                    "Falling back to hardcoded polygon footprint."
+                )
 
         # Publish obstacle markers for visualization
         self.publish_cylinder_marker(self.cyl_center_xy, self.cyl_radius, self.z_min, self.z_max)
-        self.publish_base_footprint_marker(self.base_footprint_xy, self.base_z_min, self.base_z_max)
+        
+        # Publish base marker (mode-dependent)
+        if self.mode == 'full' and self.urdf_base_solid is not None and self.urdf_base_pose is not None:
+            self.get_logger().info("Publishing URDF-based marker...")
+            self.publish_urdf_base_marker(self.urdf_base_solid, self.urdf_base_pose)
+        else:
+            self.get_logger().info(
+                f"Publishing hardcoded footprint marker (mode={self.mode}, "
+                f"urdf_solid_available={self.urdf_base_solid is not None})"
+            )
+            self.publish_base_footprint_marker(self.base_footprint_xy, self.base_z_min, self.base_z_max)
+        
         self.publish_wall()
 
         # Define the dilation distance (in meters)
@@ -2678,22 +3055,31 @@ class PlannerNode(Node):
                     
                     # Mark collision waypoints as obstacles for next iteration
                     # Distinguish between boundary and interior collision waypoints:
-                    # - Boundary: first/last waypoint in a collision segment (adjacent to collision-free segments)
-                    #   → Mark ONLY the cell itself (0 layers) to avoid invalidating adjacent preserved waypoints
-                    # - Interior: waypoints in the middle of a collision segment
+                    # - Boundary: first TWO and last TWO waypoints in each collision segment
+                    #   → Mark ONLY the cell itself (0 layers) to avoid invalidating adjacent free waypoints
+                    # - Interior: waypoints in the middle of collision segment (positions 3 to N-2 for segments with 5+ waypoints)
                     #   → Mark cell with configured number of neighbor layers for stronger avoidance
+                    # - Segments with ≤4 waypoints: all treated as boundaries (no neighbor marking)
                     
                     # Collect all collision waypoint indices
                     collision_waypoint_indices = {wp_idx for wp_idx, is_free, _, _ in waypoint_collision_status if not is_free}
                     
-                    # Identify boundary collision waypoints (first/last in collision segments)
+                    # Identify boundary collision waypoints (first TWO and last TWO in collision segments)
+                    # Prevents marking free path cells as obstacles when boundary collision cells have neighbors marked
                     boundary_collision_indices = set()
                     for segment in segments:
                         if not segment['is_collision_free'] and len(segment['waypoints']) > 0:
-                            # First waypoint in collision segment is a boundary
-                            boundary_collision_indices.add(segment['waypoints'][0])
-                            # Last waypoint in collision segment is also a boundary
-                            boundary_collision_indices.add(segment['waypoints'][-1])
+                            seg_len = len(segment['waypoints'])
+                            if seg_len <= 4:
+                                # If segment has 4 or fewer waypoints, all are boundaries (avoid marking neighbors)
+                                boundary_collision_indices.update(segment['waypoints'])
+                            else:
+                                # First two waypoints
+                                boundary_collision_indices.add(segment['waypoints'][0])
+                                boundary_collision_indices.add(segment['waypoints'][1])
+                                # Last two waypoints
+                                boundary_collision_indices.add(segment['waypoints'][-2])
+                                boundary_collision_indices.add(segment['waypoints'][-1])
                     
                     # Add collision waypoints to avoid set with appropriate marking strategy
                     new_collision_waypoints = []
@@ -2715,7 +3101,7 @@ class PlannerNode(Node):
                     
                     self.get_logger().info(
                         f"Identified {len(collision_waypoint_indices)} collision waypoints: "
-                        f"{len(boundary_collision_indices)} boundary (cell-only), "
+                        f"{len(boundary_collision_indices)} boundary (first/last 2 per segment, cell-only), "
                         f"{len(collision_waypoint_indices) - len(boundary_collision_indices)} interior ({self.collision_avoidance_neighbor_layers} layers)"
                     )
                     # Collision waypoints will be visualized on next A* iteration via gap_boundaries
@@ -2926,6 +3312,82 @@ class PlannerNode(Node):
         self.cyl_marker_pub.publish(marker)
         self.get_logger().info(f"Published cylinder marker at ({center_xy[0]}, {center_xy[1]}) with radius {radius} and height {z_max - z_min}")
 
+    def _create_urdf_base_mask(self, X, Y, Z, solid, pose):
+        """
+        Create occupancy grid mask from URDF SolidPrimitive geometry.
+        
+        Args:
+            X, Y, Z: 3D meshgrid arrays
+            solid: SolidPrimitive message with type and dimensions
+            pose: Pose message with position and orientation
+            
+        Returns:
+            Boolean mask array matching grid shape
+        """
+        # Extract pose
+        pos = np.array([pose.position.x, pose.position.y, pose.position.z])
+        quat = [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w]
+        rot_matrix = R.from_quat(quat).as_matrix()
+        
+        if solid.type == SolidPrimitive.BOX:
+            # Box dimensions: [x, y, z]
+            size_x, size_y, size_z = solid.dimensions[0], solid.dimensions[1], solid.dimensions[2]
+            half_x, half_y, half_z = size_x / 2.0, size_y / 2.0, size_z / 2.0
+            
+            # Transform grid points to box local frame
+            # Points relative to box center
+            X_rel = X - pos[0]
+            Y_rel = Y - pos[1]
+            Z_rel = Z - pos[2]
+            
+            # Rotate points to box frame (inverse rotation)
+            rot_inv = rot_matrix.T
+            X_local = rot_inv[0, 0] * X_rel + rot_inv[0, 1] * Y_rel + rot_inv[0, 2] * Z_rel
+            Y_local = rot_inv[1, 0] * X_rel + rot_inv[1, 1] * Y_rel + rot_inv[1, 2] * Z_rel
+            Z_local = rot_inv[2, 0] * X_rel + rot_inv[2, 1] * Y_rel + rot_inv[2, 2] * Z_rel
+            
+            # Check if inside box
+            mask = (
+                (np.abs(X_local) <= half_x) &
+                (np.abs(Y_local) <= half_y) &
+                (np.abs(Z_local) <= half_z)
+            )
+            return mask
+            
+        elif solid.type == SolidPrimitive.CYLINDER:
+            # Cylinder dimensions: [height, radius]
+            height, radius = solid.dimensions[0], solid.dimensions[1]
+            half_height = height / 2.0
+            
+            # Transform points relative to cylinder center
+            X_rel = X - pos[0]
+            Y_rel = Y - pos[1]
+            Z_rel = Z - pos[2]
+            
+            # Rotate to cylinder frame (cylinder axis is along local Z)
+            rot_inv = rot_matrix.T
+            X_local = rot_inv[0, 0] * X_rel + rot_inv[0, 1] * Y_rel + rot_inv[0, 2] * Z_rel
+            Y_local = rot_inv[1, 0] * X_rel + rot_inv[1, 1] * Y_rel + rot_inv[1, 2] * Z_rel
+            Z_local = rot_inv[2, 0] * X_rel + rot_inv[2, 1] * Y_rel + rot_inv[2, 2] * Z_rel
+            
+            # Check if inside cylinder (radial distance in XY plane, height in Z)
+            radial_dist_sq = X_local**2 + Y_local**2
+            mask = (radial_dist_sq <= radius**2) & (np.abs(Z_local) <= half_height)
+            return mask
+            
+        elif solid.type == SolidPrimitive.SPHERE:
+            # Sphere dimensions: [radius]
+            radius = solid.dimensions[0]
+            
+            # Distance from sphere center
+            dist_sq = (X - pos[0])**2 + (Y - pos[1])**2 + (Z - pos[2])**2
+            mask = dist_sq <= radius**2
+            return mask
+            
+        else:
+            self.get_logger().error(f"Unsupported solid type for mask creation: {solid.type}")
+            return np.zeros(X.shape, dtype=bool)
+    
     @staticmethod
     def _point_in_polygon_mask(X, Y, polygon_xy):
         """
@@ -2997,6 +3459,65 @@ class PlannerNode(Node):
             f"Published base footprint marker with {n} vertices, "
             f"z=[{z_min}, {z_max}]"
         )
+
+    def publish_urdf_base_marker(self, solid, pose):
+        """
+        Publish URDF-extracted base geometry as a visualization marker.
+        Supports BOX, CYLINDER, and SPHERE primitives.
+        
+        Marker is published in turret_link frame so it moves with the turret.
+        The pose is the collision origin relative to turret_link from URDF.
+        """
+        now = rclpy.time.Time().to_msg()
+        
+        marker = Marker()
+        marker.header.frame_id = "turret_link"  # Changed from arm_base to follow turret
+        marker.header.stamp = now
+        marker.ns = "obstacles"
+        marker.id = 2  # Same ID as base_footprint_marker to replace it
+        marker.action = Marker.ADD
+        
+        # Set pose (collision origin relative to turret_link from URDF)
+        marker.pose = pose
+        
+        # Color: semi-transparent orange (same as footprint)
+        marker.color.r = 1.0
+        marker.color.g = 0.5
+        marker.color.b = 0.0
+        marker.color.a = 0.8
+        
+        if solid.type == SolidPrimitive.BOX:
+            marker.type = Marker.CUBE
+            marker.scale.x = solid.dimensions[0]
+            marker.scale.y = solid.dimensions[1]
+            marker.scale.z = solid.dimensions[2]
+            self.get_logger().info(
+                f"Published URDF base marker: BOX size=[{marker.scale.x:.3f}, "
+                f"{marker.scale.y:.3f}, {marker.scale.z:.3f}]m"
+            )
+        elif solid.type == SolidPrimitive.CYLINDER:
+            marker.type = Marker.CYLINDER
+            marker.scale.x = solid.dimensions[1] * 2.0  # diameter
+            marker.scale.y = solid.dimensions[1] * 2.0  # diameter
+            marker.scale.z = solid.dimensions[0]  # height
+            self.get_logger().info(
+                f"Published URDF base marker: CYLINDER radius={solid.dimensions[1]:.3f}m, "
+                f"height={solid.dimensions[0]:.3f}m"
+            )
+        elif solid.type == SolidPrimitive.SPHERE:
+            marker.type = Marker.SPHERE
+            marker.scale.x = solid.dimensions[0] * 2.0  # diameter
+            marker.scale.y = solid.dimensions[0] * 2.0  # diameter
+            marker.scale.z = solid.dimensions[0] * 2.0  # diameter
+            self.get_logger().info(
+                f"Published URDF base marker: SPHERE radius={solid.dimensions[0]:.3f}m"
+            )
+        else:
+            self.get_logger().error(f"Unsupported solid type for marker: {solid.type}")
+            return
+        
+        marker.lifetime.sec = 0  # persist until deleted
+        self.cyl_marker_pub.publish(marker)
 
 def create_pose_matrix(position, rotation_matrix):
     """Helper to create 4x4 transformation matrix from position and rotation matrix."""
