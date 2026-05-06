@@ -521,45 +521,40 @@ class OptimalBaseService(Node):
                 avg_forward = np.mean(forward_vectors, axis=0)
                 avg_forward = avg_forward / (np.linalg.norm(avg_forward) + 1e-9)
                 
-                # Score each candidate: balance perpendicular alignment with proximity to goals
+                # Score each candidate: strongly prefer positions behind the goals,
+                # while still considering centroid proximity and obstacle clearance.
                 def combined_score(x, y):
                     # Vector from centroid to candidate
                     vec_to_cand = np.array([x - cx, y - cy])
                     dist_to_centroid = np.linalg.norm(vec_to_cand)
                     
-                    # Alignment score: prefer positions perpendicular (90°) to goals' forward direction
-                    # Scoring: 90° (perpendicular) = 1.0, 45°/135° = 0.3, 180° (behind) = 0.3, 0° (front) = 0.0
+                    # Alignment score: prefer positions behind the goals' forward direction.
+                    # dot_forward = -1.0 is directly behind, 0.0 is lateral, 1.0 is in front.
                     alignment = 0.0
+                    dot_forward = 0.0
                     if dist_to_centroid > 1e-6:
                         vec_to_cand_norm = vec_to_cand / dist_to_centroid
                         dot_forward = np.dot(vec_to_cand_norm, avg_forward)
-                        
-                        # Piecewise scoring based on angle
-                        if abs(dot_forward) <= 0.707:  # Between 45° and 135° (closer to perpendicular)
-                            # Scale from abs(dot)=0.707 (45°/135°) → 0.3, to abs(dot)=0 (90°) → 1.0
-                            alignment = 0.3 + 0.7 * (0.707 - abs(dot_forward)) / 0.707
-                        else:  # Beyond 45° from perpendicular
-                            if dot_forward > 0.707:  # In front (0° to 45°)
-                                # Scale from 0.3 at 45° to 0.0 at 0°
-                                alignment = 0.3 * (1.0 - dot_forward) / (1.0 - 0.707)
-                            else:  # Behind (135° to 180°)
-                                alignment = 0.3  # Keep at 0.3 for all behind positions
+                        alignment = max(0.0, -dot_forward)
                     
                     # Distance score: prefer positions closer to centroid but respect min_dist
                     # Use perpendicular distance to the goals plane for safety
                     perp_dist = get_perpendicular_dist_to_plane(x, y)
                     # Penalize positions too close to min_dist, prefer slightly farther
                     safety_margin = 0.2  # prefer at least 0.2m beyond min_dist
-                    distance_score = 1.0 / (dist_to_centroid + 0.3)  # Closer to centroid is better
+                    distance_score = 1.0 / (1.0 + dist_to_centroid)
                     
                     # Obstacle distance score: reward positions farther from obstacles
                     obs_dist = get_obstacle_distance(x, y)
                     # Normalize: 0.5m -> 0.0, 1.0m+ -> 1.0
                     obs_score = min(1.0, max(0.0, (obs_dist - min_obstacle_dist) / 0.5))
                     
-                    # Combined score: balance alignment, proximity, and obstacle clearance
-                    # Weights: 30% alignment, 40% proximity, 30% obstacle clearance
-                    score = alignment * 0.30 + distance_score * 0.40 + obs_score * 0.30
+                    # Combined score: make the rear-facing preference dominant.
+                    score = alignment * 0.55 + distance_score * 0.20 + obs_score * 0.25
+
+                    # Strongly penalize candidates that remain in front of the goals.
+                    if dot_forward > 0.0:
+                        score *= max(0.1, 1.0 - 0.9 * dot_forward)
                     
                     # Apply penalty if too close to min_dist perpendicular to plane (safety margin violation)
                     if perp_dist < min_dist + safety_margin:
@@ -570,7 +565,7 @@ class OptimalBaseService(Node):
                 
                 # Select candidate with best combined score
                 x_sel, y_sel = max(cands_xy, key=lambda xy: combined_score(xy[0], xy[1]))
-                self.get_logger().info(f"Base positioned perpendicular to goals with proximity: forward={avg_forward}")
+                self.get_logger().info(f"Base positioned behind goals with orientation preference: forward={avg_forward}")
             else:
                 # Fallback: use centroid-based selection
                 x_sel, y_sel = min(cands_xy, key=lambda xy: np.hypot(xy[0]-cx, xy[1]-cy))
