@@ -14,7 +14,7 @@ from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import QTimer, QProcess, Qt
-from PyQt5.QtGui import QFontMetrics, QIcon, QPixmap
+from PyQt5.QtGui import QFontMetrics, QIcon, QPixmap, QPalette, QColor
 from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
@@ -27,9 +27,44 @@ from ur_msgs.msg import IOStates
 from ur_msgs.srv import SetIO
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
+def _detect_system_dark():
+    """Return True if the GNOME/Ubuntu system colour-scheme is set to dark."""
+    try:
+        out = subprocess.run(
+            ['gsettings', 'get', 'org.gnome.desktop.interface', 'color-scheme'],
+            capture_output=True, text=True, timeout=2
+        ).stdout
+        return 'dark' in out.lower()
+    except Exception:
+        return False
+
+def _make_dark_palette():
+    p = QPalette()
+    c = QColor
+    p.setColor(QPalette.Window,          c('#1c2128'))
+    p.setColor(QPalette.WindowText,      c('#cdd9e5'))
+    p.setColor(QPalette.Base,            c('#2d333b'))
+    p.setColor(QPalette.AlternateBase,   c('#22272e'))
+    p.setColor(QPalette.ToolTipBase,     c('#2d333b'))
+    p.setColor(QPalette.ToolTipText,     c('#cdd9e5'))
+    p.setColor(QPalette.Text,            c('#cdd9e5'))
+    p.setColor(QPalette.Button,          c('#2d333b'))
+    p.setColor(QPalette.ButtonText,      c('#cdd9e5'))
+    p.setColor(QPalette.BrightText,      c('#ffffff'))
+    p.setColor(QPalette.Link,            c('#539bf5'))
+    p.setColor(QPalette.Highlight,       c('#1f6feb'))
+    p.setColor(QPalette.HighlightedText, c('#ffffff'))
+    p.setColor(QPalette.Disabled, QPalette.WindowText, c('#768390'))
+    p.setColor(QPalette.Disabled, QPalette.Text,       c('#768390'))
+    p.setColor(QPalette.Disabled, QPalette.ButtonText, c('#768390'))
+    p.setColor(QPalette.Disabled, QPalette.Base,       c('#22272e'))
+    p.setColor(QPalette.Disabled, QPalette.Button,     c('#22272e'))
+    return p
+
 class RobotControlUI(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._dark_theme = _detect_system_dark()
  
         # Initialize ROS only if not already initialized
         if not rclpy.ok():
@@ -127,6 +162,15 @@ class RobotControlUI(QMainWindow):
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
  
+        # Theme toggle button
+        theme_bar = QHBoxLayout()
+        theme_bar.addStretch()
+        self.btn_theme_toggle = QPushButton("☀ Light Theme")
+        self.btn_theme_toggle.setFixedWidth(120)
+        self.btn_theme_toggle.clicked.connect(self._toggle_theme)
+        theme_bar.addWidget(self.btn_theme_toggle)
+        main_layout.addLayout(theme_bar)
+
         # Create tab widget for Arm Control and Base Control
         tabs = QTabWidget()
         main_layout.addWidget(tabs)
@@ -1173,7 +1217,48 @@ class RobotControlUI(QMainWindow):
         
         # Initial topics list refresh
         QTimer.singleShot(1000, self.refresh_topics_list)  # Delay 1s to ensure ROS is ready
-        
+
+        self._apply_theme()
+
+    def _toggle_theme(self):
+        self._dark_theme = not self._dark_theme
+        self._apply_theme()
+
+    def _apply_theme(self):
+        dark = self._dark_theme
+        app = QApplication.instance()
+        if dark:
+            app.setPalette(_make_dark_palette())
+            log_style = (
+                "background-color: #22272e; color: #adbac7; border: 1px solid #444c56; "
+                "font-family: 'Courier New', monospace;"
+            )
+            info_style = (
+                "background-color: #22272e; color: #adbac7; border: 1px solid #444c56; "
+                "font-family: 'Courier New', monospace; padding: 4px;"
+            )
+        else:
+            app.setPalette(app.style().standardPalette())
+            log_style = (
+                "background-color: #f0f0f0; color: #1f2328; border: 1px solid #d0d7de; "
+                "font-family: 'Courier New', monospace;"
+            )
+            info_style = (
+                "background-color: #f0f0f0; color: #1f2328; border: 1px solid #d0d7de; "
+                "font-family: 'Courier New', monospace; padding: 4px;"
+            )
+
+        for attr in ('status_text', 'base_status_text', 'joint_status_text',
+                     'full_control_status_text', 'gpr_status_text'):
+            if hasattr(self, attr):
+                getattr(self, attr).setStyleSheet(log_style)
+
+        if hasattr(self, 'topic_info_display'):
+            self.topic_info_display.setStyleSheet(info_style)
+
+        if hasattr(self, 'btn_theme_toggle'):
+            self.btn_theme_toggle.setText("☀ Light Theme" if dark else "☾ Dark Theme")
+
     def _update_full_control_sim_mode(self):
         """Refresh Full Control state when its simulation mode changes."""
         self._update_full_control_planner_constraints()
@@ -4562,6 +4647,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
     window = RobotControlUI()
     window.show()
     sys.exit(app.exec_())
