@@ -1220,10 +1220,8 @@ class RobotControlUI(QMainWindow):
         if sim_mode != 'true':
             desired_hybrid_sim = 'false'
             should_lock_hybrid_sim = True
-        elif planner_backend == 'moveit':
-            desired_hybrid_sim = 'true'
-            should_lock_hybrid_sim = True
         elif hasattr(self, 'full_control_hybrid_sim_combo'):
+            # When sim=true: user is free to choose regardless of planner backend
             desired_hybrid_sim = self.full_control_hybrid_sim_combo.currentText()
             should_lock_hybrid_sim = False
         else:
@@ -1284,20 +1282,18 @@ class RobotControlUI(QMainWindow):
             if planner == 'moveit':
                 # Get current simulation mode
                 sim_mode = self.arm_sim_mode_combo.currentText()
-                # When MoveIt is chosen:
-                # - If simulation is true -> URsim blocked to true
-                # - If simulation is false -> URsim blocked to false (for real robot)
-                ursim_value = 'true' if sim_mode == 'true' else 'false'
-                self.arm_hybrid_sim_combo.setCurrentText(ursim_value)
-                self.arm_hybrid_sim_combo.setEnabled(False)
-
-                # Update status label based on simulation mode
-                if hasattr(self, 'arm_moveit_status_label'):
-                    if sim_mode == 'true':
-                        self.arm_moveit_status_label.setText("Running moveit on URsim [moveit in gazebo not implemented yet]")
-                    else:
+                if sim_mode == 'true':
+                    # Allow user to freely choose URsim or Gazebo when simulating with MoveIt
+                    self.arm_hybrid_sim_combo.setEnabled(True)
+                    if hasattr(self, 'arm_moveit_status_label'):
+                        self.arm_moveit_status_label.setVisible(False)
+                else:
+                    # Real robot: lock URsim to false
+                    self.arm_hybrid_sim_combo.setCurrentText('false')
+                    self.arm_hybrid_sim_combo.setEnabled(False)
+                    if hasattr(self, 'arm_moveit_status_label'):
                         self.arm_moveit_status_label.setText("Running moveit in Real Robot")
-                    self.arm_moveit_status_label.setVisible(True)
+                        self.arm_moveit_status_label.setVisible(True)
             else:
                 self.arm_hybrid_sim_combo.setEnabled(True)
                 # Hide status label when not using MoveIt
