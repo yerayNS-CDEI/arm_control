@@ -55,6 +55,7 @@
   <depend>moveit_core</depend>
   <depend>moveit_msgs</depend>
   <depend>moveit_planners_ompl</depend>
+  <depend>moveit_planners_chomp</depend>
   <depend>moveit_ros_move_group</depend>
   <depend>moveit_ros_planning_interface</depend>
   <depend>moveit_ros_visualization</depend>

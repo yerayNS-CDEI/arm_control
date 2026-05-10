@@ -194,7 +194,8 @@ def launch_setup(context, *args, **kwargs):
             "simulation:=",
             base_simulation,  # Inverted back for base (true when parent was true)
             " ",
-            "use_mock_hardware:=false",
+            "use_mock_hardware:=",
+            use_fake_hardware,
             " ",
             "sim_gazebo:=false",  # Arm never in Gazebo Classic
             " ",

@@ -38,6 +38,7 @@ class PositionSenderNode(Node):
         self.pose_goal_ompl_pub = self.create_publisher(PoseStamped, '/arm/goal_pose_ompl', 10)
         self.joint_goal_pub = self.create_publisher(JointState, '/arm/joint_goal', 10)
         self.joint_goal_ptp_pub = self.create_publisher(JointState, '/arm/joint_goal_ptp', 10)
+        self.joint_goal_aps_pub = self.create_publisher(JointState, '/arm/joint_goal_aps', 10)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
         self.marker_pub = self.create_publisher(Marker, 'goal_pose_marker', 10)
         
@@ -172,6 +173,7 @@ class PositionSenderNode(Node):
             'arm_wrist_3_joint'
         ]
         self.ompl_pose_positions = {'folded_fsm', 'unfolded_fsm', 'unfolded', 'folded'}
+        self.aps_joint_positions = {'under', 'under1', 'under2'}
         self.joint_indices = None
         
         # Timer for checking status
@@ -314,8 +316,14 @@ class PositionSenderNode(Node):
             self.get_logger().error(msg)
             return False, msg
 
-        joint_goal_pub = self.joint_goal_ptp_pub
-        goal_topic = '/arm/joint_goal_ptp'
+        if position_name in self.aps_joint_positions:
+            joint_goal_pub = self.joint_goal_aps_pub
+            goal_topic = '/arm/joint_goal_aps'
+            planner_label = 'APS'
+        else:
+            joint_goal_pub = self.joint_goal_ptp_pub
+            goal_topic = '/arm/joint_goal_ptp'
+            planner_label = 'PTP'
 
         if joint_goal_pub.get_subscription_count() == 0:
             msg = f"No MoveIt subscriber detected on {goal_topic}. Joint goal not sent."
@@ -334,10 +342,10 @@ class PositionSenderNode(Node):
         self.current_position_name = position_name
 
         joint_values_text = ", ".join(f"{value:.3f}" for value in msg.position)
-        self.get_logger().info(f"→ Sending joint goal '{position_name}' to MoveIt PTP...")
+        self.get_logger().info(f"→ Sending joint goal '{position_name}' via MoveIt {planner_label}...")
         self.get_logger().info(f"   Joints: [{joint_values_text}]")
 
-        success_msg = f"Joint goal '{position_name}' sent to MoveIt PTP successfully"
+        success_msg = f"Joint goal '{position_name}' sent to MoveIt {planner_label} successfully"
         return True, success_msg
     
     def check_status(self):

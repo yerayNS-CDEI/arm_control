@@ -1,0 +1,19 @@
+# MoveIt OctoMap sensor configuration.
+# Loaded by arm_moveit.launch.py when enable_octomap:=true and mode:=full.
+#
+# The combined_cloud topic is produced by pointcloud_concatenate.launch.py,
+# which merges the front (SICK multiscan) and rear lidar streams into a single
+# pointcloud expressed in the os_lidar frame.
+#
+# octomap_frame / octomap_resolution are set directly in arm_moveit.launch.py.
+# The sensor list here is passed as the "sensors" parameter to move_group.
+
+sensors:
+  - sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
+    point_cloud_topic: /combined_cloud
+    max_range: 5.0
+    point_subsample: 1
+    padding_offset: 0.1
+    padding_scale: 1.0
+    max_update_rate: 1.0
+    filtered_cloud_topic: /filtered_cloud

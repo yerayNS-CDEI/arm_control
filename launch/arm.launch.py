@@ -215,7 +215,11 @@ def generate_launch_description():
         default_value='false',
         description='Enable wall-marker collision sync into MoveIt PlanningScene',
     )
-
+    enable_octomap_arg = DeclareLaunchArgument(
+        'enable_octomap',
+        default_value='false',
+        description='Enable LiDAR pointcloud OctoMap integration in MoveIt (mode:=full only)',
+    )
     robot_ip = LaunchConfiguration('robot_ip')
     use_fake_hardware = LaunchConfiguration('use_fake_hardware')
     tf_prefix = LaunchConfiguration('tf_prefix')
@@ -332,6 +336,8 @@ def generate_launch_description():
         ]
     )
 
+    enable_octomap = LaunchConfiguration('enable_octomap')
+
     moveit_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(moveit_launch),
         launch_arguments={
@@ -345,6 +351,8 @@ def generate_launch_description():
             'rviz_config_file': rviz_config_file,
             'joint_states_topic': moveit_joint_states_topic,
             'default_trajectory_controller': moveit_controller_name,
+            'enable_octomap': enable_octomap,
+            'sim': simulation,
         }.items(),
         condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'moveit'"])),
     )
@@ -376,6 +384,7 @@ def generate_launch_description():
             namespace_arm_arg,
             planner_backend_arg,
             enable_wall_scene_sync_arg,
+            enable_octomap_arg,
             arm_group,
             moveit_include,
             moveit_planner_node_opaque,

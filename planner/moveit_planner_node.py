@@ -37,6 +37,7 @@ class MoveItPlannerNode(Node):
     PILZ_PIPELINE_ID = 'pilz_industrial_motion_planner'
     OMPL_PIPELINE_ID = 'move_group'
     OMPL_POSE_PLANNER_ID = 'RRTConnectkConfigDefault'
+    CHOMP_PIPELINE_ID = 'chomp'
 
     def __init__(self):
         super().__init__('moveit_planner_node')
@@ -178,6 +179,10 @@ class MoveItPlannerNode(Node):
         self.create_subscription(PoseStamped, '/arm/goal_pose_ompl', self.goal_ompl_callback, 10)
         self.create_subscription(JointState, '/arm/joint_goal', self.joint_goal_callback, 10)
         self.create_subscription(JointState, '/arm/joint_goal_ptp', self.joint_goal_ptp_callback, 10)
+        self.create_subscription(JointState, '/arm/joint_goal_aps', self.joint_goal_aps_callback, 10)
+        self.create_subscription(PoseStamped, '/arm/goal_pose_aps', self.goal_aps_callback, 10)
+        self.create_subscription(JointState, '/arm/joint_goal_chomp', self.joint_goal_chomp_callback, 10)
+        self.create_subscription(PoseStamped, '/arm/goal_pose_chomp', self.goal_chomp_callback, 10)
         self.create_subscription(JointState, 'joint_states', self.current_joint_state_callback, 10)
         self.create_subscription(JointState, '/joint_states', self.current_joint_state_callback, 10)
         self.create_subscription(JointState, '/arm/joint_states', self.current_joint_state_callback, 10)
@@ -244,6 +249,38 @@ class MoveItPlannerNode(Node):
             pipeline_id=self.PILZ_PIPELINE_ID,
             planner_id='PTP',
             source_label='PTP joint',
+        )
+
+    def joint_goal_aps_callback(self, msg: JointState):
+        self.enqueue_joint_goal(
+            msg,
+            pipeline_id=self.OMPL_PIPELINE_ID,
+            planner_id='AnytimePathShorteningkConfigDefault',
+            source_label='APS joint',
+        )
+
+    def goal_aps_callback(self, msg: PoseStamped):
+        self.enqueue_pose_goal(
+            msg,
+            pipeline_id=self.OMPL_PIPELINE_ID,
+            planner_id='AnytimePathShorteningkConfigDefault',
+            source_label='APS pose',
+        )
+
+    def joint_goal_chomp_callback(self, msg: JointState):
+        self.enqueue_joint_goal(
+            msg,
+            pipeline_id=self.CHOMP_PIPELINE_ID,
+            planner_id='',
+            source_label='CHOMP joint',
+        )
+
+    def goal_chomp_callback(self, msg: PoseStamped):
+        self.enqueue_pose_goal(
+            msg,
+            pipeline_id=self.CHOMP_PIPELINE_ID,
+            planner_id='',
+            source_label='CHOMP pose',
         )
 
     def enqueue_pose_goal(
