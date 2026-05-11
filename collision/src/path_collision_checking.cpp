@@ -278,6 +278,8 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
         "update_collision_pose",  std::bind(&PathCollisionChecking::updateCollisionObjectPoseCallback, this, std::placeholders::_1, std::placeholders::_2));
     check_collision_pose_server_ = this->create_service<arm_control::srv::CheckCollisionPose>(
         "check_collision_pose",  std::bind(&PathCollisionChecking::checkCollisionPoseCallback, this, std::placeholders::_1, std::placeholders::_2));
+    check_collision_poses_server_ = this->create_service<arm_control::srv::CheckCollisionPoses>(
+        "check_collision_poses", std::bind(&PathCollisionChecking::checkCollisionPosesCallback, this, std::placeholders::_1, std::placeholders::_2));
 
     mesh_coll_server_st_ = this->create_service<arm_control::srv::AddRemoveCollisionMeshStamped>(
     "add_remove_collision_mesh_stamped",
@@ -629,6 +631,61 @@ void PathCollisionChecking::checkCollisionPoseCallback(const std::shared_ptr<arm
     const auto elapsed_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now() - started_at).count());
     maybeLogCollisionServiceMetrics(elapsed_ns, req->publish_visualization, env_check_skipped);
+}
+
+void PathCollisionChecking::checkCollisionPosesCallback(const std::shared_ptr<arm_control::srv::CheckCollisionPoses::Request> req,
+                                                        std::shared_ptr<arm_control::srv::CheckCollisionPoses::Response> res)
+{
+    const auto started_at = std::chrono::steady_clock::now();
+    bool requested_visualization = false;
+    bool env_check_skipped = false;
+
+    res->in_collision.reserve(req->joint_states.size());
+    res->check_succeeded.reserve(req->joint_states.size());
+
+    for (size_t index = 0; index < req->joint_states.size(); ++index)
+    {
+        const bool visualize_this_state = req->publish_visualization && index == 0;
+        bool state_env_check_skipped = false;
+
+        try
+        {
+            sensor_msgs::msg::JointState merged_state = mergeJointStates(req->joint_states[index]);
+            sensor_msgs::msg::JointState prefixed_state = convertToNamespaceJointState(merged_state);
+
+            bool self_col = false;
+            bool env_col = false;
+            const bool in_collision = evaluateCollisionState(
+                prefixed_state, self_col, env_col, visualize_this_state, &state_env_check_skipped);
+
+            res->in_collision.push_back(in_collision);
+            res->check_succeeded.push_back(true);
+
+            if (publish_tested_joint_states_ || visualize_this_state)
+            {
+                evaluated_joint_pub_->publish(prefixed_state);
+            }
+        }
+        catch (const std::exception& e)
+        {
+            RCLCPP_ERROR(this->get_logger(), "Error in checkCollisionPosesCallback for state %zu: %s", index, e.what());
+            res->in_collision.push_back(true);
+            res->check_succeeded.push_back(false);
+        }
+        catch (...)
+        {
+            RCLCPP_ERROR(this->get_logger(), "Unknown error in checkCollisionPosesCallback for state %zu", index);
+            res->in_collision.push_back(true);
+            res->check_succeeded.push_back(false);
+        }
+
+        requested_visualization = requested_visualization || visualize_this_state;
+        env_check_skipped = env_check_skipped || state_env_check_skipped;
+    }
+
+    const auto elapsed_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - started_at).count());
+    maybeLogCollisionServiceMetrics(elapsed_ns, requested_visualization, env_check_skipped);
 }
 
 sensor_msgs::msg::JointState PathCollisionChecking::mergeJointStates(const sensor_msgs::msg::JointState& partial) const

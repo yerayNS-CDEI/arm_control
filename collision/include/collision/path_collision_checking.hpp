@@ -60,6 +60,7 @@
 
 #include "arm_control/srv/update_collision_pose.hpp"
 #include "arm_control/srv/check_collision_pose.hpp"
+#include "arm_control/srv/check_collision_poses.hpp"
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 
@@ -110,6 +111,8 @@ class PathCollisionChecking : public rclcpp::Node
                                 std::shared_ptr<arm_control::srv::UpdateCollisionPose::Response> res);
         void checkCollisionPoseCallback(const std::shared_ptr<arm_control::srv::CheckCollisionPose::Request> req,
                                 std::shared_ptr<arm_control::srv::CheckCollisionPose::Response> res);
+        void checkCollisionPosesCallback(const std::shared_ptr<arm_control::srv::CheckCollisionPoses::Request> req,
+                    std::shared_ptr<arm_control::srv::CheckCollisionPoses::Response> res);
 
         void addRemoveMeshStampedCallback(const std::shared_ptr<arm_control::srv::AddRemoveCollisionMeshStamped::Request> req,
                                    std::shared_ptr<arm_control::srv::AddRemoveCollisionMeshStamped::Response> res);
@@ -426,6 +429,7 @@ class PathCollisionChecking : public rclcpp::Node
         rclcpp::Service<arm_control::srv::GetSlicedPolytope>::SharedPtr sliced_polytope_server_;
         rclcpp::Service<arm_control::srv::UpdateCollisionPose>::SharedPtr update_pos_server_;
         rclcpp::Service<arm_control::srv::CheckCollisionPose>::SharedPtr check_collision_pose_server_;
+        rclcpp::Service<arm_control::srv::CheckCollisionPoses>::SharedPtr check_collision_poses_server_;
 
         rclcpp::Service<arm_control::srv::AddRemoveCollisionMeshStamped>::SharedPtr mesh_coll_server_st_;
         rclcpp::Service<arm_control::srv::AddRemoveCollisionSolidStamped>::SharedPtr solid_coll_server_st_;

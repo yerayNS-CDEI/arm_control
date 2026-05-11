@@ -63,6 +63,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/UpdateCollisionPose.srv"
   "srv/UpdateCollisionPoseStamped.srv"
   "srv/CheckCollisionPose.srv"
+  "srv/CheckCollisionPoses.srv"
   "srv/ComputeBasePlacement.srv"
   "srv/ComputeWallDiscretization.srv"
   "srv/OptimalBase.srv"

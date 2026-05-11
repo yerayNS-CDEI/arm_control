@@ -35,7 +35,7 @@ from scipy.spatial.transform import Rotation as R, Slerp
 from scipy.ndimage import binary_erosion
 
 # Import collision checking services
-from arm_control.srv import CheckCollisionPose
+from arm_control.srv import CheckCollisionPose, CheckCollisionPoses
 from shape_msgs.msg import SolidPrimitive
 from geometry_msgs.msg import Pose
 
@@ -75,6 +75,12 @@ class PlannerNode(Node):
         self.log_performance_metrics = self.get_parameter('log_performance_metrics').get_parameter_value().bool_value
         self.declare_parameter('collision_metrics_log_interval', 50)
         self.collision_metrics_log_interval = self.get_parameter('collision_metrics_log_interval').get_parameter_value().integer_value
+        self.declare_parameter('cache_collision_checks', True)
+        self.cache_collision_checks = self.get_parameter('cache_collision_checks').get_parameter_value().bool_value
+        self.declare_parameter('collision_cache_round_digits', 4)
+        self.collision_cache_round_digits = self.get_parameter('collision_cache_round_digits').get_parameter_value().integer_value
+        self.declare_parameter('enable_batch_collision_checks', True)
+        self.enable_batch_collision_checks = self.get_parameter('enable_batch_collision_checks').get_parameter_value().bool_value
 
         # Number of neighbor layers to mark around collision cells during replanning
         # 0 = mark only the collision cell itself
@@ -217,6 +223,7 @@ class PlannerNode(Node):
         # Create collision checking service clients
         # Note: path_collision_checking node is launched with namespace 'collision'
         self.collision_check_client = self.create_client(CheckCollisionPose, '/collision/check_collision_pose')
+        self.collision_check_batch_client = self.create_client(CheckCollisionPoses, '/collision/check_collision_poses')
         
         # Collision checking configuration
         self.declare_parameter('enable_collision_checking', True)
@@ -1673,15 +1680,36 @@ class PlannerNode(Node):
     def _reset_plan_metrics(self):
         self._plan_started_at = None
         self._plan_metrics_logged = False
+        self._collision_check_request_count = 0
+        self._collision_check_batch_request_count = 0
         self._collision_check_call_count = 0
         self._collision_check_total_sec = 0.0
         self._collision_check_free_count = 0
         self._collision_check_collision_count = 0
         self._collision_check_failed_count = 0
+        self._collision_check_cache = {}
+        self._collision_check_cache_hits = 0
+        self._collision_check_cache_misses = 0
 
     def _start_plan_metrics(self):
         self._reset_plan_metrics()
         self._plan_started_at = time.monotonic()
+
+    def _make_collision_cache_key(self, joint_values):
+        canonical_joint_values = np.arctan2(np.sin(joint_values), np.cos(joint_values))
+        rounded_joint_values = np.round(canonical_joint_values, self.collision_cache_round_digits)
+        return tuple(float(value) for value in rounded_joint_values)
+
+    def _make_collision_request_joint_state(self, joint_values):
+        joint_state = JointState()
+        joint_state.name = [name.replace(self.joint_prefix, '') for name in self.expected_joint_names]
+        joint_state.position = joint_values.tolist()
+        return joint_state
+
+    def _record_collision_request_metric(self, request_count=1, batched=False):
+        self._collision_check_request_count += int(request_count)
+        if batched:
+            self._collision_check_batch_request_count += int(request_count)
 
     def _record_collision_check_metric(self, status: CollisionCheckStatus, elapsed_sec: float):
         self._collision_check_call_count += 1
@@ -1701,9 +1729,13 @@ class PlannerNode(Node):
             avg_ms = (self._collision_check_total_sec / self._collision_check_call_count) * 1000.0
             self.get_logger().warn(
                 f"Planner collision metrics: checks={self._collision_check_call_count} "
+                f"requests={self._collision_check_request_count} "
+                f"batch_requests={self._collision_check_batch_request_count} "
                 f"avg_ms={avg_ms:.2f} free={self._collision_check_free_count} "
                 f"collision={self._collision_check_collision_count} "
-                f"failed={self._collision_check_failed_count}"
+                f"failed={self._collision_check_failed_count} "
+                f"cache_hits={self._collision_check_cache_hits} "
+                f"cache_entries={len(self._collision_check_cache)}"
             )
 
     def _log_plan_metrics(self, outcome: str):
@@ -1718,9 +1750,13 @@ class PlannerNode(Node):
         self.get_logger().warn(
             f"Planner metrics [{outcome}]: total_sec={total_sec:.2f} "
             f"collision_checks={self._collision_check_call_count} "
+            f"collision_requests={self._collision_check_request_count} "
+            f"batch_requests={self._collision_check_batch_request_count} "
             f"avg_collision_ms={avg_collision_ms:.2f} free={self._collision_check_free_count} "
             f"collision={self._collision_check_collision_count} "
-            f"failed={self._collision_check_failed_count}"
+            f"failed={self._collision_check_failed_count} "
+            f"cache_hits={self._collision_check_cache_hits} "
+            f"cache_entries={len(self._collision_check_cache)}"
         )
         self._plan_metrics_logged = True
 
@@ -1883,20 +1919,24 @@ class PlannerNode(Node):
         started_at = time.monotonic()
 
         def finish(status):
+            self._record_collision_request_metric(request_count=1, batched=False)
             self._record_collision_check_metric(status, time.monotonic() - started_at)
             return status
+
+        cache_key = None
+        if self.cache_collision_checks and not publish_visualization:
+            cache_key = self._make_collision_cache_key(np.asarray(joint_values, dtype=float))
+            cached_status = self._collision_check_cache.get(cache_key)
+            if cached_status is not None:
+                self._collision_check_cache_hits += 1
+                return cached_status
+            self._collision_check_cache_misses += 1
 
         if not self.collision_check_client.service_is_ready():
             return finish(CollisionCheckStatus.CHECK_FAILED)
         
-        # Create JointState message
-        # IMPORTANT: Collision service expects joint names WITHOUT prefix (e.g., 'shoulder_pan_joint' not 'arm_shoulder_pan_joint')
-        # Strip the joint_prefix from expected names to match what collision service expects
-        joint_names_no_prefix = [name.replace(self.joint_prefix, '') for name in self.expected_joint_names]
-        
         request = CheckCollisionPose.Request()
-        request.joint_state.name = joint_names_no_prefix
-        request.joint_state.position = joint_values.tolist()
+        request.joint_state = self._make_collision_request_joint_state(joint_values)
         request.publish_visualization = publish_visualization
         
         # Retry loop for handling transient service failures
@@ -1952,11 +1992,14 @@ class PlannerNode(Node):
                                 return finish(CollisionCheckStatus.CHECK_FAILED)
                         
                         # Success! Return the result
-                        return finish(
+                        status = (
                             CollisionCheckStatus.COLLISION
                             if result_container['response'].in_collision
                             else CollisionCheckStatus.FREE
                         )
+                        if cache_key is not None:
+                            self._collision_check_cache[cache_key] = status
+                        return finish(status)
                 
             except Exception as e:
                 if attempt < max_retries:
@@ -1972,6 +2015,161 @@ class PlannerNode(Node):
         # Should not reach here, but for safety
         return finish(CollisionCheckStatus.CHECK_FAILED)
 
+    def _check_collision_batch_sync(
+        self,
+        joint_values_batch,
+        publish_visualization_index=None,
+        timeout_sec=2.0,
+        cancel_check=None,
+        max_retries=2,
+    ):
+        if not joint_values_batch:
+            return []
+
+        statuses = [None] * len(joint_values_batch)
+        uncached_entries = []
+
+        for original_idx, joint_values in enumerate(joint_values_batch):
+            joint_values_array = np.asarray(joint_values, dtype=float)
+            visualize = publish_visualization_index == original_idx
+            cache_key = None
+
+            if self.cache_collision_checks and not visualize:
+                cache_key = self._make_collision_cache_key(joint_values_array)
+                cached_status = self._collision_check_cache.get(cache_key)
+                if cached_status is not None:
+                    self._collision_check_cache_hits += 1
+                    statuses[original_idx] = cached_status
+                    continue
+                self._collision_check_cache_misses += 1
+
+            uncached_entries.append((original_idx, joint_values_array, cache_key, visualize))
+
+        if not uncached_entries:
+            return statuses
+
+        def fallback_to_single_checks():
+            for original_idx, joint_values_array, _, visualize in uncached_entries:
+                statuses[original_idx] = self._check_collision_sync(
+                    joint_values_array,
+                    publish_visualization=visualize,
+                    timeout_sec=timeout_sec,
+                    cancel_check=cancel_check,
+                    max_retries=max_retries,
+                )
+            return statuses
+
+        if (
+            not self.enable_batch_collision_checks
+            or len(uncached_entries) == 1
+            or not self.collision_check_batch_client.service_is_ready()
+        ):
+            return fallback_to_single_checks()
+
+        request_entries = [entry for entry in uncached_entries if entry[3]] + [
+            entry for entry in uncached_entries if not entry[3]
+        ]
+
+        request = CheckCollisionPoses.Request()
+        request.publish_visualization = any(entry[3] for entry in request_entries)
+        request.joint_states = [
+            self._make_collision_request_joint_state(joint_values_array)
+            for _, joint_values_array, _, _ in request_entries
+        ]
+
+        for attempt in range(max_retries + 1):
+            started_at = time.monotonic()
+            try:
+                response_event = threading.Event()
+                result_container = {'response': None, 'error': None}
+
+                def response_callback(future):
+                    try:
+                        result_container['response'] = future.result()
+                    except Exception as e:
+                        result_container['error'] = e
+                    finally:
+                        response_event.set()
+
+                future = self.collision_check_batch_client.call_async(request)
+                future.add_done_callback(response_callback)
+
+                deadline = time.monotonic() + timeout_sec
+                while True:
+                    if cancel_check is not None and cancel_check():
+                        future.cancel()
+                        self.get_logger().warn("Batched collision validation cancelled because planning was aborted.")
+                        return fallback_to_single_checks()
+
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        if attempt < max_retries:
+                            self.get_logger().warn(
+                                f"Batched collision check timed out after {timeout_sec}s (attempt {attempt + 1}/{max_retries + 1}), retrying..."
+                            )
+                            break
+
+                        self.get_logger().warn(
+                            f"Batched collision check timed out after {timeout_sec}s (final attempt {attempt + 1}/{max_retries + 1}); falling back to single checks."
+                        )
+                        return fallback_to_single_checks()
+
+                    if response_event.wait(timeout=min(0.05, remaining)):
+                        if result_container['error']:
+                            if attempt < max_retries:
+                                self.get_logger().warn(
+                                    f"Batched collision check service error (attempt {attempt + 1}/{max_retries + 1}): {result_container['error']}, retrying..."
+                                )
+                                break
+
+                            self.get_logger().warn(
+                                f"Batched collision check service error (final attempt {attempt + 1}/{max_retries + 1}): {result_container['error']}; falling back to single checks."
+                            )
+                            return fallback_to_single_checks()
+
+                        response = result_container['response']
+                        if (
+                            len(response.in_collision) != len(request_entries)
+                            or len(response.check_succeeded) != len(request_entries)
+                        ):
+                            self.get_logger().warn(
+                                "Batched collision check returned mismatched response sizes; falling back to single checks."
+                            )
+                            return fallback_to_single_checks()
+
+                        self._record_collision_request_metric(request_count=1, batched=True)
+                        per_state_elapsed = (time.monotonic() - started_at) / max(len(request_entries), 1)
+                        for response_idx, (original_idx, _, cache_key, _) in enumerate(request_entries):
+                            if not response.check_succeeded[response_idx]:
+                                status = CollisionCheckStatus.CHECK_FAILED
+                            else:
+                                status = (
+                                    CollisionCheckStatus.COLLISION
+                                    if response.in_collision[response_idx]
+                                    else CollisionCheckStatus.FREE
+                                )
+
+                            if cache_key is not None and status != CollisionCheckStatus.CHECK_FAILED:
+                                self._collision_check_cache[cache_key] = status
+
+                            statuses[original_idx] = status
+                            self._record_collision_check_metric(status, per_state_elapsed)
+
+                        return statuses
+
+            except Exception as e:
+                if attempt < max_retries:
+                    self.get_logger().warn(
+                        f"Batched collision check service call failed (attempt {attempt + 1}/{max_retries + 1}): {e}, retrying..."
+                    )
+                else:
+                    self.get_logger().warn(
+                        f"Batched collision check service call failed (final attempt {attempt + 1}/{max_retries + 1}): {e}; falling back to single checks."
+                    )
+                    return fallback_to_single_checks()
+
+        return fallback_to_single_checks()
+
     def _select_best_collision_free_solution(
         self,
         ik_solutions,
@@ -1982,10 +2180,7 @@ class PlannerNode(Node):
         cancel_check=None,
     ):
         """
-        Select the CLOSEST collision-free IK solution using sequential testing with early exit.
-        
-        STRATEGY: Test IK solutions ONE AT A TIME in order of proximity to current configuration.
-        Returns the FIRST (closest) collision-free solution found.
+        Select the CLOSEST IK solution and optionally validate only that solution.
         
         This matches the original behavior where the robot always picks the smoothest path
         by preferring solutions closest to the current joint state.
@@ -2019,6 +2214,7 @@ class PlannerNode(Node):
                     f"(max_ik_solutions_to_test={self.max_ik_solutions_to_test})"
                 )
         
+        single_service_ready = self.collision_check_client.service_is_ready()
         if not test_collision:
             best_idx = sorted_indices[0]
             best_dist = sorted_distances[0]
@@ -2028,63 +2224,42 @@ class PlannerNode(Node):
             )
             return ik_solutions[best_idx], IKSelectionOutcome.SUCCESS
 
-        if not self.collision_check_client.service_is_ready():
+        if not single_service_ready:
             self.get_logger().error(
                 f"Waypoint {waypoint_idx}: collision checking requested but service is unavailable"
             )
             return None, IKSelectionOutcome.CHECK_FAILED
-        
-        # Test solutions sequentially in order of proximity (closest first)
-        saw_check_failure = False
-        for i, sol_idx in enumerate(sorted_indices):
-            if cancel_check is not None and cancel_check():
-                return None, IKSelectionOutcome.CHECK_FAILED
 
-            solution = ik_solutions[sol_idx]
-            dist = sorted_distances[i]
-            
-            # Use existing collision check function (properly handles async service calls)
-            visualize = self.visualize_collision_checks and (i == 0)
-            collision_status = self._check_collision_sync(
-                solution,
-                publish_visualization=visualize,
-                timeout_sec=timeout_sec,
-                cancel_check=cancel_check,
-            )
-            
-            # Process result
-            if collision_status == CollisionCheckStatus.CHECK_FAILED:
-                saw_check_failure = True
-                self.get_logger().warn(
-                    f"Waypoint {waypoint_idx}: Solution {sol_idx} could not be collision-validated "
-                    f"(dist: {dist:.3f}), trying next solution..."
-                )
-                continue
+        if cancel_check is not None and cancel_check():
+            return None, IKSelectionOutcome.CHECK_FAILED
 
-            if collision_status == CollisionCheckStatus.FREE:
-                # Found collision-free solution - use it!
-                self.get_logger().info(
-                    f"Waypoint {waypoint_idx}: ✓ Solution {sol_idx} collision-free "
-                    f"(dist: {dist:.3f}, rank: {i+1}/{len(sorted_indices)})"
-                )
-                return solution, IKSelectionOutcome.SUCCESS
-            else:
-                # Solution in collision, try next one
-                self.get_logger().warn(
-                    f"Waypoint {waypoint_idx}: ✗ Solution {sol_idx} in COLLISION "
-                    f"(dist: {dist:.3f}), trying next solution... ({i+1}/{len(sorted_indices)} tested)"
-                )
-                continue
-        
-        if saw_check_failure:
-            self.get_logger().error(
-                f"Waypoint {waypoint_idx}: unable to validate any collision-free IK solution "
-                f"after testing {len(sorted_indices)} candidate(s)"
+        best_idx = sorted_indices[0]
+        best_dist = sorted_distances[0]
+        best_solution = ik_solutions[best_idx]
+        collision_status = self._check_collision_sync(
+            best_solution,
+            publish_visualization=self.visualize_collision_checks,
+            timeout_sec=timeout_sec,
+            cancel_check=cancel_check,
+        )
+
+        if collision_status == CollisionCheckStatus.CHECK_FAILED:
+            self.get_logger().warn(
+                f"Waypoint {waypoint_idx}: closest solution {best_idx} could not be collision-validated "
+                f"(dist: {best_dist:.3f})"
             )
             return None, IKSelectionOutcome.CHECK_FAILED
 
-        self.get_logger().error(
-            f"Waypoint {waypoint_idx}: ✗ All {len(sorted_indices)} solutions in collision"
+        if collision_status == CollisionCheckStatus.FREE:
+            self.get_logger().info(
+                f"Waypoint {waypoint_idx}: ✓ Closest solution {best_idx} collision-free "
+                f"(dist: {best_dist:.3f})"
+            )
+            return best_solution, IKSelectionOutcome.SUCCESS
+
+        self.get_logger().warn(
+            f"Waypoint {waypoint_idx}: ✗ Closest solution {best_idx} in COLLISION "
+            f"(dist: {best_dist:.3f})"
         )
         return None, IKSelectionOutcome.ALL_IN_COLLISION
 
@@ -2845,41 +3020,34 @@ class PlannerNode(Node):
             
             all_joint_values_print.append(q_current)
 
-            # Process waypoints with collision checking (only validate specified range)
+            selected_waypoint_candidates = []
+
+            # Process waypoints by selecting the closest IK first; collision validation happens in batch afterwards.
             for i in range(waypoints_to_validate_start, waypoints_to_validate_end + 1):
                 if self._abort_if_requested(plan_generation, f"goal was cancelled while solving waypoint {i}"):
                     return
 
-                T = create_pose_matrix(path_world[i], interp_rot_matrices[i])
-                ik_solutions = closed_form_algorithm(T, q_current=q_current, type=0, return_all_solutions=True)
-                # Select best collision-free solution
-                q_new, selection_outcome = self._select_best_collision_free_solution(
-                    ik_solutions,
-                    q_current,
-                    waypoint_idx=i,
-                    test_collision=self.enable_collision_checking,
-                    cancel_check=lambda: self._should_abort_plan(plan_generation),
-                )
-                
-                # Get grid index for tracking (used in both collision and collision-free cases)
                 grid_idx = (
                     pruned_path_grid_indices[i]
                     if i < len(pruned_path_grid_indices)
                     else None
                 )
 
+                T = create_pose_matrix(path_world[i], interp_rot_matrices[i])
+                ik_solutions = closed_form_algorithm(T, q_current=q_current, type=0, return_all_solutions=True)
+                # Select the closest IK solution only. If it later collides, replanning should avoid that waypoint.
+                q_new, selection_outcome = self._select_best_collision_free_solution(
+                    ik_solutions,
+                    q_current,
+                    waypoint_idx=i,
+                    test_collision=False,
+                    cancel_check=lambda: self._should_abort_plan(plan_generation),
+                )
+
                 if q_new is None:
-                    if selection_outcome in (
-                        IKSelectionOutcome.ALL_IN_COLLISION,
-                        IKSelectionOutcome.NO_VALID_SOLUTIONS,
-                    ):
-                        failure_reason = (
-                            "no collision-free IK solution"
-                            if selection_outcome == IKSelectionOutcome.ALL_IN_COLLISION
-                            else "no valid IK solution"
-                        )
+                    if selection_outcome == IKSelectionOutcome.NO_VALID_SOLUTIONS:
                         self.get_logger().error(
-                            f"Waypoint {i} at {path_world[i]} has {failure_reason}. "
+                            f"Waypoint {i} at {path_world[i]} has no valid IK solution. "
                             f"Grid index: {grid_idx if grid_idx is not None else 'unknown'}"
                         )
                         waypoints_requiring_replan.append(
@@ -2887,16 +3055,10 @@ class PlannerNode(Node):
                                 i,
                                 path_world[i],
                                 grid_idx,
-                                failure_reason,
+                                "no valid IK solution",
                             )
                         )
-                        # Track collision status for segment analysis (collision waypoint)
                         waypoint_collision_status.append((i, False, None, grid_idx))
-                    elif selection_outcome == IKSelectionOutcome.CHECK_FAILED:
-                        self._fail_current_goal(
-                            f"Waypoint {i} could not be collision-validated. Aborting instead of replanning on uncertain data."
-                        )
-                        return
                     else:
                         self._fail_current_goal(f"Unexpected IK selection outcome at waypoint {i}: {selection_outcome}")
                         return
@@ -2913,12 +3075,48 @@ class PlannerNode(Node):
                         while q_new[j] < -2 * np.pi:
                             q_new[j] += 2 * np.pi
 
+                    selected_waypoint_candidates.append((i, q_new, grid_idx))
+                    q_current = q_new
+
+            if self.enable_collision_checking and selected_waypoint_candidates:
+                collision_statuses = self._check_collision_batch_sync(
+                    [candidate[1] for candidate in selected_waypoint_candidates],
+                    publish_visualization_index=0 if self.visualize_collision_checks else None,
+                    timeout_sec=2.0,
+                    cancel_check=lambda: self._should_abort_plan(plan_generation),
+                )
+
+                for (waypoint_idx, q_new, grid_idx), collision_status in zip(selected_waypoint_candidates, collision_statuses):
+                    if collision_status == CollisionCheckStatus.CHECK_FAILED:
+                        self._fail_current_goal(
+                            f"Waypoint {waypoint_idx} could not be collision-validated. Aborting instead of replanning on uncertain data."
+                        )
+                        return
+
+                    if collision_status == CollisionCheckStatus.COLLISION:
+                        self.get_logger().error(
+                            f"Waypoint {waypoint_idx} at {path_world[waypoint_idx]} has closest IK solution in collision. "
+                            f"Grid index: {grid_idx if grid_idx is not None else 'unknown'}"
+                        )
+                        waypoints_requiring_replan.append(
+                            (
+                                waypoint_idx,
+                                path_world[waypoint_idx],
+                                grid_idx,
+                                'closest IK solution in collision',
+                            )
+                        )
+                        waypoint_collision_status.append((waypoint_idx, False, None, grid_idx))
+                        continue
+
                     all_joint_values.append(q_new)
                     all_joint_values_print.append(q_new)
-                    q_current = q_new
-                    
-                    # Track collision status for segment analysis (collision-free waypoint)
-                    waypoint_collision_status.append((i, True, q_new, grid_idx))
+                    waypoint_collision_status.append((waypoint_idx, True, q_new, grid_idx))
+            else:
+                for waypoint_idx, q_new, grid_idx in selected_waypoint_candidates:
+                    all_joint_values.append(q_new)
+                    all_joint_values_print.append(q_new)
+                    waypoint_collision_status.append((waypoint_idx, True, q_new, grid_idx))
             
             # After processing waypoints, analyze segments and update preserved segments
             if waypoint_collision_status and waypoints_requiring_replan:
