@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.5)
 project(arm_control)
 
-# Default to C++14
+# C++17 required by moveit_core headers
 if(NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 14)
+  set(CMAKE_CXX_STANDARD 17)
 endif()
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -27,6 +27,10 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(urdf REQUIRED)
 find_package(backward_ros REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(moveit_core REQUIRED)
+find_package(moveit_ros_planning REQUIRED)
 
 # Generate service interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -145,6 +149,21 @@ install(DIRECTORY resource/
 install(DIRECTORY UI_utils/
   DESTINATION share/${PROJECT_NAME}/UI_utils
   FILES_MATCHING PATTERN "*.py"
+)
+
+# C++ EE Jacobian node
+add_executable(ee_jacobian_node control/ee_jacobian_node.cpp)
+ament_target_dependencies(ee_jacobian_node
+  rclcpp
+  sensor_msgs
+  nav_msgs
+  std_msgs
+  tf2_ros
+  moveit_core
+  moveit_ros_planning
+)
+install(TARGETS ee_jacobian_node
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 # Testing

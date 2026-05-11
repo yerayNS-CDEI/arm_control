@@ -15,6 +15,19 @@ from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
+def launch_ee_jacobian_node(context, *args, **kwargs):
+    simulation = context.launch_configurations.get('sim', 'false')
+    hybrid_sim  = context.launch_configurations.get('hybrid_sim', 'false')
+    # use_sim_time=True only in pure simulation (sim=true, hybrid_sim=false)
+    use_sim_time = not (simulation == 'false' or hybrid_sim == 'true')
+    return [Node(
+        package='arm_control',
+        executable='ee_jacobian_node',
+        output='screen',
+        parameters=[{'use_sim_time': use_sim_time, 'publish_rate': 50.0}],
+    )]
+
+
 def launch_moveit_planner_node(context, *args, **kwargs):
     """Evaluate substitutions at launch time to set moveit_planner_node parameters."""
     moveit_mode = context.launch_configurations.get('moveit_mode', 'auto')
@@ -70,6 +83,17 @@ def launch_moveit_planner_node(context, *args, **kwargs):
                 'joint_planner_id': moveit_joint_planner_id,
                 'enable_wall_scene_sync': wall_scene_sync,
                 'enable_base_collision': enable_base_collision,
+                # Increased from 5.0s: OMPL and APS need more time for
+                # obstacle-dense scenes (folding, under, approach).
+                # Pilz LIN/PTP always completes in <1s so extra time is free.
+                'planning_time': 10.0,
+                # More attempts before giving up; each attempt is a new
+                # random seed so coverage improves with count.
+                'planning_attempts': 10,
+                # Tolerances: 3mm position, 0.05 rad orientation.
+                # Tighter than default is fine since LMA IK is more precise.
+                'position_tolerance': 0.003,
+                'orientation_tolerance': 0.05,
             }
         ],
     )
@@ -333,6 +357,7 @@ def generate_launch_description():
                 output='screen',
                 parameters=[{'planner_backend': planner_backend}],
             ),
+            OpaqueFunction(function=launch_ee_jacobian_node)
         ]
     )
 
