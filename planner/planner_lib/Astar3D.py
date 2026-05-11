@@ -11,18 +11,14 @@ from scipy.ndimage import binary_dilation
 def dilate_obstacles(occupancy_grid, dilation_distance, x_vals):
     # Create a structuring element for dilation (3D cube of size dilation_distance)
     dilation_size = int(np.ceil(dilation_distance / (x_vals[1] - x_vals[0])))  # Convert distance to grid units
-    print(f"[dilate_obstacles] Grid shape: {occupancy_grid.shape}, dilation_size: {dilation_size}")
     
     if dilation_size == 0:
-        print("[dilate_obstacles] Dilation size is 0, returning original grid")
         return occupancy_grid
     
     struct_element = np.ones((dilation_size, dilation_size, dilation_size), dtype=np.uint8)
-    print(f"[dilate_obstacles] Starting binary_dilation...")
     
     # Perform 3D dilation
     dilated_grid = binary_dilation(occupancy_grid, structure=struct_element).astype(np.uint8)
-    print(f"[dilate_obstacles] Dilation complete")
     return dilated_grid
 
 def _coord_to_grid_index_and_in_bounds(coord, vals):

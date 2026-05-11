@@ -131,6 +131,9 @@ class PathCollisionChecking : public rclcpp::Node
         sensor_msgs::msg::JointState convertToNamespaceJointState(const sensor_msgs::msg::JointState& input) const;
         void warmupCollisionModelFromJointState(const sensor_msgs::msg::JointState& prefixed_joint_state);
         void warmupFromRealJointState(const sensor_msgs::msg::JointState::SharedPtr msg);
+        void buildStaticCollisionShapeCache();
+        void maybeLogCollisionServiceMetrics(uint64_t elapsed_ns, bool requested_visualization,
+                             bool env_check_skipped);
 
         /// Constrained manipulability private methods
 
@@ -272,7 +275,9 @@ class PathCollisionChecking : public rclcpp::Node
         bool checkCollision(const sensor_msgs::msg::JointState& joint_state);
         bool checkSelfCollision(const GeometryInformation& geometry_information);
         bool isAdjacent(int i, int j) const;
-        bool evaluateCollisionState(const sensor_msgs::msg::JointState& joint_state, bool& self_collision, bool& env_collision, bool publish_visualization = false);
+        bool evaluateCollisionState(const sensor_msgs::msg::JointState& joint_state, bool& self_collision,
+                        bool& env_collision, bool publish_visualization = false,
+                        bool* env_check_skipped = nullptr);
 
         // Display calculated collision model in RViz
         void displayCollisionModel(const GeometryInformation& geometry_information, const Eigen::Vector4d& color = {0.1, 0.5, 0.2, 0.5});
@@ -302,11 +307,14 @@ class PathCollisionChecking : public rclcpp::Node
         //      shapes[i]: the shape description of geometery [i]
         //      geometry_transforms[i]: the transform of the collision geometry's [i] origin
         //      geometric_jacobians[i]: the jacobian matrix in the base frame at the collision geometry's [i] origin
-        void getCollisionModel(const KDL::JntArray& joint_positions, GeometryInformation& geometry_information) const;
+        void getCollisionModel(const KDL::JntArray& joint_positions, GeometryInformation& geometry_information,
+                       bool populate_shapes = true) const;
 
         // Helper function to add collision geometry from branch links not in the main kinematic chain
         // Returns a vector of link names corresponding to the added geometries
-        std::vector<std::string> addBranchCollisionGeometry(const KDL::JntArray& joint_positions, GeometryInformation& geometry_information) const;
+        std::vector<std::string> addBranchCollisionGeometry(const KDL::JntArray& joint_positions,
+                                    GeometryInformation& geometry_information,
+                                    bool populate_shapes = true) const;
 
         // Build collision exclusion list for adjacent and fixed links
         void buildCollisionExclusions();
@@ -372,16 +380,26 @@ class PathCollisionChecking : public rclcpp::Node
 
         // Whether to filter the robot's body from being considered in the octomap collision model or not
         bool filter_robot_;
+        bool publish_tested_joint_states_;
+        bool short_circuit_env_on_self_collision_;
+        bool log_collision_service_metrics_;
+        int collision_service_metrics_interval_;
 
         // Collision checking
         std::shared_ptr<robot_collision_checking::FCLInterfaceCollisionWorld> collision_world_;
         boost::mutex collision_world_mutex_;
         std::vector<robot_collision_checking::FCLCollisionGeometryPtr> robot_collision_geometry_;
+        std::vector<shapes::ShapeMsg> cached_robot_shape_msgs_;
+        std::vector<std::string> cached_robot_shape_link_names_;
         bool last_collision_state_ = false;
         bool last_self_collision_state_ = false;
         bool last_env_collision_state_ = false;
         std::map<std::pair<int, int>, bool> links_collision_states_;
         std::set<std::pair<int, int>> collision_exclusions_;  // Pairs of link indices that should never be checked
+        std::atomic<uint64_t> collision_service_call_count_{ 0 };
+        std::atomic<uint64_t> collision_service_total_ns_{ 0 };
+        std::atomic<uint64_t> collision_service_visualized_calls_{ 0 };
+        std::atomic<uint64_t> collision_service_short_circuit_count_{ 0 };
 
         // Robot kinematics
         KDL::Chain chain_;
@@ -389,6 +407,7 @@ class PathCollisionChecking : public rclcpp::Node
         std::unique_ptr<urdf::Model> model_;
         boost::scoped_ptr<KDL::ChainJntToJacSolver> kdl_dfk_solver_;
         boost::scoped_ptr<KDL::ChainFkSolverPos_recursive> kdl_fk_solver_;
+        boost::scoped_ptr<KDL::TreeFkSolverPos_recursive> kdl_tree_fk_solver_;
         std::vector<std::string> chain_segment_names_;  // All segment names for reference
         std::vector<std::string> collision_link_names_;  // Link names parallel to robot_collision_geometry_
 

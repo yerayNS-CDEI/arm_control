@@ -54,9 +54,8 @@ class PlannerNode(Node):
     def __init__(self):
         super().__init__('planner_node')
         
-        # Set logger level to INFO to see planning progress
-        # Use WARN to reduce verbose output in production
-        self.get_logger().set_level(rclpy.logging.LoggingSeverity.INFO)
+        # Default to WARN so trajectory validation does not spend time formatting hot-loop logs.
+        self.get_logger().set_level(rclpy.logging.LoggingSeverity.WARN)
         
         # Declare and get joint prefix parameter
         self.declare_parameter('joint_prefix', 'arm_')
@@ -67,6 +66,15 @@ class PlannerNode(Node):
         # Maximum number of IK solutions to test per waypoint (0 = test all 8 solutions)
         self.declare_parameter('max_ik_solutions_to_test', 1)
         self.max_ik_solutions_to_test = self.get_parameter('max_ik_solutions_to_test').get_parameter_value().integer_value
+
+        # Collision validation visualization is expensive because each service call may trigger
+        # marker publication and TF updates in the collision node. Keep it opt-in.
+        self.declare_parameter('visualize_collision_checks', False)
+        self.visualize_collision_checks = self.get_parameter('visualize_collision_checks').get_parameter_value().bool_value
+        self.declare_parameter('log_performance_metrics', True)
+        self.log_performance_metrics = self.get_parameter('log_performance_metrics').get_parameter_value().bool_value
+        self.declare_parameter('collision_metrics_log_interval', 50)
+        self.collision_metrics_log_interval = self.get_parameter('collision_metrics_log_interval').get_parameter_value().integer_value
 
         # Number of neighbor layers to mark around collision cells during replanning
         # 0 = mark only the collision cell itself
@@ -106,6 +114,7 @@ class PlannerNode(Node):
         self._planning_active = False
         self._planning_thread = None
         self._plan_generation = 0
+        self._reset_plan_metrics()
 
         # TF buffer and listener to query transforms dynamically
         self.tf_buffer = tf2_ros.Buffer()
@@ -1656,9 +1665,64 @@ class PlannerNode(Node):
 
     def _fail_current_goal(self, message: str):
         self.get_logger().error(message)
+        self._log_plan_metrics('failed')
         with self._state_lock:
             self.execution_complete = True
         self.publish_planner_goal_failed(True)
+
+    def _reset_plan_metrics(self):
+        self._plan_started_at = None
+        self._plan_metrics_logged = False
+        self._collision_check_call_count = 0
+        self._collision_check_total_sec = 0.0
+        self._collision_check_free_count = 0
+        self._collision_check_collision_count = 0
+        self._collision_check_failed_count = 0
+
+    def _start_plan_metrics(self):
+        self._reset_plan_metrics()
+        self._plan_started_at = time.monotonic()
+
+    def _record_collision_check_metric(self, status: CollisionCheckStatus, elapsed_sec: float):
+        self._collision_check_call_count += 1
+        self._collision_check_total_sec += float(elapsed_sec)
+        if status == CollisionCheckStatus.FREE:
+            self._collision_check_free_count += 1
+        elif status == CollisionCheckStatus.COLLISION:
+            self._collision_check_collision_count += 1
+        else:
+            self._collision_check_failed_count += 1
+
+        if (
+            self.log_performance_metrics
+            and self.collision_metrics_log_interval > 0
+            and self._collision_check_call_count % self.collision_metrics_log_interval == 0
+        ):
+            avg_ms = (self._collision_check_total_sec / self._collision_check_call_count) * 1000.0
+            self.get_logger().warn(
+                f"Planner collision metrics: checks={self._collision_check_call_count} "
+                f"avg_ms={avg_ms:.2f} free={self._collision_check_free_count} "
+                f"collision={self._collision_check_collision_count} "
+                f"failed={self._collision_check_failed_count}"
+            )
+
+    def _log_plan_metrics(self, outcome: str):
+        if (not self.log_performance_metrics) or self._plan_started_at is None or self._plan_metrics_logged:
+            return
+
+        total_sec = time.monotonic() - self._plan_started_at
+        avg_collision_ms = 0.0
+        if self._collision_check_call_count > 0:
+            avg_collision_ms = (self._collision_check_total_sec / self._collision_check_call_count) * 1000.0
+
+        self.get_logger().warn(
+            f"Planner metrics [{outcome}]: total_sec={total_sec:.2f} "
+            f"collision_checks={self._collision_check_call_count} "
+            f"avg_collision_ms={avg_collision_ms:.2f} free={self._collision_check_free_count} "
+            f"collision={self._collision_check_collision_count} "
+            f"failed={self._collision_check_failed_count}"
+        )
+        self._plan_metrics_logged = True
 
     def _snapshot_planning_inputs(self):
         with self._state_lock:
@@ -1816,8 +1880,14 @@ class PlannerNode(Node):
             CollisionCheckStatus indicating whether the tested state is free,
             in collision, or could not be validated.
         """
+        started_at = time.monotonic()
+
+        def finish(status):
+            self._record_collision_check_metric(status, time.monotonic() - started_at)
+            return status
+
         if not self.collision_check_client.service_is_ready():
-            return CollisionCheckStatus.CHECK_FAILED
+            return finish(CollisionCheckStatus.CHECK_FAILED)
         
         # Create JointState message
         # IMPORTANT: Collision service expects joint names WITHOUT prefix (e.g., 'shoulder_pan_joint' not 'arm_shoulder_pan_joint')
@@ -1853,7 +1923,7 @@ class PlannerNode(Node):
                     if cancel_check is not None and cancel_check():
                         future.cancel()
                         self.get_logger().warn("Collision validation cancelled because planning was aborted.")
-                        return CollisionCheckStatus.CHECK_FAILED
+                        return finish(CollisionCheckStatus.CHECK_FAILED)
 
                     remaining = deadline - time.monotonic()
                     if remaining <= 0.0:
@@ -1866,7 +1936,7 @@ class PlannerNode(Node):
                             self.get_logger().warn(
                                 f"Collision check timed out after {timeout_sec}s (final attempt {attempt + 1}/{max_retries + 1})"
                             )
-                            return CollisionCheckStatus.CHECK_FAILED
+                            return finish(CollisionCheckStatus.CHECK_FAILED)
 
                     if response_event.wait(timeout=min(0.05, remaining)):
                         if result_container['error']:
@@ -1879,10 +1949,10 @@ class PlannerNode(Node):
                                 self.get_logger().warn(
                                     f"Collision check service error (final attempt {attempt + 1}/{max_retries + 1}): {result_container['error']}"
                                 )
-                                return CollisionCheckStatus.CHECK_FAILED
+                                return finish(CollisionCheckStatus.CHECK_FAILED)
                         
                         # Success! Return the result
-                        return (
+                        return finish(
                             CollisionCheckStatus.COLLISION
                             if result_container['response'].in_collision
                             else CollisionCheckStatus.FREE
@@ -1897,10 +1967,10 @@ class PlannerNode(Node):
                     self.get_logger().warn(
                         f"Collision check service call failed (final attempt {attempt + 1}/{max_retries + 1}): {e}"
                     )
-                    return CollisionCheckStatus.CHECK_FAILED
+                    return finish(CollisionCheckStatus.CHECK_FAILED)
         
         # Should not reach here, but for safety
-        return CollisionCheckStatus.CHECK_FAILED
+        return finish(CollisionCheckStatus.CHECK_FAILED)
 
     def _select_best_collision_free_solution(
         self,
@@ -1974,7 +2044,7 @@ class PlannerNode(Node):
             dist = sorted_distances[i]
             
             # Use existing collision check function (properly handles async service calls)
-            visualize = (i == 0)  # Only visualize first (closest) solution
+            visualize = self.visualize_collision_checks and (i == 0)
             collision_status = self._check_collision_sync(
                 solution,
                 publish_visualization=visualize,
@@ -2019,6 +2089,7 @@ class PlannerNode(Node):
         return None, IKSelectionOutcome.ALL_IN_COLLISION
 
     def plan_and_send_trajectory(self, msg: PoseStamped, plan_generation=None):
+        self._start_plan_metrics()
         current_joint_state, end_effector_pose, joint_indices = self._snapshot_planning_inputs()
 
         if self._abort_if_requested(plan_generation, "goal was cancelled before planning state was snapshotted"):
@@ -2555,12 +2626,11 @@ class PlannerNode(Node):
                 with self._state_lock:
                     self.execution_complete = True  # Mark execution as complete to allow new goals
                 self.publish_planner_goal_failed(True)
+                self._log_plan_metrics('astar_no_path')
                 return
 
             # Convert path to world coordinates
             path_world_raw = [grid_to_world(i, j, k, self.x_vals, self.y_vals, self.z_vals) for i, j, k in path]
-            self.get_logger().info(f"Raw path waypoints (pre-prune): {path_world_raw}")
-
             # Keep grid indices for distance-based orientation calculation (matches A*)
             path_grid_indices = path  # Store grid indices before pruning
 
@@ -2773,7 +2843,6 @@ class PlannerNode(Node):
                 else:
                     q_current = q_current_initial.copy()
             
-            self.get_logger().info(f"Current joint state = {q_current}")
             all_joint_values_print.append(q_current)
 
             # Process waypoints with collision checking (only validate specified range)
@@ -2783,8 +2852,6 @@ class PlannerNode(Node):
 
                 T = create_pose_matrix(path_world[i], interp_rot_matrices[i])
                 ik_solutions = closed_form_algorithm(T, q_current=q_current, type=0, return_all_solutions=True)
-                self.get_logger().info(f"IK solutions for waypoint {i}: {ik_solutions}")
-
                 # Select best collision-free solution
                 q_new, selection_outcome = self._select_best_collision_free_solution(
                     ik_solutions,
@@ -3234,6 +3301,7 @@ class PlannerNode(Node):
             with self._state_lock:
                 self.execution_complete = True
             self.publish_planner_goal_failed(True)
+            self._log_plan_metrics('jump_detected')
             return
 
         self.get_logger().info(f"Joint values: {all_joint_values_print}")
@@ -3276,6 +3344,7 @@ class PlannerNode(Node):
         self.trajectory_pub.publish(traj_msg)
         self.publish_planner_goal_failed(False)
         self.get_logger().info("Published planned trajectory.")
+        self._log_plan_metrics('success')
     
     def publish_cylinder_marker(self, center_xy, radius, z_min, z_max):
         """Publish a cylinder marker for RViz visualization."""

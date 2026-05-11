@@ -60,6 +60,10 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     double lin_limit = this->declare_parameter<double>("linearization_limit", 0.1);
 
     filter_robot_ = this->declare_parameter<bool>("filter_robot", false);
+    publish_tested_joint_states_ = this->declare_parameter<bool>("publish_tested_joint_states", false);
+    short_circuit_env_on_self_collision_ = this->declare_parameter<bool>("short_circuit_env_on_self_collision", true);
+    log_collision_service_metrics_ = this->declare_parameter<bool>("log_collision_service_metrics", true);
+    collision_service_metrics_interval_ = this->declare_parameter<int>("collision_service_metrics_interval", 50);
 
     // TF properties
     buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -163,6 +167,7 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
 
     kdl_fk_solver_.reset(new KDL::ChainFkSolverPos_recursive(chain_));
     kdl_dfk_solver_.reset(new KDL::ChainJntToJacSolver(chain_));
+    kdl_tree_fk_solver_.reset(new KDL::TreeFkSolverPos_recursive(tree_));
 
     int mvable_jnt(0);
     std::vector<std::string> joint_names(ndof_);
@@ -237,6 +242,8 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
             mvable_jnt++;
         }
     }
+
+    buildStaticCollisionShapeCache();
 
     // Set active joint states as a parameter
     this->declare_parameter("active_dof", std::vector<std::string>{});
@@ -590,6 +597,9 @@ void PathCollisionChecking::updateCollisionObjectPoseStampedCallback(
 void PathCollisionChecking::checkCollisionPoseCallback(const std::shared_ptr<arm_control::srv::CheckCollisionPose::Request> req,
                                                         std::shared_ptr<arm_control::srv::CheckCollisionPose::Response> res)
 {
+    const auto started_at = std::chrono::steady_clock::now();
+    bool env_check_skipped = false;
+
     try 
     {
         // Merge incoming partial joint state with current real robot state
@@ -597,10 +607,13 @@ void PathCollisionChecking::checkCollisionPoseCallback(const std::shared_ptr<arm
         sensor_msgs::msg::JointState prefixed_state = convertToNamespaceJointState(merged_state);
 
         bool self_col, env_col;
-        res->in_collision = evaluateCollisionState(prefixed_state, self_col, env_col, req->publish_visualization);
+        res->in_collision = evaluateCollisionState(
+            prefixed_state, self_col, env_col, req->publish_visualization, &env_check_skipped);
         
-        // Always publish joint states so the collision robot visualization stays at the tested configuration
-        evaluated_joint_pub_->publish(prefixed_state);
+        if (publish_tested_joint_states_ || req->publish_visualization)
+        {
+            evaluated_joint_pub_->publish(prefixed_state);
+        }
     } 
     catch (const std::exception& e) 
     {
@@ -612,6 +625,10 @@ void PathCollisionChecking::checkCollisionPoseCallback(const std::shared_ptr<arm
         RCLCPP_ERROR(this->get_logger(), "Unknown error in checkCollisionPoseCallback");
         res->in_collision = true;
     }
+
+    const auto elapsed_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - started_at).count());
+    maybeLogCollisionServiceMetrics(elapsed_ns, req->publish_visualization, env_check_skipped);
 }
 
 sensor_msgs::msg::JointState PathCollisionChecking::mergeJointStates(const sensor_msgs::msg::JointState& partial) const
@@ -1069,9 +1086,17 @@ bool PathCollisionChecking::removeCollisionObject(int object_id)
     return collision_world_->removeCollisionObject(object_id);
 }
 
-bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::JointState& joint_state, bool& self_collision, bool& env_collision, bool publish_visualization)
+bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::JointState& joint_state,
+                                                   bool& self_collision,
+                                                   bool& env_collision,
+                                                   bool publish_visualization,
+                                                   bool* env_check_skipped)
 {
-    RCLCPP_INFO(this->get_logger(), "=== evaluateCollisionState START ===");
+    if (env_check_skipped != nullptr)
+    {
+        *env_check_skipped = false;
+    }
+
     KDL::JntArray kdl_joint_positions(ndof_);
     jointStatetoKDLJointArray(chain_, joint_state, kdl_joint_positions);
     
@@ -1080,86 +1105,71 @@ bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::Joint
     kdl_tree_joint_positions.data.setZero();
     jointStatetoKDLTreeJointArray(tree_, joint_state, kdl_tree_joint_positions);
 
-    RCLCPP_INFO(this->get_logger(), "Getting collision model...");
-    GeometryInformation geometry_information;
-    getCollisionModel(kdl_joint_positions, geometry_information);
-    std::vector<std::string> branch_link_names = addBranchCollisionGeometry(kdl_tree_joint_positions, geometry_information);
-    
-    RCLCPP_INFO(this->get_logger(), "Collision model retrieved: %zu shapes (%zu from branches), %zu transforms, %zu jacobians",
-                geometry_information.shapes.size(), branch_link_names.size(),
-                geometry_information.geometry_transforms.size(), 
-                geometry_information.geometry_jacobians.size());
+    bool need_shape_data = cached_robot_shape_msgs_.empty();
 
-    std::vector<shapes::ShapeMsg> current_shapes;
-    std::vector<geometry_msgs::msg::Pose> shapes_poses;
-    RCLCPP_INFO(this->get_logger(), "Converting collision model...");
-    convertCollisionModel(geometry_information, current_shapes, shapes_poses);
-    RCLCPP_INFO(this->get_logger(), "Converted to %zu shapes", current_shapes.size());
+    GeometryInformation geometry_information;
+    getCollisionModel(kdl_joint_positions, geometry_information, need_shape_data);
+    std::vector<std::string> branch_link_names = addBranchCollisionGeometry(
+        kdl_tree_joint_positions, geometry_information, need_shape_data);
 
     if (robot_collision_geometry_.size() == 0)
     {
-        RCLCPP_INFO(this->get_logger(), "Creating robot collision model for the first time...");
         createRobotCollisionModel(geometry_information, branch_link_names);
-        RCLCPP_INFO(this->get_logger(), "Created %zu collision geometries", robot_collision_geometry_.size());
         
         // Build collision exclusions for adjacent and fixed links
         buildCollisionExclusions();
     }
     
     // Validate sizes match
-    if (robot_collision_geometry_.size() != geometry_information.shapes.size())
+    const size_t num_collision_geometries = geometry_information.geometry_transforms.size();
+    if (robot_collision_geometry_.size() != num_collision_geometries)
     {
+        if (!need_shape_data)
+        {
+            geometry_information.clear();
+            getCollisionModel(kdl_joint_positions, geometry_information, true);
+            branch_link_names = addBranchCollisionGeometry(kdl_tree_joint_positions, geometry_information, true);
+            need_shape_data = true;
+        }
+
         RCLCPP_ERROR(this->get_logger(), 
-                     "Size mismatch: robot_collision_geometry_ has %zu elements but geometry_information has %zu shapes. Recreating collision model.",
-                     robot_collision_geometry_.size(), geometry_information.shapes.size());
+                     "Size mismatch: robot_collision_geometry_ has %zu elements but geometry_information has %zu transforms. Recreating collision model.",
+                     robot_collision_geometry_.size(), geometry_information.geometry_transforms.size());
         robot_collision_geometry_.clear();
         createRobotCollisionModel(geometry_information, branch_link_names);
         buildCollisionExclusions();
     }
 
-    RCLCPP_INFO(this->get_logger(), "Acquiring collision world mutex...");
     boost::mutex::scoped_lock lock(collision_world_mutex_);
 
-    RCLCPP_INFO(this->get_logger(), "Checking self collision...");
     self_collision = checkSelfCollision(geometry_information);
-    RCLCPP_INFO(this->get_logger(), "Self collision check complete: %s", self_collision ? "COLLISION" : "clear");
 
     // Display collision model if visualization requested
     if (publish_visualization) {
         displayCollisionModel(geometry_information, {0.1, 0.8, 0.1, 0.6});  // Green with transparency
     }
 
-    RCLCPP_INFO(this->get_logger(), "Checking environment collision against %d world objects...", 
-                collision_world_->getNumObjects());
+    if (self_collision && short_circuit_env_on_self_collision_ && !publish_visualization)
+    {
+        if (env_check_skipped != nullptr)
+        {
+            *env_check_skipped = true;
+        }
+        env_collision = false;
+        return true;
+    }
+
     env_collision = false;
-    int num_shapes = geometry_information.shapes.size();
+    int num_shapes = geometry_information.geometry_transforms.size();
     for (int i = 0; i < num_shapes; i++)
     {
-        Eigen::Affine3d obj_pose;
-        tf2::fromMsg(shapes_poses[i], obj_pose);
         std::vector<int> collision_object_ids;
 
         fcl::Transform3d world_to_fcl;
-        robot_collision_checking::FCLCollisionObjectPtr co;
-
-        if (current_shapes[i].which() == 0)
-        {
-            auto obj = std::make_shared<robot_collision_checking::FCLObject>(
-                boost::get<shape_msgs::msg::SolidPrimitive>(current_shapes[i]), obj_pose);
-            robot_collision_checking::fcl_interface::transform2fcl(obj->object_transform, world_to_fcl);
-            co = std::make_shared<fcl::CollisionObjectd>(robot_collision_geometry_[i], world_to_fcl);
-        }
-        else if (current_shapes[i].which() == 1)
-        {
-            auto obj = std::make_shared<robot_collision_checking::FCLObject>(
-                boost::get<shape_msgs::msg::Mesh>(current_shapes[i]), robot_collision_checking::MESH, obj_pose);
-            robot_collision_checking::fcl_interface::transform2fcl(obj->object_transform, world_to_fcl);
-            co = std::make_shared<fcl::CollisionObjectd>(robot_collision_geometry_[i], world_to_fcl);
-        }
-        else
-        {
-            continue;
-        }
+        robot_collision_checking::fcl_interface::transform2fcl(
+            geometry_information.geometry_transforms[i], world_to_fcl);
+        robot_collision_checking::FCLCollisionObjectPtr co =
+            std::make_shared<fcl::CollisionObjectd>(robot_collision_geometry_[i], world_to_fcl);
 
         if (collision_world_->checkCollisionObject(co, collision_object_ids))
         {
@@ -1170,8 +1180,6 @@ bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::Joint
         }
     }
     
-    RCLCPP_INFO(this->get_logger(), "Environment collision check complete: %s", env_collision ? "COLLISION" : "clear");
-
     return self_collision || env_collision;
 }
 
@@ -1179,7 +1187,7 @@ bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::Joint
 bool PathCollisionChecking::checkSelfCollision(const GeometryInformation& geometry_information)
 {
     bool any_collision_active = false;
-    int n = geometry_information.shapes.size();
+    int n = geometry_information.geometry_transforms.size();
     int n_names = static_cast<int>(collision_link_names_.size());
     int n_geom = static_cast<int>(robot_collision_geometry_.size());
 
@@ -1489,11 +1497,26 @@ void PathCollisionChecking::displayCollisionModel(const GeometryInformation& geo
     // Publish robot collision geometry (green mesh)
     auto marker_array_msg = std::make_shared<visualization_msgs::msg::MarkerArray>();
 
-    int num_shapes = geometry_information.shapes.size();
+    std::vector<shapes::ShapeMsg> current_shapes;
+    std::vector<geometry_msgs::msg::Pose> shapes_poses;
+    convertCollisionModel(geometry_information, current_shapes, shapes_poses);
+
+    int num_shapes = current_shapes.size();
     for (int i = 0; i < num_shapes; ++i)
     {
         visualization_msgs::msg::Marker mkr;
-        shapes::constructMarkerFromShape(geometry_information.shapes[i].get(), mkr);
+        if (current_shapes[i].which() == 0)
+        {
+            geometric_shapes::constructMarkerFromShape(boost::get<shape_msgs::msg::SolidPrimitive>(current_shapes[i]), mkr);
+        }
+        else if (current_shapes[i].which() == 1)
+        {
+            geometric_shapes::constructMarkerFromShape(boost::get<shape_msgs::msg::Mesh>(current_shapes[i]), mkr);
+        }
+        else
+        {
+            continue;
+        }
         mkr.ns = "collision_body";
         mkr.header.frame_id = visualization_frame_;
         mkr.action = visualization_msgs::msg::Marker::ADD;
@@ -1504,14 +1527,7 @@ void PathCollisionChecking::displayCollisionModel(const GeometryInformation& geo
         mkr.color.b = color(2);
         mkr.color.a = color(3);
 
-        Eigen::Quaterniond q(geometry_information.geometry_transforms[i].linear());
-        mkr.pose.position.x = geometry_information.geometry_transforms[i](0, 3);
-        mkr.pose.position.y = geometry_information.geometry_transforms[i](1, 3);
-        mkr.pose.position.z = geometry_information.geometry_transforms[i](2, 3);
-        mkr.pose.orientation.w = q.w();
-        mkr.pose.orientation.x = q.x();
-        mkr.pose.orientation.y = q.y();
-        mkr.pose.orientation.z = q.z();
+        mkr.pose = shapes_poses[i];
 
         // Safety check: ensure scale is never zero (RViz warning for invalid scale)
         if (mkr.scale.x <= 0.0) mkr.scale.x = 0.01;
@@ -1604,14 +1620,30 @@ void PathCollisionChecking::convertCollisionModel(const GeometryInformation& geo
                                                       std::vector<shapes::ShapeMsg>& current_shapes,
                                                       std::vector<geometry_msgs::msg::Pose>& shapes_poses) const
 {
-    int num_shapes = geometry_information.shapes.size();
+    int num_shapes = geometry_information.geometry_transforms.size();
     current_shapes.resize(num_shapes);
     shapes_poses.resize(num_shapes);
 
+    const bool use_dynamic_shapes = geometry_information.shapes.size() == static_cast<size_t>(num_shapes);
+    const bool use_cached_shapes = cached_robot_shape_msgs_.size() == static_cast<size_t>(num_shapes);
+
     for (int i = 0; i < num_shapes; i++)
     {
-        shapes::ShapeMsg current_shape;
-        shapes::constructMsgFromShape(geometry_information.shapes[i].get(), current_shapes[i]);
+        if (use_dynamic_shapes)
+        {
+            shapes::constructMsgFromShape(geometry_information.shapes[i].get(), current_shapes[i]);
+        }
+        else if (use_cached_shapes)
+        {
+            current_shapes[i] = cached_robot_shape_msgs_[i];
+        }
+        else
+        {
+            current_shapes.clear();
+            shapes_poses.clear();
+            RCLCPP_ERROR(this->get_logger(), "No cached shape data available for %d collision transforms", num_shapes);
+            return;
+        }
         
         shapes_poses[i] = tf2::toMsg(geometry_information.geometry_transforms[i]);
     }
@@ -1624,26 +1656,28 @@ void PathCollisionChecking::createRobotCollisionModel(const GeometryInformation&
     std::vector<geometry_msgs::msg::Pose> shapes_poses;
     convertCollisionModel(geometry_information, current_shapes, shapes_poses);
 
-    int num_shapes = geometry_information.shapes.size();
+    int num_shapes = current_shapes.size();
     
     // Clear and rebuild collision geometry cache and corresponding link names
     robot_collision_geometry_.clear();
     collision_link_names_.clear();
     
     // Build mapping from shape index to segment name (chain segments)
-    std::vector<std::string> shape_link_names;
-    for (int i = 0; i < static_cast<int>(chain_.getNrOfSegments()); ++i)
+    std::vector<std::string> shape_link_names = cached_robot_shape_link_names_;
+    if (shape_link_names.size() != static_cast<size_t>(num_shapes))
     {
-        KDL::Segment seg = chain_.getSegment(i);
-        urdf::CollisionSharedPtr link_coll = model_->links_.at(seg.getName())->collision;
-        if (link_coll != nullptr)
+        shape_link_names.clear();
+        for (int i = 0; i < static_cast<int>(chain_.getNrOfSegments()); ++i)
         {
-            shape_link_names.push_back(seg.getName());
+            KDL::Segment seg = chain_.getSegment(i);
+            urdf::CollisionSharedPtr link_coll = model_->links_.at(seg.getName())->collision;
+            if (link_coll != nullptr)
+            {
+                shape_link_names.push_back(seg.getName());
+            }
         }
+        shape_link_names.insert(shape_link_names.end(), additional_link_names.begin(), additional_link_names.end());
     }
-    
-    // Append branch link names
-    shape_link_names.insert(shape_link_names.end(), additional_link_names.begin(), additional_link_names.end());
     
     for (int i = 0; i < num_shapes; i++)
     {
@@ -1697,6 +1731,94 @@ void PathCollisionChecking::createRobotCollisionModel(const GeometryInformation&
     
     RCLCPP_INFO(this->get_logger(), "Built collision model: %zu geometries, %zu link names", 
                 robot_collision_geometry_.size(), collision_link_names_.size());
+}
+
+void PathCollisionChecking::buildStaticCollisionShapeCache()
+{
+    cached_robot_shape_msgs_.clear();
+    cached_robot_shape_link_names_.clear();
+
+    auto append_cached_shape = [this](const std::string& link_name, const urdf::CollisionSharedPtr& link_collision,
+                                      std::vector<shapes::ShapeMsg>& shape_msgs,
+                                      std::vector<std::string>& link_names) {
+        std::unique_ptr<shapes::Shape> shape = constructShape(link_collision->geometry.get());
+        if (!shape)
+        {
+            RCLCPP_WARN(this->get_logger(), "Failed to build cached shape for link: %s", link_name.c_str());
+            return;
+        }
+
+        shapes::ShapeMsg shape_msg;
+        if (!shapes::constructMsgFromShape(shape.get(), shape_msg))
+        {
+            RCLCPP_WARN(this->get_logger(), "Failed to convert cached shape for link: %s", link_name.c_str());
+            return;
+        }
+
+        shape_msgs.push_back(shape_msg);
+        link_names.push_back(link_name);
+    };
+
+    std::set<std::string> chain_links;
+    for (int i = 0; i < static_cast<int>(chain_.getNrOfSegments()); ++i)
+    {
+        const std::string& link_name = chain_.getSegment(i).getName();
+        chain_links.insert(link_name);
+
+        urdf::CollisionSharedPtr link_collision = model_->links_.at(link_name)->collision;
+        if (link_collision != nullptr)
+        {
+            append_cached_shape(link_name, link_collision, cached_robot_shape_msgs_, cached_robot_shape_link_names_);
+        }
+    }
+
+    for (const auto& link_pair : model_->links_)
+    {
+        const std::string& link_name = link_pair.first;
+        const urdf::LinkSharedPtr& link = link_pair.second;
+
+        if (chain_links.find(link_name) != chain_links.end() || !link->collision)
+        {
+            continue;
+        }
+
+        append_cached_shape(link_name, link->collision, cached_robot_shape_msgs_, cached_robot_shape_link_names_);
+    }
+
+    RCLCPP_INFO(this->get_logger(), "Built static collision shape cache: %zu shapes", cached_robot_shape_msgs_.size());
+}
+
+void PathCollisionChecking::maybeLogCollisionServiceMetrics(uint64_t elapsed_ns, bool requested_visualization,
+                                                            bool env_check_skipped)
+{
+    if (!log_collision_service_metrics_)
+    {
+        return;
+    }
+
+    const uint64_t call_count = collision_service_call_count_.fetch_add(1) + 1;
+    collision_service_total_ns_.fetch_add(elapsed_ns);
+    if (requested_visualization)
+    {
+        collision_service_visualized_calls_.fetch_add(1);
+    }
+    if (env_check_skipped)
+    {
+        collision_service_short_circuit_count_.fetch_add(1);
+    }
+
+    if (collision_service_metrics_interval_ > 0 && (call_count % static_cast<uint64_t>(collision_service_metrics_interval_) == 0))
+    {
+        const double avg_ms = static_cast<double>(collision_service_total_ns_.load()) /
+                              static_cast<double>(call_count) / 1.0e6;
+        RCLCPP_WARN(this->get_logger(),
+                    "Collision service metrics: calls=%llu avg_ms=%.2f visualized=%llu self_short_circuits=%llu last_ms=%.2f",
+                    static_cast<unsigned long long>(call_count),
+                    avg_ms,
+                    static_cast<unsigned long long>(collision_service_visualized_calls_.load()),
+                    static_cast<unsigned long long>(collision_service_short_circuit_count_.load()),
+                    static_cast<double>(elapsed_ns) / 1.0e6);
+    }
 }
 
 std::unique_ptr<shapes::Shape> PathCollisionChecking::constructShape(const urdf::Geometry* geom) const
@@ -1767,7 +1889,9 @@ void PathCollisionChecking::getKDLKinematicInformation(const KDL::JntArray& kdl_
     Jac = base_J_link_origin.data;
 }
 
-void PathCollisionChecking::getCollisionModel(const KDL::JntArray& kdl_joint_positions, GeometryInformation& geometry_information) const
+void PathCollisionChecking::getCollisionModel(const KDL::JntArray& kdl_joint_positions,
+                                              GeometryInformation& geometry_information,
+                                              bool populate_shapes) const
 {
     geometry_information.clear();
     Eigen::Affine3d link_origin_T_collision_origin, base_T_link_origin, base_T_collision_origin;
@@ -1790,37 +1914,46 @@ void PathCollisionChecking::getCollisionModel(const KDL::JntArray& kdl_joint_pos
             continue;
         }
         
-        // Get collision geometry's shape
-        std::unique_ptr<shapes::Shape> shape = constructShape(link_coll->geometry.get());
-            // Get collision origin
-            Eigen::Vector3d origin_Trans_collision(link_coll->origin.position.x, 
-                                                   link_coll->origin.position.y, 
-                                                   link_coll->origin.position.z);
+        std::unique_ptr<shapes::Shape> shape;
+        if (populate_shapes)
+        {
+            shape = constructShape(link_coll->geometry.get());
+        }
 
-            Eigen::Quaterniond origin_Quat_collision(link_coll->origin.rotation.w, 
-                                                     link_coll->origin.rotation.x, 
-                                                     link_coll->origin.rotation.y, 
-                                                     link_coll->origin.rotation.z);
+        // Get collision origin
+        Eigen::Vector3d origin_Trans_collision(link_coll->origin.position.x, 
+                                               link_coll->origin.position.y, 
+                                               link_coll->origin.position.z);
 
-            link_origin_T_collision_origin.translation() = origin_Trans_collision;
-            link_origin_T_collision_origin.linear() = origin_Quat_collision.toRotationMatrix();
+        Eigen::Quaterniond origin_Quat_collision(link_coll->origin.rotation.w, 
+                                                 link_coll->origin.rotation.x, 
+                                                 link_coll->origin.rotation.y, 
+                                                 link_coll->origin.rotation.z);
 
-            // Finds cartesian pose w.r.t to base frame
-            Eigen::Matrix<double, 6, Eigen::Dynamic> base_J_collision_origin, base_J_link_origin;
-            getKDLKinematicInformation(kdl_joint_positions, base_T_link_origin, base_J_link_origin, i + 1);
-            base_T_collision_origin = base_T_link_origin * link_origin_T_collision_origin;
-            Eigen::Vector3d base_L_link_collision = (base_T_link_origin.linear() * link_origin_T_collision_origin.translation());
-            // Screw transform to collision origin
-            screwTransform(base_J_link_origin, base_L_link_collision, base_J_collision_origin);
+        link_origin_T_collision_origin.translation() = origin_Trans_collision;
+        link_origin_T_collision_origin.linear() = origin_Quat_collision.toRotationMatrix();
 
-            // Push back solutions
+        // Finds cartesian pose w.r.t to base frame
+        Eigen::Matrix<double, 6, Eigen::Dynamic> base_J_collision_origin, base_J_link_origin;
+        getKDLKinematicInformation(kdl_joint_positions, base_T_link_origin, base_J_link_origin, i + 1);
+        base_T_collision_origin = base_T_link_origin * link_origin_T_collision_origin;
+        Eigen::Vector3d base_L_link_collision = (base_T_link_origin.linear() * link_origin_T_collision_origin.translation());
+        // Screw transform to collision origin
+        screwTransform(base_J_link_origin, base_L_link_collision, base_J_collision_origin);
+
+        // Push back solutions
+        if (populate_shapes)
+        {
             geometry_information.shapes.push_back(std::move(shape));
-            geometry_information.geometry_transforms.push_back(base_T_collision_origin);
-            geometry_information.geometry_jacobians.push_back(base_J_collision_origin);
+        }
+        geometry_information.geometry_transforms.push_back(base_T_collision_origin);
+        geometry_information.geometry_jacobians.push_back(base_J_collision_origin);
     }
 }
 
-std::vector<std::string> PathCollisionChecking::addBranchCollisionGeometry(const KDL::JntArray& joint_positions, GeometryInformation& geometry_information) const
+std::vector<std::string> PathCollisionChecking::addBranchCollisionGeometry(const KDL::JntArray& joint_positions,
+                                                                           GeometryInformation& geometry_information,
+                                                                           bool populate_shapes) const
 {
     std::vector<std::string> branch_link_names;  // Track names of added branch links
     
@@ -1847,25 +1980,27 @@ std::vector<std::string> PathCollisionChecking::addBranchCollisionGeometry(const
 
         RCLCPP_DEBUG(this->get_logger(), "Processing branch link: %s", link_name.c_str());
 
-        // Compute forward kinematics for this branch link using the tree
-        KDL::TreeFkSolverPos_recursive tree_fk_solver(tree_);
         KDL::Frame link_frame;
         
         // The tree FK solver can work with the same joint positions as the chain
         // since branch links are typically fixed joints off chain segments
-        int fk_result = tree_fk_solver.JntToCart(joint_positions, link_frame, link_name);
+        int fk_result = kdl_tree_fk_solver_->JntToCart(joint_positions, link_frame, link_name);
         if (fk_result < 0)
         {
             RCLCPP_WARN(this->get_logger(), "FK failed for branch link: %s", link_name.c_str());
             continue;
         }
 
-        // Get collision geometry shape
-        std::unique_ptr<shapes::Shape> shape = constructShape(link->collision->geometry.get());
-        if (!shape)
+        std::unique_ptr<shapes::Shape> shape;
+        if (populate_shapes)
         {
-            RCLCPP_WARN(this->get_logger(), "Failed to construct shape for branch link: %s", link_name.c_str());
-            continue;
+            // Get collision geometry shape
+            shape = constructShape(link->collision->geometry.get());
+            if (!shape)
+            {
+                RCLCPP_WARN(this->get_logger(), "Failed to construct shape for branch link: %s", link_name.c_str());
+                continue;
+            }
         }
 
         // Get collision origin transform
@@ -1894,7 +2029,10 @@ std::vector<std::string> PathCollisionChecking::addBranchCollisionGeometry(const
         zero_jacobian.setZero();
 
         // Add to geometry information
-        geometry_information.shapes.push_back(std::move(shape));
+        if (populate_shapes)
+        {
+            geometry_information.shapes.push_back(std::move(shape));
+        }
         geometry_information.geometry_transforms.push_back(base_T_collision_origin);
         geometry_information.geometry_jacobians.push_back(zero_jacobian);
         branch_link_names.push_back(link_name);  // Track this link name
