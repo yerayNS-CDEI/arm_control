@@ -93,6 +93,10 @@ class RobotControlUI(QMainWindow):
         
         # Emergency stop UI state
         self.emergency_stop_active = False
+        self.freedrive_active = False
+        self.freedrive_transition_in_progress = False
+        self.freedrive_transition_target_active = False
+        self.freedrive_trajectory_controller = None
  
         # Robot dashboard connection
         self.robot_socket = None
@@ -293,10 +297,19 @@ class RobotControlUI(QMainWindow):
             'unlock protective stop'
         ])
         init_layout.addWidget(self.control_cmd_combo)
- 
+
         btn_send_control = QPushButton("Send Control Command")
         btn_send_control.clicked.connect(lambda: self.send_control_command())
         init_layout.addWidget(btn_send_control)
+
+        init_layout.addWidget(QLabel("Freedrive Mode:"))
+        self.btn_arm_freedrive = QPushButton("Start Freedrive")
+        self.btn_arm_freedrive.clicked.connect(lambda: self.toggle_freedrive(context='arm'))
+        self.btn_arm_freedrive.setToolTip(
+            "Start freedrive with controller switch + keepalive publisher. "
+            "Click again to stop freedrive and restore joint_trajectory_controller."
+        )
+        init_layout.addWidget(self.btn_arm_freedrive)
  
         init_layout.addStretch()
         boxes_layout.addWidget(init_box)
@@ -820,12 +833,23 @@ class RobotControlUI(QMainWindow):
             'unlock protective stop'
         ])
         full_control_init_layout.addWidget(self.full_control_control_cmd_combo)
-        
+
         btn_full_control_send_control = QPushButton("Send Control Command")
         btn_full_control_send_control.clicked.connect(
             lambda: self.send_full_control_control_command()
         )
         full_control_init_layout.addWidget(btn_full_control_send_control)
+
+        full_control_init_layout.addWidget(QLabel("Freedrive Mode:"))
+        self.btn_full_control_freedrive = QPushButton("Start Freedrive")
+        self.btn_full_control_freedrive.clicked.connect(
+            lambda: self.toggle_freedrive(context='full')
+        )
+        self.btn_full_control_freedrive.setToolTip(
+            "Start freedrive with controller switch + keepalive publisher. "
+            "Click again to stop freedrive and restore joint_trajectory_controller."
+        )
+        full_control_init_layout.addWidget(self.btn_full_control_freedrive)
 
         full_control_init_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_init_box)
@@ -1160,6 +1184,7 @@ class RobotControlUI(QMainWindow):
         
         # Initial UI update for consistent visuals
         self._update_emergency_stop_button_ui()
+        self._update_freedrive_button_ui()
         self.BASE_TAB_INDEX = 0
         self.ARM_TAB_INDEX = 1
         self.JOINT_TAB_INDEX = 2
@@ -1670,6 +1695,420 @@ class RobotControlUI(QMainWindow):
         else:
             # User was scrolled up, maintain their position
             scrollbar.setValue(old_scroll_value)
+
+    def _handle_freedrive_output(self, process, status_text):
+        """Stream freedrive command output while suppressing repetitive keepalive spam."""
+        output = process.readAllStandardOutput().data().decode()
+        if not output:
+            return
+
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped == 'publisher: beginning loop' or stripped.startswith('publishing #'):
+                continue
+
+            self._append_to_text_widget(status_text, self._ansi_to_html(line))
+
+    def _build_freedrive_command_text(self, ros2_args):
+        """Format a ros2 command for status display."""
+        return 'ros2 ' + ' '.join(shlex.quote(arg) for arg in ros2_args)
+
+    def _run_freedrive_command(self, process_key, ros2_args, status_text, finished_callback):
+        """Run a one-shot freedrive-related ros2 command."""
+        if process_key in self.process_map:
+            existing_process = self.process_map[process_key]
+            if existing_process.state() == QProcess.Running:
+                existing_process.kill()
+                existing_process.waitForFinished(1000)
+            del self.process_map[process_key]
+
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(
+            lambda: self._handle_freedrive_output(process, status_text)
+        )
+        process.finished.connect(
+            lambda exit_code, _exit_status: self._on_freedrive_command_finished(
+                process_key, exit_code, status_text, finished_callback
+            )
+        )
+
+        cmd_str = self._build_freedrive_command_text(ros2_args)
+        self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
+        process.start('ros2', ros2_args)
+        self.process_map[process_key] = process
+
+    def _on_freedrive_command_finished(self, process_key, exit_code, status_text, finished_callback):
+        """Clean up a one-shot freedrive command and continue the sequence."""
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+        finished_callback(exit_code, status_text)
+
+    def _interrupt_freedrive_process(self, process_key, status_text, label):
+        """Best-effort Ctrl+C style stop for a freedrive-related process."""
+        if process_key not in self.process_map:
+            return False
+
+        process = self.process_map[process_key]
+        try:
+            process.finished.disconnect()
+        except Exception:
+            pass
+
+        pid = process.processId()
+        if pid:
+            try:
+                os.kill(pid, signal.SIGINT)
+                status_text.append(f"⏹ Sent Ctrl+C to {label}")
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                status_text.append(
+                    f"<span style='color: #c69026;'>⚠ Could not send Ctrl+C to {label}: {exc}</span>"
+                )
+
+        if process.state() == QProcess.Running:
+            process.waitForFinished(1500)
+        if process.state() == QProcess.Running:
+            process.terminate()
+            process.waitForFinished(1000)
+        if process.state() == QProcess.Running:
+            process.kill()
+            process.waitForFinished(1000)
+
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+        return True
+
+    def _stop_freedrive_start_processes(self, status_text):
+        """Interrupt the freedrive start-side processes if they are still running."""
+        self._interrupt_freedrive_process(
+            'freedrive_start_switch',
+            status_text,
+            'freedrive controller switch',
+        )
+        self._interrupt_freedrive_process(
+            'freedrive_enable_publisher',
+            status_text,
+            'freedrive keepalive publisher',
+        )
+
+    def _stop_freedrive_stop_processes(self, status_text):
+        """Interrupt any lingering freedrive stop-side commands before restarting."""
+        self._interrupt_freedrive_process(
+            'freedrive_stop_disable',
+            status_text,
+            'freedrive disable publisher',
+        )
+        self._interrupt_freedrive_process(
+            'freedrive_stop_switch',
+            status_text,
+            'trajectory controller restore switch',
+        )
+
+    def _start_freedrive_publisher(self, status_text):
+        """Start the persistent freedrive keepalive publisher."""
+        process_key = 'freedrive_enable_publisher'
+        ros2_args = [
+            'topic',
+            'pub',
+            '--rate',
+            '2',
+            '/freedrive_mode_controller/enable_freedrive_mode',
+            'std_msgs/msg/Bool',
+            '{data: true}',
+        ]
+
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(
+            lambda: self._handle_freedrive_output(process, status_text)
+        )
+        process.finished.connect(
+            lambda exit_code, _exit_status: self._on_freedrive_publisher_finished(
+                exit_code, status_text
+            )
+        )
+
+        cmd_str = self._build_freedrive_command_text(ros2_args)
+        self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
+        process.start('ros2', ros2_args)
+        self.process_map[process_key] = process
+
+    def _on_freedrive_publisher_finished(self, exit_code, status_text):
+        """Handle the persistent freedrive publisher exiting unexpectedly."""
+        process_key = 'freedrive_enable_publisher'
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+
+        self.freedrive_active = False
+        self._update_freedrive_button_ui()
+
+        if exit_code == 0:
+            status_text.append("⏹ Freedrive keepalive publisher stopped")
+        else:
+            status_text.append(
+                f"<span style='color: #f47067;'>✗ Freedrive keepalive publisher exited unexpectedly (exit code {exit_code})</span>"
+            )
+
+    def _update_freedrive_button_ui(self):
+        """Keep freedrive buttons in sync across Arm Control and Full Control tabs."""
+        if self.freedrive_active:
+            text = "Stop Freedrive"
+            style = "background-color: #4CAF50; color: white; font-weight: bold;"
+        else:
+            text = "Start Freedrive"
+            style = ""
+
+        if hasattr(self, "btn_arm_freedrive"):
+            self.btn_arm_freedrive.setText(text)
+            self.btn_arm_freedrive.setStyleSheet(style)
+            self.btn_arm_freedrive.setEnabled(True)
+
+        if hasattr(self, "btn_full_control_freedrive"):
+            self.btn_full_control_freedrive.setText(text)
+            self.btn_full_control_freedrive.setStyleSheet(style)
+            self.btn_full_control_freedrive.setEnabled(True)
+
+    def _get_freedrive_controller_check_command(self):
+        """Return the shell command used to detect freedrive-related controllers."""
+        return "ros2 control list_controllers -c /controller_manager | grep -E 'freedrive|joint_traj'"
+
+    def _get_controller_states(self, status_text=None):
+        """Return freedrive-related controller states parsed from the direct shell command output."""
+        try:
+            result = subprocess.run(
+                ['bash', '-lc', self._get_freedrive_controller_check_command()],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            if status_text is not None:
+                self._append_to_text_widget(
+                    status_text,
+                    "<span style='color: #c69026;'>Freedrive controller check timed out</span>",
+                )
+            return {}
+        except Exception as exc:
+            if status_text is not None:
+                self._append_to_text_widget(
+                    status_text,
+                    f"<span style='color: #c69026;'>Freedrive controller check failed: {html.escape(str(exc))}</span>",
+                )
+            return {}
+
+        controller_output = f"{result.stdout}\n{result.stderr or ''}"
+        controller_states = {}
+
+        if status_text is not None:
+            cmd_str = self._get_freedrive_controller_check_command()
+            self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {html.escape(cmd_str)}</b>")
+            stripped_output = controller_output.strip()
+            if stripped_output:
+                self._append_to_text_widget(
+                    status_text,
+                    (
+                        "<pre style=\"margin: 0; font-family: 'Courier New', monospace;\">"
+                        f"{html.escape(stripped_output)}"
+                        "</pre>"
+                    ),
+                    add_newline=False,
+                )
+
+        for raw_line in controller_output.splitlines():
+            line = re.sub(r'\x1b\[[0-9;]*m', '', raw_line).strip()
+            if not line:
+                continue
+            if line.startswith('[INFO]') or line.startswith('[WARN]') or line.startswith('[ERROR]'):
+                continue
+
+            match = re.match(
+                r'^([A-Za-z0-9_./-]+)\s+([A-Za-z0-9_./:-]+)\s+(active|inactive|unconfigured|finalized)\b',
+                line,
+            )
+            if not match:
+                continue
+
+            controller_states[match.group(1)] = match.group(3)
+
+        return controller_states
+
+    def _get_available_trajectory_controller(self, controller_states=None):
+        """Return the preferred trajectory controller if one is loaded."""
+        if controller_states is None:
+            controller_states = self._get_controller_states()
+        trajectory_controller_candidates = (
+            'joint_trajectory_controller',
+            'scaled_joint_trajectory_controller',
+        )
+
+        for controller_name in trajectory_controller_candidates:
+            if controller_states.get(controller_name) == 'active':
+                return controller_name
+
+        for controller_name in trajectory_controller_candidates:
+            if controller_name in controller_states:
+                return controller_name
+
+        return None
+
+    def _freedrive_controllers_are_loaded(self, status_text=None):
+        """Return True when freedrive and a compatible trajectory controller are available."""
+        controller_states = self._get_controller_states(status_text=status_text)
+        trajectory_controller = self._get_available_trajectory_controller(controller_states)
+        self.freedrive_trajectory_controller = trajectory_controller
+        return bool(trajectory_controller and 'freedrive_mode_controller' in controller_states)
+
+    def _show_no_controllers_running_message(self, status_text):
+        """Notify the user that freedrive cannot start because controllers are unavailable."""
+        message = (
+            "Freedrive requires freedrive_mode_controller and either "
+            "joint_trajectory_controller or scaled_joint_trajectory_controller."
+        )
+        QMessageBox.warning(self, 'Freedrive Mode', message)
+        status_text.append(f"<span style='color: #c69026;'>{message}</span>")
+
+    def _confirm_freedrive_start(self):
+        """Ask the user to confirm the freedrive start sequence."""
+        reply = QMessageBox.question(
+            self,
+            'Confirm Freedrive',
+            "Are you sure you want to start freedrive?\n\n"
+            "Make sure you have calibrated the PAYLOAD in the teach pendant. "
+            "If not hold the arm by hand before it falls or moves up.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        return reply == QMessageBox.Yes
+
+    def toggle_freedrive(self, context='arm'):
+        """Toggle freedrive mode with confirmation before activation."""
+        status_text = self._get_status_text_for_context(context)
+
+        if self.freedrive_active:
+            self._stop_freedrive(status_text)
+            return
+
+        if not self._freedrive_controllers_are_loaded(status_text=status_text):
+            self._show_no_controllers_running_message(status_text)
+            return
+
+        if not self._confirm_freedrive_start():
+            return
+
+        self._start_freedrive(status_text)
+
+    def _start_freedrive(self, status_text):
+        """Activate the freedrive controller and start the enable publisher."""
+        trajectory_controller = self.freedrive_trajectory_controller or self._get_available_trajectory_controller()
+        if not trajectory_controller:
+            self.freedrive_active = False
+            self._update_freedrive_button_ui()
+            self._show_no_controllers_running_message(status_text)
+            return
+
+        self.freedrive_trajectory_controller = trajectory_controller
+        self._stop_freedrive_stop_processes(status_text)
+        self._stop_freedrive_start_processes(status_text)
+        self.freedrive_active = True
+        self.freedrive_transition_in_progress = False
+        self.freedrive_transition_target_active = False
+        self._update_freedrive_button_ui()
+        status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ Freedrive mode requested</span>")
+        self._run_freedrive_command(
+            'freedrive_start_switch',
+            [
+                'control',
+                'switch_controllers',
+                '--deactivate',
+                trajectory_controller,
+                '--activate',
+                'freedrive_mode_controller',
+            ],
+            status_text,
+            self._on_freedrive_start_switch_finished,
+        )
+
+    def _on_freedrive_start_switch_finished(self, exit_code, status_text):
+        """Start the keepalive publisher after the controller switch succeeds."""
+        if exit_code == 0:
+            status_text.append("✓ Freedrive controller activated")
+            self._start_freedrive_publisher(status_text)
+        else:
+            self.freedrive_active = False
+            self._update_freedrive_button_ui()
+            status_text.append(
+                f"<span style='color: #f47067;'>✗ Freedrive controller switch failed (exit code {exit_code})</span>"
+            )
+
+    def _stop_freedrive(self, status_text):
+        """Stop the freedrive publisher, disable freedrive, and restore trajectory control."""
+        trajectory_controller = self.freedrive_trajectory_controller or self._get_available_trajectory_controller()
+        self.freedrive_active = False
+        self.freedrive_transition_in_progress = False
+        self.freedrive_transition_target_active = False
+        self._update_freedrive_button_ui()
+        self._stop_freedrive_start_processes(status_text)
+        self._stop_freedrive_stop_processes(status_text)
+        self._run_freedrive_command(
+            'freedrive_stop_disable',
+            [
+                'topic',
+                'pub',
+                '--once',
+                '/freedrive_mode_controller/enable_freedrive_mode',
+                'std_msgs/msg/Bool',
+                '{data: false}',
+            ],
+            status_text,
+            self._on_freedrive_disable_finished,
+        )
+
+    def _on_freedrive_disable_finished(self, exit_code, status_text):
+        """Switch controllers back after sending the freedrive disable message."""
+        trajectory_controller = self.freedrive_trajectory_controller or self._get_available_trajectory_controller()
+        if exit_code == 0:
+            status_text.append("✓ Freedrive disable message sent")
+        else:
+            status_text.append(
+                f"<span style='color: #c69026;'>⚠ Freedrive disable message failed (exit code {exit_code}); switching controllers back anyway</span>"
+            )
+
+        if not trajectory_controller:
+            status_text.append(
+                "<span style='color: #f47067;'>✗ Could not determine which trajectory controller to restore</span>"
+            )
+            return
+
+        self._run_freedrive_command(
+            'freedrive_stop_switch',
+            [
+                'control',
+                'switch_controllers',
+                '--deactivate',
+                'freedrive_mode_controller',
+                '--activate',
+                trajectory_controller,
+            ],
+            status_text,
+            self._on_freedrive_stop_switch_finished,
+        )
+
+    def _on_freedrive_stop_switch_finished(self, exit_code, status_text):
+        """Finalize freedrive shutdown and restore the button state."""
+        if exit_code == 0:
+            status_text.append(
+                "<span style='color: #57ab5a; font-weight: bold;'>✓ Freedrive mode disabled</span>"
+            )
+        else:
+            status_text.append(
+                f"<span style='color: #f47067;'>✗ Failed to restore joint_trajectory_controller (exit code {exit_code})</span>"
+            )
 
     def _build_gpr_request_groups(self):
         """Return the supported GPR API requests grouped for the UI."""
