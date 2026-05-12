@@ -14,7 +14,7 @@ from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import QTimer, QProcess, Qt
-from PyQt5.QtGui import QFontMetrics, QIcon, QPixmap
+from PyQt5.QtGui import QFontMetrics, QIcon, QPixmap, QPalette, QColor
 from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
@@ -27,9 +27,44 @@ from ur_msgs.msg import IOStates
 from ur_msgs.srv import SetIO
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
+def _detect_system_dark():
+    """Return True if the GNOME/Ubuntu system colour-scheme is set to dark."""
+    try:
+        out = subprocess.run(
+            ['gsettings', 'get', 'org.gnome.desktop.interface', 'color-scheme'],
+            capture_output=True, text=True, timeout=2
+        ).stdout
+        return 'dark' in out.lower()
+    except Exception:
+        return False
+
+def _make_dark_palette():
+    p = QPalette()
+    c = QColor
+    p.setColor(QPalette.Window,          c('#1c2128'))
+    p.setColor(QPalette.WindowText,      c('#cdd9e5'))
+    p.setColor(QPalette.Base,            c('#2d333b'))
+    p.setColor(QPalette.AlternateBase,   c('#22272e'))
+    p.setColor(QPalette.ToolTipBase,     c('#2d333b'))
+    p.setColor(QPalette.ToolTipText,     c('#cdd9e5'))
+    p.setColor(QPalette.Text,            c('#cdd9e5'))
+    p.setColor(QPalette.Button,          c('#2d333b'))
+    p.setColor(QPalette.ButtonText,      c('#cdd9e5'))
+    p.setColor(QPalette.BrightText,      c('#ffffff'))
+    p.setColor(QPalette.Link,            c('#539bf5'))
+    p.setColor(QPalette.Highlight,       c('#1f6feb'))
+    p.setColor(QPalette.HighlightedText, c('#ffffff'))
+    p.setColor(QPalette.Disabled, QPalette.WindowText, c('#768390'))
+    p.setColor(QPalette.Disabled, QPalette.Text,       c('#768390'))
+    p.setColor(QPalette.Disabled, QPalette.ButtonText, c('#768390'))
+    p.setColor(QPalette.Disabled, QPalette.Base,       c('#22272e'))
+    p.setColor(QPalette.Disabled, QPalette.Button,     c('#22272e'))
+    return p
+
 class RobotControlUI(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._dark_theme = _detect_system_dark()
  
         # Initialize ROS only if not already initialized
         if not rclpy.ok():
@@ -131,6 +166,15 @@ class RobotControlUI(QMainWindow):
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
  
+        # Theme toggle button
+        theme_bar = QHBoxLayout()
+        theme_bar.addStretch()
+        self.btn_theme_toggle = QPushButton("☀ Light Theme")
+        self.btn_theme_toggle.setFixedWidth(120)
+        self.btn_theme_toggle.clicked.connect(self._toggle_theme)
+        theme_bar.addWidget(self.btn_theme_toggle)
+        main_layout.addLayout(theme_bar)
+
         # Create tab widget for Arm Control and Base Control
         tabs = QTabWidget()
         main_layout.addWidget(tabs)
@@ -1198,7 +1242,48 @@ class RobotControlUI(QMainWindow):
         
         # Initial topics list refresh
         QTimer.singleShot(1000, self.refresh_topics_list)  # Delay 1s to ensure ROS is ready
-        
+
+        self._apply_theme()
+
+    def _toggle_theme(self):
+        self._dark_theme = not self._dark_theme
+        self._apply_theme()
+
+    def _apply_theme(self):
+        dark = self._dark_theme
+        app = QApplication.instance()
+        if dark:
+            app.setPalette(_make_dark_palette())
+            log_style = (
+                "background-color: #22272e; color: #adbac7; border: 1px solid #444c56; "
+                "font-family: 'Courier New', monospace;"
+            )
+            info_style = (
+                "background-color: #22272e; color: #adbac7; border: 1px solid #444c56; "
+                "font-family: 'Courier New', monospace; padding: 4px;"
+            )
+        else:
+            app.setPalette(app.style().standardPalette())
+            log_style = (
+                "background-color: #f0f0f0; color: #1f2328; border: 1px solid #d0d7de; "
+                "font-family: 'Courier New', monospace;"
+            )
+            info_style = (
+                "background-color: #f0f0f0; color: #1f2328; border: 1px solid #d0d7de; "
+                "font-family: 'Courier New', monospace; padding: 4px;"
+            )
+
+        for attr in ('status_text', 'base_status_text', 'joint_status_text',
+                     'full_control_status_text', 'gpr_status_text'):
+            if hasattr(self, attr):
+                getattr(self, attr).setStyleSheet(log_style)
+
+        if hasattr(self, 'topic_info_display'):
+            self.topic_info_display.setStyleSheet(info_style)
+
+        if hasattr(self, 'btn_theme_toggle'):
+            self.btn_theme_toggle.setText("☀ Light Theme" if dark else "☾ Dark Theme")
+
     def _update_full_control_sim_mode(self):
         """Refresh Full Control state when its simulation mode changes."""
         self._update_full_control_planner_constraints()
@@ -1245,10 +1330,8 @@ class RobotControlUI(QMainWindow):
         if sim_mode != 'true':
             desired_hybrid_sim = 'false'
             should_lock_hybrid_sim = True
-        elif planner_backend == 'moveit':
-            desired_hybrid_sim = 'true'
-            should_lock_hybrid_sim = True
         elif hasattr(self, 'full_control_hybrid_sim_combo'):
+            # When sim=true: user is free to choose regardless of planner backend
             desired_hybrid_sim = self.full_control_hybrid_sim_combo.currentText()
             should_lock_hybrid_sim = False
         else:
@@ -1309,20 +1392,18 @@ class RobotControlUI(QMainWindow):
             if planner == 'moveit':
                 # Get current simulation mode
                 sim_mode = self.arm_sim_mode_combo.currentText()
-                # When MoveIt is chosen:
-                # - If simulation is true -> URsim blocked to true
-                # - If simulation is false -> URsim blocked to false (for real robot)
-                ursim_value = 'true' if sim_mode == 'true' else 'false'
-                self.arm_hybrid_sim_combo.setCurrentText(ursim_value)
-                self.arm_hybrid_sim_combo.setEnabled(False)
-
-                # Update status label based on simulation mode
-                if hasattr(self, 'arm_moveit_status_label'):
-                    if sim_mode == 'true':
-                        self.arm_moveit_status_label.setText("Running moveit on URsim [moveit in gazebo not implemented yet]")
-                    else:
+                if sim_mode == 'true':
+                    # Allow user to freely choose URsim or Gazebo when simulating with MoveIt
+                    self.arm_hybrid_sim_combo.setEnabled(True)
+                    if hasattr(self, 'arm_moveit_status_label'):
+                        self.arm_moveit_status_label.setVisible(False)
+                else:
+                    # Real robot: lock URsim to false
+                    self.arm_hybrid_sim_combo.setCurrentText('false')
+                    self.arm_hybrid_sim_combo.setEnabled(False)
+                    if hasattr(self, 'arm_moveit_status_label'):
                         self.arm_moveit_status_label.setText("Running moveit in Real Robot")
-                    self.arm_moveit_status_label.setVisible(True)
+                        self.arm_moveit_status_label.setVisible(True)
             else:
                 self.arm_hybrid_sim_combo.setEnabled(True)
                 # Hide status label when not using MoveIt
@@ -5005,6 +5086,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
     window = RobotControlUI()
     window.show()
     sys.exit(app.exec_())
