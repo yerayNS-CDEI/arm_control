@@ -95,6 +95,19 @@ class PlannerNode(Node):
         if self.mode not in ['arm', 'full']:
             self.get_logger().error(f"Invalid mode '{self.mode}'. Must be 'arm' or 'full'. Defaulting to 'full'.")
             self.mode = 'full'
+        self.declare_parameter('simplify_mobile_base_collision_geometry', True)
+        self.simplify_mobile_base_collision_geometry = (
+            self.get_parameter('simplify_mobile_base_collision_geometry').get_parameter_value().bool_value
+        )
+        self.declare_parameter('simplified_mobile_base_box_inflation', [0.10, 0.10, 0.20])
+        self.simplified_mobile_base_box_inflation = list(
+            self.get_parameter('simplified_mobile_base_box_inflation').get_parameter_value().double_array_value
+        )
+        if len(self.simplified_mobile_base_box_inflation) != 3:
+            self.get_logger().warn(
+                "simplified_mobile_base_box_inflation must have 3 values. Using default [0.10, 0.10, 0.20]."
+            )
+            self.simplified_mobile_base_box_inflation = [0.10, 0.10, 0.20]
 
         # --- Parameters for the grid / reachability ---
         self.robot_name = 'ur10e'
@@ -477,12 +490,20 @@ class PlannerNode(Node):
             
             # Parse geometry type
             solid = SolidPrimitive()
+
+            def inflated_box_dims(base_dims):
+                if not self.simplify_mobile_base_collision_geometry:
+                    return list(base_dims)
+                return [
+                    base_dims[index] + self.simplified_mobile_base_box_inflation[index]
+                    for index in range(3)
+                ]
             
             box = geometry.find('box')
             if box is not None:
                 size = box.get('size', '0 0 0').split()
                 solid.type = SolidPrimitive.BOX
-                solid.dimensions = [float(size[0]), float(size[1]), float(size[2])]
+                solid.dimensions = inflated_box_dims([float(size[0]), float(size[1]), float(size[2])])
                 self.get_logger().info(
                     f"Extracted BOX from turret_link: size=[{solid.dimensions[0]:.3f}, "
                     f"{solid.dimensions[1]:.3f}, {solid.dimensions[2]:.3f}]m, "
@@ -501,8 +522,12 @@ class PlannerNode(Node):
             if cylinder is not None:
                 radius = float(cylinder.get('radius', '0'))
                 length = float(cylinder.get('length', '0'))
-                solid.type = SolidPrimitive.CYLINDER
-                solid.dimensions = [length, radius]  # [height, radius]
+                if self.simplify_mobile_base_collision_geometry:
+                    solid.type = SolidPrimitive.BOX
+                    solid.dimensions = inflated_box_dims([2.0 * radius, 2.0 * radius, length])
+                else:
+                    solid.type = SolidPrimitive.CYLINDER
+                    solid.dimensions = [length, radius]  # [height, radius]
                 self.get_logger().info(
                     f"Extracted CYLINDER from turret_link: radius={radius:.3f}m, "
                     f"length={length:.3f}m, pose=[{pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f}]m"
@@ -519,8 +544,12 @@ class PlannerNode(Node):
             sphere = geometry.find('sphere')
             if sphere is not None:
                 radius = float(sphere.get('radius', '0'))
-                solid.type = SolidPrimitive.SPHERE
-                solid.dimensions = [radius]
+                if self.simplify_mobile_base_collision_geometry:
+                    solid.type = SolidPrimitive.BOX
+                    solid.dimensions = inflated_box_dims([2.0 * radius, 2.0 * radius, 2.0 * radius])
+                else:
+                    solid.type = SolidPrimitive.SPHERE
+                    solid.dimensions = [radius]
                 self.get_logger().info(
                     f"Extracted SPHERE from turret_link: radius={radius:.3f}m, "
                     f"pose=[{pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f}]m"
@@ -562,7 +591,7 @@ class PlannerNode(Node):
                 
                 # Create box primitive from bounding box
                 solid.type = SolidPrimitive.BOX
-                solid.dimensions = [size_x, size_y, size_z]
+                solid.dimensions = inflated_box_dims([size_x, size_y, size_z])
                 
                 # Adjust pose to account for mesh's bounding box center offset
                 # The mesh center might not be at origin in mesh frame
@@ -2169,7 +2198,6 @@ class PlannerNode(Node):
                     return fallback_to_single_checks()
 
         return fallback_to_single_checks()
-
     def _select_best_collision_free_solution(
         self,
         ik_solutions,
@@ -2568,6 +2596,7 @@ class PlannerNode(Node):
             # Recreate dilated grid fresh each iteration to avoid accumulating old obstacle markings
             # Only current collision_waypoints_to_avoid will be marked
             occupancy_grid_dilated = dilate_obstacles(occupancy_grid, dilation_distance, self.x_vals)
+            occupancy_grid_dilated_base = occupancy_grid_dilated.copy()
             
             if replanning_attempt > 0:
                 self.get_logger().info(
@@ -2624,7 +2653,7 @@ class PlannerNode(Node):
                 cell_value = occupancy_grid_dilated[si, sj, sk]
                 self.get_logger().info(
                     f"🔍 Verification: grid cell {sample_grid_idx} has value {cell_value} "
-                    f"({'OBSTACLE' if cell_value == 100 else 'FREE' if cell_value == 0 else 'UNKNOWN'})"
+                    f"({'OBSTACLE' if cell_value == 1 else 'FREE' if cell_value == 0 else 'UNKNOWN'})"
                 )
             
             # --- Pre-flight check: verify start and goal are not inside obstacles ---
@@ -2724,15 +2753,17 @@ class PlannerNode(Node):
                 return
             
             # Diagnostic: check obstacle grid status
-            total_marked_obstacles = np.sum(occupancy_grid_dilated == 100)  # Collision waypoints marked by us
-            total_env_obstacles = np.sum(occupancy_grid_dilated == 1)  # Environment obstacles from map
-            total_all_obstacles = total_marked_obstacles + total_env_obstacles
-            
-            # Verify collision waypoints dict matches grid markings
-            if len(collision_waypoints_to_avoid) != total_marked_obstacles:
+            total_env_obstacles = int(np.sum(occupancy_grid_dilated_base == 1))
+            total_marked_obstacles = int(np.sum(
+                (occupancy_grid_dilated == 1) & (occupancy_grid_dilated_base == 0)
+            ))
+            total_all_obstacles = int(np.sum(occupancy_grid_dilated == 1))
+
+            # Warn only when collision waypoints exist but none of them added new obstacle cells.
+            if collision_waypoints_to_avoid and total_marked_obstacles == 0 and cells_already_occupied < len(collision_waypoints_to_avoid):
                 self.get_logger().warn(
-                    f"⚠️  MISMATCH: Dict has {len(collision_waypoints_to_avoid)} collision waypoints, "
-                    f"but grid has {total_marked_obstacles} marked cells!"
+                    f"⚠️  Collision waypoint tracking has {len(collision_waypoints_to_avoid)} entries, "
+                    f"but none added new obstacle cells in the grid."
                 )
             
             # Visualize gap boundaries AND collision waypoints in RViz
@@ -2742,7 +2773,7 @@ class PlannerNode(Node):
             # Log what we're about to visualize
             self.get_logger().info(
                 f"📊 Visualization: Publishing {len(collision_waypoints_to_avoid)} collision waypoints to RViz "
-                f"(Grid has {total_marked_obstacles} marked cells)"
+                f"(Grid has {total_marked_obstacles} newly marked collision cells)"
             )
             
             self._publish_gap_boundary_markers(gap_start_world, gap_goal_world, collision_waypoints_to_avoid)

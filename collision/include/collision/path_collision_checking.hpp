@@ -296,6 +296,14 @@ class PathCollisionChecking : public rclcpp::Node
         void createRobotCollisionModel(const GeometryInformation& geometry_information, 
                                        const std::vector<std::string>& additional_link_names = {});
 
+        void buildSimplifiedMobileBaseLinkNames();
+        bool shouldSkipSimplifiedMobileBaseLink(const std::string& link_name) const;
+        bool shouldUseSimplifiedMobileBaseGeometry(const std::string& link_name) const;
+        bool buildSimplifiedMobileBaseBox(const std::string& link_name,
+                          const urdf::CollisionSharedPtr& link_collision,
+                          std::unique_ptr<shapes::Shape>* simplified_shape,
+                          Eigen::Vector3d* collision_frame_center_offset) const;
+
         // This function is taken from https://github.com/tu-darmstadt-ros-pkg with a tiny change to smart ptrs
         // https://github.com/tu-darmstadt-ros-pkg/robot_self_filter/blob/master/src/self_mask.cpp#L76
         std::unique_ptr<shapes::Shape> constructShape(const urdf::Geometry* geom) const;
@@ -353,6 +361,14 @@ class PathCollisionChecking : public rclcpp::Node
         std::string visualization_frame_;  // Frame for visualization markers (collision/ prefixed)
         // Mode parameter for robot base collision: 'arm' (hardcoded box) or 'full' (mobile manipulator)
         std::string mode_;
+        bool simplify_mobile_base_collision_geometry_;
+        std::string simplified_mobile_base_anchor_link_;
+        std::string simplified_mobile_base_stop_link_;
+        std::vector<double> simplified_mobile_base_box_inflation_;
+        std::set<std::string> simplified_mobile_base_link_names_;
+        bool simplified_mobile_base_box_cached_ = false;
+        Eigen::Vector3d simplified_mobile_base_box_size_ = Eigen::Vector3d::Zero();
+        Eigen::Vector3d simplified_mobile_base_box_center_offset_ = Eigen::Vector3d::Zero();
         // Distance threshold beyond which objects are ignored
         double distance_threshold_;
         // Desired dangerfield value
@@ -392,6 +408,8 @@ class PathCollisionChecking : public rclcpp::Node
         std::shared_ptr<robot_collision_checking::FCLInterfaceCollisionWorld> collision_world_;
         boost::mutex collision_world_mutex_;
         std::vector<robot_collision_checking::FCLCollisionGeometryPtr> robot_collision_geometry_;
+        std::vector<fcl::CollisionObjectd> robot_self_collision_objects_;
+        std::vector<robot_collision_checking::FCLCollisionObjectPtr> robot_env_collision_objects_;
         std::vector<shapes::ShapeMsg> cached_robot_shape_msgs_;
         std::vector<std::string> cached_robot_shape_link_names_;
         bool last_collision_state_ = false;
