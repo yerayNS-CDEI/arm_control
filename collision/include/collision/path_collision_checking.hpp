@@ -297,12 +297,30 @@ class PathCollisionChecking : public rclcpp::Node
                                        const std::vector<std::string>& additional_link_names = {});
 
         void buildSimplifiedMobileBaseLinkNames();
+        void buildCachedSimplifiedCollisionBoxes();
+        void buildSkippedSimplifiedCollisionLinks();
         bool shouldSkipSimplifiedMobileBaseLink(const std::string& link_name) const;
+        bool shouldSkipSimplifiedCollisionLink(const std::string& link_name) const;
         bool shouldUseSimplifiedMobileBaseGeometry(const std::string& link_name) const;
+        bool shouldUseSimplifiedCollisionBoxGeometry(const std::string& link_name) const;
+        bool buildSimplifiedCollisionBox(const std::string& link_name,
+                 const urdf::CollisionSharedPtr& link_collision,
+                 std::unique_ptr<shapes::Shape>* simplified_shape,
+                 Eigen::Vector3d* collision_frame_center_offset) const;
+        void expandCachedSimplifiedCollisionBox(const std::string& anchor_link_name,
+                const urdf::CollisionSharedPtr& anchor_collision,
+                Eigen::Vector3d& box_size,
+                Eigen::Vector3d& box_center_offset) const;
         bool buildSimplifiedMobileBaseBox(const std::string& link_name,
                           const urdf::CollisionSharedPtr& link_collision,
                           std::unique_ptr<shapes::Shape>* simplified_shape,
                           Eigen::Vector3d* collision_frame_center_offset) const;
+        bool computeCollisionBoxBounds(const std::string& link_name,
+                   const urdf::CollisionSharedPtr& link_collision,
+                   const std::vector<double>& inflation,
+                   Eigen::Vector3d& box_size,
+                   Eigen::Vector3d& box_center_offset,
+                   bool* used_mesh_geometry = nullptr) const;
 
         // This function is taken from https://github.com/tu-darmstadt-ros-pkg with a tiny change to smart ptrs
         // https://github.com/tu-darmstadt-ros-pkg/robot_self_filter/blob/master/src/self_mask.cpp#L76
@@ -366,9 +384,16 @@ class PathCollisionChecking : public rclcpp::Node
         std::string simplified_mobile_base_stop_link_;
         std::vector<double> simplified_mobile_base_box_inflation_;
         std::set<std::string> simplified_mobile_base_link_names_;
+        bool simplify_additional_collision_box_geometry_;
+        std::vector<std::string> simplified_collision_box_link_suffixes_;
+        std::vector<std::string> simplified_collision_skip_link_suffixes_;
+        std::vector<double> simplified_collision_box_inflation_;
         bool simplified_mobile_base_box_cached_ = false;
         Eigen::Vector3d simplified_mobile_base_box_size_ = Eigen::Vector3d::Zero();
         Eigen::Vector3d simplified_mobile_base_box_center_offset_ = Eigen::Vector3d::Zero();
+        std::set<std::string> simplified_collision_skipped_links_;
+        std::map<std::string, Eigen::Vector3d> simplified_collision_box_sizes_;
+        std::map<std::string, Eigen::Vector3d> simplified_collision_box_center_offsets_;
         // Distance threshold beyond which objects are ignored
         double distance_threshold_;
         // Desired dangerfield value
@@ -417,10 +442,14 @@ class PathCollisionChecking : public rclcpp::Node
         bool last_env_collision_state_ = false;
         std::map<std::pair<int, int>, bool> links_collision_states_;
         std::set<std::pair<int, int>> collision_exclusions_;  // Pairs of link indices that should never be checked
+        std::vector<std::pair<int, int>> self_collision_check_pairs_;
         std::atomic<uint64_t> collision_service_call_count_{ 0 };
         std::atomic<uint64_t> collision_service_total_ns_{ 0 };
         std::atomic<uint64_t> collision_service_visualized_calls_{ 0 };
         std::atomic<uint64_t> collision_service_short_circuit_count_{ 0 };
+        std::atomic<uint64_t> self_collision_candidate_pair_total_{ 0 };
+        std::atomic<uint64_t> self_collision_aabb_rejected_pair_total_{ 0 };
+        std::atomic<uint64_t> self_collision_narrowphase_pair_total_{ 0 };
 
         // Robot kinematics
         KDL::Chain chain_;

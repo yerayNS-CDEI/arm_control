@@ -65,6 +65,22 @@ struct SimplifiedBoxTimingStats
 
 thread_local SimplifiedBoxTimingStats g_simplified_box_timing_stats;
 
+struct SelfCollisionBroadphaseStats
+{
+    uint64_t candidate_pairs = 0;
+    uint64_t aabb_rejected_pairs = 0;
+    uint64_t narrowphase_pairs = 0;
+
+    void reset()
+    {
+        candidate_pairs = 0;
+        aabb_rejected_pairs = 0;
+        narrowphase_pairs = 0;
+    }
+};
+
+thread_local SelfCollisionBroadphaseStats g_self_collision_broadphase_stats;
+
 inline uint64_t elapsedNanoseconds(const std::chrono::steady_clock::time_point& started_at)
 {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -74,6 +90,12 @@ inline uint64_t elapsedNanoseconds(const std::chrono::steady_clock::time_point& 
 inline double nanosecondsToMilliseconds(const uint64_t elapsed_ns)
 {
     return static_cast<double>(elapsed_ns) / 1.0e6;
+}
+
+inline bool endsWith(const std::string& value, const std::string& suffix)
+{
+    return value.size() >= suffix.size() &&
+           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 }  // namespace
 
@@ -88,11 +110,26 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     simplified_mobile_base_stop_link_ = this->declare_parameter<std::string>("simplified_mobile_base_stop_link", "column_link");
     simplified_mobile_base_box_inflation_ = this->declare_parameter<std::vector<double>>(
         "simplified_mobile_base_box_inflation", std::vector<double>{0.20, 0.0, 0.10});
+    simplify_additional_collision_box_geometry_ = this->declare_parameter<bool>("simplify_additional_collision_box_geometry", false);
+    simplified_collision_box_link_suffixes_ = this->declare_parameter<std::vector<std::string>>(
+        "simplified_collision_box_link_suffixes",
+        std::vector<std::string>{"plate_link"});
+    simplified_collision_skip_link_suffixes_ = this->declare_parameter<std::vector<std::string>>(
+        "simplified_collision_skip_link_suffixes",
+        std::vector<std::string>{"sensor_A_link", "sensor_B_link", "sensor_C_link", "ee_cylinder_link"});
+    simplified_collision_box_inflation_ = this->declare_parameter<std::vector<double>>(
+        "simplified_collision_box_inflation", std::vector<double>{0.0, 0.0, 0.0});
     if (simplified_mobile_base_box_inflation_.size() != 3)
     {
         RCLCPP_WARN(this->get_logger(),
                     "simplified_mobile_base_box_inflation must have 3 values. Using default [0.10, 0.10, 0.20].");
         simplified_mobile_base_box_inflation_ = {0.10, 0.10, 0.20};
+    }
+    if (simplified_collision_box_inflation_.size() != 3)
+    {
+        RCLCPP_WARN(this->get_logger(),
+                    "simplified_collision_box_inflation must have 3 values. Using default [0.0, 0.0, 0.0].");
+        simplified_collision_box_inflation_ = {0.0, 0.0, 0.0};
     }
     
     // Validate mode parameter
@@ -124,7 +161,7 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     publish_tested_joint_states_ = this->declare_parameter<bool>("publish_tested_joint_states", false);
     short_circuit_env_on_self_collision_ = this->declare_parameter<bool>("short_circuit_env_on_self_collision", true);
     log_collision_service_metrics_ = this->declare_parameter<bool>("log_collision_service_metrics", true);
-    collision_service_metrics_interval_ = this->declare_parameter<int>("collision_service_metrics_interval", 50);
+    collision_service_metrics_interval_ = this->declare_parameter<int>("collision_service_metrics_interval", 5);
 
     // TF properties
     buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -305,6 +342,8 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     }
 
     buildSimplifiedMobileBaseLinkNames();
+    buildCachedSimplifiedCollisionBoxes();
+    buildSkippedSimplifiedCollisionLinks();
     buildStaticCollisionShapeCache();
 
     // Set active joint states as a parameter
@@ -1090,6 +1129,7 @@ bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::Joint
     }
 
     g_simplified_box_timing_stats.reset();
+    g_self_collision_broadphase_stats.reset();
 
     const auto joint_state_started_at = std::chrono::steady_clock::now();
     KDL::JntArray kdl_joint_positions(ndof_);
@@ -1321,57 +1361,65 @@ bool PathCollisionChecking::checkSelfCollision(const GeometryInformation& geomet
 
     const fcl::CollisionRequestd request;
 
-    for (int i = 0; i < n; ++i)
+    for (const auto& pair : self_collision_check_pairs_)
     {
-        // Double-check index validity (defensive programming)
-        if (i >= n_geom)
+        const int i = pair.first;
+        const int j = pair.second;
+        g_self_collision_broadphase_stats.candidate_pairs++;
+
+        if (i >= n || j >= n)
         {
-            RCLCPP_ERROR(this->get_logger(), "Index %d out of bounds for robot_collision_geometry_ (size %d)", i, n_geom);
+            RCLCPP_ERROR(this->get_logger(),
+                         "Precomputed self-collision pair (%d, %d) is out of bounds for %d transforms. Rebuild the collision exclusions.",
+                         i, j, n);
             return false;
         }
 
-        for (int j = i + 1; j < n; ++j)
+        bool collision_detected = false;
+        if (robot_self_collision_objects_[i].getAABB().overlap(robot_self_collision_objects_[j].getAABB()))
         {
-            // Skip adjacent pairs
-            if (isAdjacent(i, j)) continue;
+            g_self_collision_broadphase_stats.narrowphase_pairs++;
             fcl::CollisionResultd result;
-
             fcl::collide(&robot_self_collision_objects_[i], &robot_self_collision_objects_[j], request, result);
+            collision_detected = result.isCollision();
+        }
+        else
+        {
+            g_self_collision_broadphase_stats.aabb_rejected_pairs++;
+        }
 
-            bool collision_detected = result.isCollision();
-            auto key = std::make_pair(i, j);
-            if (collision_detected != links_collision_states_[key])
+        const auto key = std::make_pair(i, j);
+        if (collision_detected != links_collision_states_[key])
+        {
+            links_collision_states_[key] = collision_detected;
+            if (collision_detected)
             {
-                links_collision_states_[key] = collision_detected;
-                if (collision_detected)
-                {
-                    // Get link names for better debugging - safe access to pre-built collision_link_names_
-                    std::string link_i_name = (i < n_names) ? collision_link_names_[i] : "link_" + std::to_string(i);
-                    std::string link_j_name = (j < n_names) ? collision_link_names_[j] : "link_" + std::to_string(j);
-                    
-                    RCLCPP_WARN(this->get_logger(), "Self-collision detected between '%s' (index %d) and '%s' (index %d)", 
-                                link_i_name.c_str(), i, link_j_name.c_str(), j);
-                    return true;
-                }
-                else
-                {
-                    std::string link_i_name = (i < n_names) ? collision_link_names_[i] : "link_" + std::to_string(i);
-                    std::string link_j_name = (j < n_names) ? collision_link_names_[j] : "link_" + std::to_string(j);
-                    
-                    RCLCPP_INFO(this->get_logger(), "Self-collision cleared between '%s' (index %d) and '%s' (index %d)", 
-                                link_i_name.c_str(), i, link_j_name.c_str(), j);
-                }
-            }
-            // Log active collisions even if state didn't change (for service call debugging)
-            if (collision_detected && !isAdjacent(i, j))
-            {
-                any_collision_active = true;
+                // Get link names for better debugging - safe access to pre-built collision_link_names_
                 std::string link_i_name = (i < n_names) ? collision_link_names_[i] : "link_" + std::to_string(i);
                 std::string link_j_name = (j < n_names) ? collision_link_names_[j] : "link_" + std::to_string(j);
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
-                    "Active collision: '%s' (index %d) <-> '%s' (index %d)",
-                    link_i_name.c_str(), i, link_j_name.c_str(), j);
+
+                RCLCPP_WARN(this->get_logger(), "Self-collision detected between '%s' (index %d) and '%s' (index %d)", 
+                            link_i_name.c_str(), i, link_j_name.c_str(), j);
+                return true;
             }
+            else
+            {
+                std::string link_i_name = (i < n_names) ? collision_link_names_[i] : "link_" + std::to_string(i);
+                std::string link_j_name = (j < n_names) ? collision_link_names_[j] : "link_" + std::to_string(j);
+
+                RCLCPP_INFO(this->get_logger(), "Self-collision cleared between '%s' (index %d) and '%s' (index %d)", 
+                            link_i_name.c_str(), i, link_j_name.c_str(), j);
+            }
+        }
+
+        if (collision_detected)
+        {
+            any_collision_active = true;
+            std::string link_i_name = (i < n_names) ? collision_link_names_[i] : "link_" + std::to_string(i);
+            std::string link_j_name = (j < n_names) ? collision_link_names_[j] : "link_" + std::to_string(j);
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                "Active collision: '%s' (index %d) <-> '%s' (index %d)",
+                link_i_name.c_str(), i, link_j_name.c_str(), j);
         }
     }
 
@@ -1390,6 +1438,8 @@ bool PathCollisionChecking::isAdjacent(int i, int j) const
 void PathCollisionChecking::buildCollisionExclusions()
 {
     collision_exclusions_.clear();
+    self_collision_check_pairs_.clear();
+    links_collision_states_.clear();
     
     // Find which index corresponds to each link name
     std::map<std::string, int> link_name_to_index;
@@ -1592,7 +1642,34 @@ void PathCollisionChecking::buildCollisionExclusions()
         }
     }
     
-    RCLCPP_INFO(this->get_logger(), "Built %zu collision exclusion pairs", collision_exclusions_.size());
+    const int num_collision_links = static_cast<int>(collision_link_names_.size());
+    const size_t total_possible_pairs = num_collision_links > 1
+        ? static_cast<size_t>(num_collision_links) * static_cast<size_t>(num_collision_links - 1) / 2
+        : 0;
+
+    self_collision_check_pairs_.reserve(total_possible_pairs > collision_exclusions_.size()
+        ? total_possible_pairs - collision_exclusions_.size()
+        : 0);
+
+    for (int i = 0; i < num_collision_links; ++i)
+    {
+        for (int j = i + 1; j < num_collision_links; ++j)
+        {
+            const auto pair = std::make_pair(i, j);
+            if (collision_exclusions_.find(pair) != collision_exclusions_.end())
+            {
+                continue;
+            }
+            self_collision_check_pairs_.push_back(pair);
+            links_collision_states_[pair] = false;
+        }
+    }
+
+    RCLCPP_INFO(this->get_logger(),
+                "Built %zu collision exclusion pairs and %zu active self-collision pairs (from %zu total pairs)",
+                collision_exclusions_.size(),
+                self_collision_check_pairs_.size(),
+                total_possible_pairs);
 }
 
 void PathCollisionChecking::displayCollisionModel(const GeometryInformation& geometry_information, const Eigen::Vector4d& color)
@@ -1773,7 +1850,7 @@ void PathCollisionChecking::createRobotCollisionModel(const GeometryInformation&
         for (int i = 0; i < static_cast<int>(chain_.getNrOfSegments()); ++i)
         {
             KDL::Segment seg = chain_.getSegment(i);
-            if (shouldSkipSimplifiedMobileBaseLink(seg.getName()))
+            if (shouldSkipSimplifiedCollisionLink(seg.getName()))
             {
                 continue;
             }
@@ -1954,113 +2031,19 @@ void PathCollisionChecking::buildSimplifiedMobileBaseLinkNames()
     }
 
     const urdf::CollisionSharedPtr& anchor_collision = anchor_link_it->second->collision;
-    double size_x = 0.0;
-    double size_y = 0.0;
-    double size_z = 0.0;
-    Eigen::Vector3d center_offset = Eigen::Vector3d::Zero();
-
-    switch (anchor_collision->geometry->type)
+    if (!computeCollisionBoxBounds(simplified_mobile_base_anchor_link_,
+                                   anchor_collision,
+                                   simplified_mobile_base_box_inflation_,
+                                   simplified_mobile_base_box_size_,
+                                   simplified_mobile_base_box_center_offset_))
     {
-    case urdf::Geometry::BOX:
-    {
-        urdf::Vector3 dim = dynamic_cast<const urdf::Box*>(anchor_collision->geometry.get())->dim;
-        size_x = dim.x;
-        size_y = dim.y;
-        size_z = dim.z;
-        break;
-    }
-    case urdf::Geometry::CYLINDER:
-    {
-        const auto* cylinder = dynamic_cast<const urdf::Cylinder*>(anchor_collision->geometry.get());
-        size_x = 2.0 * cylinder->radius;
-        size_y = 2.0 * cylinder->radius;
-        size_z = cylinder->length;
-        break;
-    }
-    case urdf::Geometry::SPHERE:
-    {
-        const auto* sphere = dynamic_cast<const urdf::Sphere*>(anchor_collision->geometry.get());
-        size_x = 2.0 * sphere->radius;
-        size_y = 2.0 * sphere->radius;
-        size_z = 2.0 * sphere->radius;
-        break;
-    }
-    case urdf::Geometry::MESH:
-    {
-        std::unique_ptr<shapes::Shape> mesh_shape = constructShape(anchor_collision->geometry.get());
-        if (!mesh_shape)
-        {
-            RCLCPP_WARN(this->get_logger(),
-                        "Failed to build cached simplified box for mesh link %s. Disabling simplification.",
-                        simplified_mobile_base_anchor_link_.c_str());
-            simplified_mobile_base_link_names_.clear();
-            simplify_mobile_base_collision_geometry_ = false;
-            return;
-        }
-
-        shapes::ShapeMsg shape_msg;
-        if (!shapes::constructMsgFromShape(mesh_shape.get(), shape_msg) || shape_msg.which() != 1)
-        {
-            RCLCPP_WARN(this->get_logger(),
-                        "Failed to convert mesh link %s into a cached mesh message for simplification. Disabling simplification.",
-                        simplified_mobile_base_anchor_link_.c_str());
-            simplified_mobile_base_link_names_.clear();
-            simplify_mobile_base_collision_geometry_ = false;
-            return;
-        }
-
-        const shape_msgs::msg::Mesh mesh_msg = boost::get<shape_msgs::msg::Mesh>(shape_msg);
-        if (mesh_msg.vertices.empty())
-        {
-            RCLCPP_WARN(this->get_logger(),
-                        "Mesh link %s has no vertices for cached simplification. Disabling simplification.",
-                        simplified_mobile_base_anchor_link_.c_str());
-            simplified_mobile_base_link_names_.clear();
-            simplify_mobile_base_collision_geometry_ = false;
-            return;
-        }
-
-        double min_x = std::numeric_limits<double>::infinity();
-        double min_y = std::numeric_limits<double>::infinity();
-        double min_z = std::numeric_limits<double>::infinity();
-        double max_x = -std::numeric_limits<double>::infinity();
-        double max_y = -std::numeric_limits<double>::infinity();
-        double max_z = -std::numeric_limits<double>::infinity();
-
-        for (const auto& vertex : mesh_msg.vertices)
-        {
-            min_x = std::min(min_x, static_cast<double>(vertex.x));
-            min_y = std::min(min_y, static_cast<double>(vertex.y));
-            min_z = std::min(min_z, static_cast<double>(vertex.z));
-            max_x = std::max(max_x, static_cast<double>(vertex.x));
-            max_y = std::max(max_y, static_cast<double>(vertex.y));
-            max_z = std::max(max_z, static_cast<double>(vertex.z));
-        }
-
-        size_x = max_x - min_x;
-        size_y = max_y - min_y;
-        size_z = max_z - min_z;
-        center_offset = Eigen::Vector3d(
-            0.5 * (min_x + max_x),
-            0.5 * (min_y + max_y),
-            0.5 * (min_z + max_z));
-        break;
-    }
-    default:
         RCLCPP_WARN(this->get_logger(),
-                    "Unsupported geometry type %d for simplified mobile base anchor link %s. Disabling simplification.",
-                    anchor_collision->geometry->type,
+                    "Failed to compute cached simplified mobile base box for link %s. Disabling simplification.",
                     simplified_mobile_base_anchor_link_.c_str());
         simplified_mobile_base_link_names_.clear();
         simplify_mobile_base_collision_geometry_ = false;
         return;
     }
-
-    simplified_mobile_base_box_size_ = Eigen::Vector3d(
-        std::max(1e-3, size_x + simplified_mobile_base_box_inflation_[0]),
-        std::max(1e-3, size_y + simplified_mobile_base_box_inflation_[1]),
-        std::max(1e-3, size_z + simplified_mobile_base_box_inflation_[2]));
-    simplified_mobile_base_box_center_offset_ = center_offset;
     simplified_mobile_base_box_cached_ = true;
 
     RCLCPP_INFO(this->get_logger(),
@@ -2074,6 +2057,112 @@ void PathCollisionChecking::buildSimplifiedMobileBaseLinkNames()
                 simplified_mobile_base_box_center_offset_.z());
 }
 
+void PathCollisionChecking::buildCachedSimplifiedCollisionBoxes()
+{
+    simplified_collision_box_sizes_.clear();
+    simplified_collision_box_center_offsets_.clear();
+
+    if (!simplify_additional_collision_box_geometry_)
+    {
+        return;
+    }
+
+    size_t cached_count = 0;
+    for (const auto& link_pair : model_->links_)
+    {
+        const std::string& link_name = link_pair.first;
+        const urdf::LinkSharedPtr& link = link_pair.second;
+        if (!link || !link->collision)
+        {
+            continue;
+        }
+
+        bool matches_suffix = false;
+        for (const auto& suffix : simplified_collision_box_link_suffixes_)
+        {
+            if (!suffix.empty() && endsWith(link_name, suffix))
+            {
+                matches_suffix = true;
+                break;
+            }
+        }
+
+        if (!matches_suffix || shouldUseSimplifiedMobileBaseGeometry(link_name))
+        {
+            continue;
+        }
+
+        Eigen::Vector3d box_size = Eigen::Vector3d::Zero();
+        Eigen::Vector3d center_offset = Eigen::Vector3d::Zero();
+        bool used_mesh_geometry = false;
+        if (!computeCollisionBoxBounds(link_name,
+                                       link->collision,
+                                       simplified_collision_box_inflation_,
+                                       box_size,
+                                       center_offset,
+                                       &used_mesh_geometry))
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "Failed to compute cached simplified collision box for link %s",
+                        link_name.c_str());
+            continue;
+        }
+
+        expandCachedSimplifiedCollisionBox(link_name, link->collision, box_size, center_offset);
+
+        simplified_collision_box_sizes_[link_name] = box_size;
+        simplified_collision_box_center_offsets_[link_name] = center_offset;
+        ++cached_count;
+
+        RCLCPP_INFO(this->get_logger(),
+                    "Cached simplified collision box for %s: size=[%.3f, %.3f, %.3f] offset=[%.3f, %.3f, %.3f] source=%s",
+                    link_name.c_str(),
+                    box_size.x(),
+                    box_size.y(),
+                    box_size.z(),
+                    center_offset.x(),
+                    center_offset.y(),
+                    center_offset.z(),
+                    used_mesh_geometry ? "mesh" : "primitive");
+    }
+
+    RCLCPP_INFO(this->get_logger(),
+                "Cached %zu additional simplified collision boxes",
+                cached_count);
+}
+
+void PathCollisionChecking::buildSkippedSimplifiedCollisionLinks()
+{
+    simplified_collision_skipped_links_.clear();
+
+    for (const auto& link_pair : model_->links_)
+    {
+        const std::string& link_name = link_pair.first;
+        for (const auto& suffix : simplified_collision_skip_link_suffixes_)
+        {
+            if (!suffix.empty() && endsWith(link_name, suffix))
+            {
+                // Keep the ultrasonic sensor links ignored even when the plate-box simplification
+                // is disabled. The cylinder is only skipped when the expanded plate box is enabled.
+                if (!simplify_additional_collision_box_geometry_ && suffix == "ee_cylinder_link")
+                {
+                    continue;
+                }
+                simplified_collision_skipped_links_.insert(link_name);
+                break;
+            }
+        }
+    }
+
+    RCLCPP_INFO(this->get_logger(),
+                "Skipping %zu enclosed simplified collision links",
+                simplified_collision_skipped_links_.size());
+    for (const auto& link_name : simplified_collision_skipped_links_)
+    {
+        RCLCPP_INFO(this->get_logger(), "Skipping enclosed collision link: %s", link_name.c_str());
+    }
+}
+
 bool PathCollisionChecking::shouldSkipSimplifiedMobileBaseLink(const std::string& link_name) const
 {
     return simplify_mobile_base_collision_geometry_ &&
@@ -2081,51 +2170,208 @@ bool PathCollisionChecking::shouldSkipSimplifiedMobileBaseLink(const std::string
            link_name != simplified_mobile_base_anchor_link_;
 }
 
+bool PathCollisionChecking::shouldSkipSimplifiedCollisionLink(const std::string& link_name) const
+{
+    return shouldSkipSimplifiedMobileBaseLink(link_name) ||
+           simplified_collision_skipped_links_.find(link_name) != simplified_collision_skipped_links_.end();
+}
+
 bool PathCollisionChecking::shouldUseSimplifiedMobileBaseGeometry(const std::string& link_name) const
 {
     return simplify_mobile_base_collision_geometry_ && link_name == simplified_mobile_base_anchor_link_;
 }
 
-bool PathCollisionChecking::buildSimplifiedMobileBaseBox(const std::string& link_name,
-                                                         const urdf::CollisionSharedPtr& link_collision,
-                                                         std::unique_ptr<shapes::Shape>* simplified_shape,
-                                                         Eigen::Vector3d* collision_frame_center_offset) const
+bool PathCollisionChecking::shouldUseSimplifiedCollisionBoxGeometry(const std::string& link_name) const
 {
-    const auto started_at = std::chrono::steady_clock::now();
-    if (shouldUseSimplifiedMobileBaseGeometry(link_name) && simplified_mobile_base_box_cached_)
-    {
-        if (collision_frame_center_offset != nullptr)
-        {
-            *collision_frame_center_offset = simplified_mobile_base_box_center_offset_;
-        }
-        if (simplified_shape != nullptr)
-        {
-            simplified_shape->reset(new shapes::Box(
-                simplified_mobile_base_box_size_.x(),
-                simplified_mobile_base_box_size_.y(),
-                simplified_mobile_base_box_size_.z()));
-        }
+    return shouldUseSimplifiedMobileBaseGeometry(link_name) ||
+           simplified_collision_box_sizes_.find(link_name) != simplified_collision_box_sizes_.end();
+}
 
-        g_simplified_box_timing_stats.call_count++;
-        g_simplified_box_timing_stats.total_ns += elapsedNanoseconds(started_at);
-        g_simplified_box_timing_stats.last_link_name = link_name;
-        g_simplified_box_timing_stats.last_size_x = simplified_mobile_base_box_size_.x();
-        g_simplified_box_timing_stats.last_size_y = simplified_mobile_base_box_size_.y();
-        g_simplified_box_timing_stats.last_size_z = simplified_mobile_base_box_size_.z();
-        g_simplified_box_timing_stats.last_offset_x = simplified_mobile_base_box_center_offset_.x();
-        g_simplified_box_timing_stats.last_offset_y = simplified_mobile_base_box_center_offset_.y();
-        g_simplified_box_timing_stats.last_offset_z = simplified_mobile_base_box_center_offset_.z();
-        return true;
+bool PathCollisionChecking::buildSimplifiedCollisionBox(const std::string& link_name,
+                                                        const urdf::CollisionSharedPtr& link_collision,
+                                                        std::unique_ptr<shapes::Shape>* simplified_shape,
+                                                        Eigen::Vector3d* collision_frame_center_offset) const
+{
+    if (shouldUseSimplifiedMobileBaseGeometry(link_name))
+    {
+        return buildSimplifiedMobileBaseBox(link_name, link_collision, simplified_shape, collision_frame_center_offset);
     }
 
+    const auto size_it = simplified_collision_box_sizes_.find(link_name);
+    if (size_it == simplified_collision_box_sizes_.end())
+    {
+        return false;
+    }
+
+    const auto offset_it = simplified_collision_box_center_offsets_.find(link_name);
+    const Eigen::Vector3d center_offset = offset_it != simplified_collision_box_center_offsets_.end()
+        ? offset_it->second
+        : Eigen::Vector3d::Zero();
+
+    if (collision_frame_center_offset != nullptr)
+    {
+        *collision_frame_center_offset = center_offset;
+    }
+    if (simplified_shape != nullptr)
+    {
+        simplified_shape->reset(new shapes::Box(size_it->second.x(), size_it->second.y(), size_it->second.z()));
+    }
+
+    g_simplified_box_timing_stats.call_count++;
+    g_simplified_box_timing_stats.last_link_name = link_name;
+    g_simplified_box_timing_stats.last_size_x = size_it->second.x();
+    g_simplified_box_timing_stats.last_size_y = size_it->second.y();
+    g_simplified_box_timing_stats.last_size_z = size_it->second.z();
+    g_simplified_box_timing_stats.last_offset_x = center_offset.x();
+    g_simplified_box_timing_stats.last_offset_y = center_offset.y();
+    g_simplified_box_timing_stats.last_offset_z = center_offset.z();
+    return true;
+}
+
+void PathCollisionChecking::expandCachedSimplifiedCollisionBox(const std::string& anchor_link_name,
+                                                               const urdf::CollisionSharedPtr& anchor_collision,
+                                                               Eigen::Vector3d& box_size,
+                                                               Eigen::Vector3d& box_center_offset) const
+{
+    if (!anchor_collision || simplified_collision_skipped_links_.empty() || !endsWith(anchor_link_name, "plate_link"))
+    {
+        return;
+    }
+
+    KDL::JntArray zero_joint_positions(tree_.getNrOfJoints());
+    zero_joint_positions.data.setZero();
+
+    KDL::Frame anchor_kdl_frame;
+    if (kdl_tree_fk_solver_->JntToCart(zero_joint_positions, anchor_kdl_frame, anchor_link_name) < 0)
+    {
+        RCLCPP_WARN(this->get_logger(),
+                    "Failed to compute FK while expanding simplified collision box for %s",
+                    anchor_link_name.c_str());
+        return;
+    }
+
+    Eigen::Affine3d base_T_anchor_link;
+    tf2::transformKDLToEigen(anchor_kdl_frame, base_T_anchor_link);
+
+    Eigen::Quaterniond anchor_quat(anchor_collision->origin.rotation.w,
+                                   anchor_collision->origin.rotation.x,
+                                   anchor_collision->origin.rotation.y,
+                                   anchor_collision->origin.rotation.z);
+    Eigen::Affine3d anchor_link_T_collision = Eigen::Affine3d::Identity();
+    anchor_link_T_collision.linear() = anchor_quat.toRotationMatrix();
+    anchor_link_T_collision.translation() = Eigen::Vector3d(anchor_collision->origin.position.x,
+                                                            anchor_collision->origin.position.y,
+                                                            anchor_collision->origin.position.z);
+    const Eigen::Affine3d base_T_anchor_collision = base_T_anchor_link * anchor_link_T_collision;
+
+    Eigen::Vector3d min_corner = box_center_offset - 0.5 * box_size;
+    Eigen::Vector3d max_corner = box_center_offset + 0.5 * box_size;
+
+    const std::vector<double> zero_inflation{0.0, 0.0, 0.0};
+    size_t expanded_links = 0;
+    for (const auto& skipped_link_name : simplified_collision_skipped_links_)
+    {
+        if (skipped_link_name == anchor_link_name)
+        {
+            continue;
+        }
+
+        const auto link_it = model_->links_.find(skipped_link_name);
+        if (link_it == model_->links_.end() || !link_it->second || !link_it->second->collision)
+        {
+            continue;
+        }
+
+        Eigen::Vector3d skipped_box_size = Eigen::Vector3d::Zero();
+        Eigen::Vector3d skipped_box_center_offset = Eigen::Vector3d::Zero();
+        if (!computeCollisionBoxBounds(skipped_link_name,
+                                       link_it->second->collision,
+                                       zero_inflation,
+                                       skipped_box_size,
+                                       skipped_box_center_offset))
+        {
+            continue;
+        }
+
+        KDL::Frame skipped_kdl_frame;
+        if (kdl_tree_fk_solver_->JntToCart(zero_joint_positions, skipped_kdl_frame, skipped_link_name) < 0)
+        {
+            RCLCPP_WARN(this->get_logger(),
+                        "Failed to compute FK for enclosed skipped link %s while expanding %s",
+                        skipped_link_name.c_str(),
+                        anchor_link_name.c_str());
+            continue;
+        }
+
+        Eigen::Affine3d base_T_skipped_link;
+        tf2::transformKDLToEigen(skipped_kdl_frame, base_T_skipped_link);
+
+        const urdf::CollisionSharedPtr& skipped_collision = link_it->second->collision;
+        Eigen::Quaterniond skipped_quat(skipped_collision->origin.rotation.w,
+                                        skipped_collision->origin.rotation.x,
+                                        skipped_collision->origin.rotation.y,
+                                        skipped_collision->origin.rotation.z);
+        Eigen::Affine3d skipped_link_T_collision = Eigen::Affine3d::Identity();
+        skipped_link_T_collision.linear() = skipped_quat.toRotationMatrix();
+        skipped_link_T_collision.translation() = Eigen::Vector3d(skipped_collision->origin.position.x,
+                                                                 skipped_collision->origin.position.y,
+                                                                 skipped_collision->origin.position.z);
+        const Eigen::Affine3d anchor_collision_T_skipped_collision =
+            base_T_anchor_collision.inverse() * (base_T_skipped_link * skipped_link_T_collision);
+
+        for (int corner_idx = 0; corner_idx < 8; ++corner_idx)
+        {
+            Eigen::Vector3d local_corner(
+                (corner_idx & 1) ? 0.5 * skipped_box_size.x() : -0.5 * skipped_box_size.x(),
+                (corner_idx & 2) ? 0.5 * skipped_box_size.y() : -0.5 * skipped_box_size.y(),
+                (corner_idx & 4) ? 0.5 * skipped_box_size.z() : -0.5 * skipped_box_size.z());
+            local_corner += skipped_box_center_offset;
+
+            const Eigen::Vector3d anchor_corner = anchor_collision_T_skipped_collision * local_corner;
+            min_corner = min_corner.cwiseMin(anchor_corner);
+            max_corner = max_corner.cwiseMax(anchor_corner);
+        }
+
+        ++expanded_links;
+    }
+
+    if (expanded_links == 0)
+    {
+        return;
+    }
+
+    box_size = (max_corner - min_corner).cwiseMax(Eigen::Vector3d::Constant(1e-3));
+    box_center_offset = 0.5 * (min_corner + max_corner);
+
+    RCLCPP_INFO(this->get_logger(),
+                "Expanded simplified collision box for %s to enclose %zu skipped links: size=[%.3f, %.3f, %.3f] offset=[%.3f, %.3f, %.3f]",
+                anchor_link_name.c_str(),
+                expanded_links,
+                box_size.x(),
+                box_size.y(),
+                box_size.z(),
+                box_center_offset.x(),
+                box_center_offset.y(),
+                box_center_offset.z());
+}
+
+bool PathCollisionChecking::computeCollisionBoxBounds(const std::string& link_name,
+                                                      const urdf::CollisionSharedPtr& link_collision,
+                                                      const std::vector<double>& inflation,
+                                                      Eigen::Vector3d& box_size,
+                                                      Eigen::Vector3d& box_center_offset,
+                                                      bool* used_mesh_geometry) const
+{
     if (!link_collision || !link_collision->geometry)
     {
         return false;
     }
 
-    if (collision_frame_center_offset != nullptr)
+    box_size = Eigen::Vector3d::Zero();
+    box_center_offset = Eigen::Vector3d::Zero();
+    if (used_mesh_geometry != nullptr)
     {
-        *collision_frame_center_offset = Eigen::Vector3d::Zero();
+        *used_mesh_geometry = false;
     }
 
     double size_x = 0.0;
@@ -2160,11 +2406,10 @@ bool PathCollisionChecking::buildSimplifiedMobileBaseBox(const std::string& link
     }
     case urdf::Geometry::MESH:
     {
-        const auto mesh_started_at = std::chrono::steady_clock::now();
         std::unique_ptr<shapes::Shape> mesh_shape = constructShape(link_collision->geometry.get());
         if (!mesh_shape)
         {
-            RCLCPP_WARN(this->get_logger(), "Failed to build simplified box for mesh link %s", link_name.c_str());
+            RCLCPP_WARN(this->get_logger(), "Failed to compute box bounds for mesh link %s", link_name.c_str());
             return false;
         }
 
@@ -2202,45 +2447,96 @@ bool PathCollisionChecking::buildSimplifiedMobileBaseBox(const std::string& link
         size_x = max_x - min_x;
         size_y = max_y - min_y;
         size_z = max_z - min_z;
-
-        if (collision_frame_center_offset != nullptr)
+        box_center_offset = Eigen::Vector3d(
+            0.5 * (min_x + max_x),
+            0.5 * (min_y + max_y),
+            0.5 * (min_z + max_z));
+        if (used_mesh_geometry != nullptr)
         {
-            *collision_frame_center_offset = Eigen::Vector3d(
-                0.5 * (min_x + max_x),
-                0.5 * (min_y + max_y),
-                0.5 * (min_z + max_z));
+            *used_mesh_geometry = true;
         }
-        g_simplified_box_timing_stats.mesh_call_count++;
-        g_simplified_box_timing_stats.mesh_extract_ns += elapsedNanoseconds(mesh_started_at);
         break;
     }
     default:
-        RCLCPP_WARN(this->get_logger(), "Unsupported geometry type %d for simplified mobile base link %s",
+        RCLCPP_WARN(this->get_logger(), "Unsupported geometry type %d for simplified link %s",
                     link_collision->geometry->type, link_name.c_str());
         return false;
     }
 
-    size_x = std::max(1e-3, size_x + simplified_mobile_base_box_inflation_[0]);
-    size_y = std::max(1e-3, size_y + simplified_mobile_base_box_inflation_[1]);
-    size_z = std::max(1e-3, size_z + simplified_mobile_base_box_inflation_[2]);
+    box_size = Eigen::Vector3d(
+        std::max(1e-3, size_x + inflation[0]),
+        std::max(1e-3, size_y + inflation[1]),
+        std::max(1e-3, size_z + inflation[2]));
+    return true;
+}
+
+bool PathCollisionChecking::buildSimplifiedMobileBaseBox(const std::string& link_name,
+                                                         const urdf::CollisionSharedPtr& link_collision,
+                                                         std::unique_ptr<shapes::Shape>* simplified_shape,
+                                                         Eigen::Vector3d* collision_frame_center_offset) const
+{
+    const auto started_at = std::chrono::steady_clock::now();
+    if (shouldUseSimplifiedMobileBaseGeometry(link_name) && simplified_mobile_base_box_cached_)
+    {
+        if (collision_frame_center_offset != nullptr)
+        {
+            *collision_frame_center_offset = simplified_mobile_base_box_center_offset_;
+        }
+        if (simplified_shape != nullptr)
+        {
+            simplified_shape->reset(new shapes::Box(
+                simplified_mobile_base_box_size_.x(),
+                simplified_mobile_base_box_size_.y(),
+                simplified_mobile_base_box_size_.z()));
+        }
+
+        g_simplified_box_timing_stats.call_count++;
+        g_simplified_box_timing_stats.total_ns += elapsedNanoseconds(started_at);
+        g_simplified_box_timing_stats.last_link_name = link_name;
+        g_simplified_box_timing_stats.last_size_x = simplified_mobile_base_box_size_.x();
+        g_simplified_box_timing_stats.last_size_y = simplified_mobile_base_box_size_.y();
+        g_simplified_box_timing_stats.last_size_z = simplified_mobile_base_box_size_.z();
+        g_simplified_box_timing_stats.last_offset_x = simplified_mobile_base_box_center_offset_.x();
+        g_simplified_box_timing_stats.last_offset_y = simplified_mobile_base_box_center_offset_.y();
+        g_simplified_box_timing_stats.last_offset_z = simplified_mobile_base_box_center_offset_.z();
+        return true;
+    }
+
+    Eigen::Vector3d box_size = Eigen::Vector3d::Zero();
+    Eigen::Vector3d center_offset = Eigen::Vector3d::Zero();
+    bool used_mesh_geometry = false;
+    if (!computeCollisionBoxBounds(link_name,
+                                   link_collision,
+                                   simplified_mobile_base_box_inflation_,
+                                   box_size,
+                                   center_offset,
+                                   &used_mesh_geometry))
+    {
+        return false;
+    }
 
     if (simplified_shape != nullptr)
     {
-        simplified_shape->reset(new shapes::Box(size_x, size_y, size_z));
+        simplified_shape->reset(new shapes::Box(box_size.x(), box_size.y(), box_size.z()));
+    }
+    if (collision_frame_center_offset != nullptr)
+    {
+        *collision_frame_center_offset = center_offset;
+    }
+    if (used_mesh_geometry)
+    {
+        g_simplified_box_timing_stats.mesh_call_count++;
     }
 
     g_simplified_box_timing_stats.call_count++;
     g_simplified_box_timing_stats.total_ns += elapsedNanoseconds(started_at);
     g_simplified_box_timing_stats.last_link_name = link_name;
-    g_simplified_box_timing_stats.last_size_x = size_x;
-    g_simplified_box_timing_stats.last_size_y = size_y;
-    g_simplified_box_timing_stats.last_size_z = size_z;
-    if (collision_frame_center_offset != nullptr)
-    {
-        g_simplified_box_timing_stats.last_offset_x = (*collision_frame_center_offset).x();
-        g_simplified_box_timing_stats.last_offset_y = (*collision_frame_center_offset).y();
-        g_simplified_box_timing_stats.last_offset_z = (*collision_frame_center_offset).z();
-    }
+    g_simplified_box_timing_stats.last_size_x = box_size.x();
+    g_simplified_box_timing_stats.last_size_y = box_size.y();
+    g_simplified_box_timing_stats.last_size_z = box_size.z();
+    g_simplified_box_timing_stats.last_offset_x = center_offset.x();
+    g_simplified_box_timing_stats.last_offset_y = center_offset.y();
+    g_simplified_box_timing_stats.last_offset_z = center_offset.z();
 
     return true;
 }
@@ -2254,9 +2550,9 @@ void PathCollisionChecking::buildStaticCollisionShapeCache()
                                       std::vector<shapes::ShapeMsg>& shape_msgs,
                                       std::vector<std::string>& link_names) {
         std::unique_ptr<shapes::Shape> shape;
-        if (shouldUseSimplifiedMobileBaseGeometry(link_name))
+        if (shouldUseSimplifiedCollisionBoxGeometry(link_name))
         {
-            if (!buildSimplifiedMobileBaseBox(link_name, link_collision, &shape, nullptr))
+            if (!buildSimplifiedCollisionBox(link_name, link_collision, &shape, nullptr))
             {
                 shape = constructShape(link_collision->geometry.get());
             }
@@ -2286,7 +2582,7 @@ void PathCollisionChecking::buildStaticCollisionShapeCache()
     for (int i = 0; i < static_cast<int>(chain_.getNrOfSegments()); ++i)
     {
         const std::string& link_name = chain_.getSegment(i).getName();
-        if (shouldSkipSimplifiedMobileBaseLink(link_name))
+        if (shouldSkipSimplifiedCollisionLink(link_name))
         {
             continue;
         }
@@ -2309,7 +2605,7 @@ void PathCollisionChecking::buildStaticCollisionShapeCache()
             continue;
         }
 
-        if (shouldSkipSimplifiedMobileBaseLink(link_name))
+        if (shouldSkipSimplifiedCollisionLink(link_name))
         {
             continue;
         }
@@ -2330,6 +2626,9 @@ void PathCollisionChecking::maybeLogCollisionServiceMetrics(uint64_t elapsed_ns,
 
     const uint64_t call_count = collision_service_call_count_.fetch_add(1) + 1;
     collision_service_total_ns_.fetch_add(elapsed_ns);
+    self_collision_candidate_pair_total_.fetch_add(g_self_collision_broadphase_stats.candidate_pairs);
+    self_collision_aabb_rejected_pair_total_.fetch_add(g_self_collision_broadphase_stats.aabb_rejected_pairs);
+    self_collision_narrowphase_pair_total_.fetch_add(g_self_collision_broadphase_stats.narrowphase_pairs);
     if (requested_visualization)
     {
         collision_service_visualized_calls_.fetch_add(1);
@@ -2343,12 +2642,28 @@ void PathCollisionChecking::maybeLogCollisionServiceMetrics(uint64_t elapsed_ns,
     {
         const double avg_ms = static_cast<double>(collision_service_total_ns_.load()) /
                               static_cast<double>(call_count) / 1.0e6;
+        const uint64_t candidate_pair_total = self_collision_candidate_pair_total_.load();
+        const uint64_t aabb_rejected_pair_total = self_collision_aabb_rejected_pair_total_.load();
+        const uint64_t narrowphase_pair_total = self_collision_narrowphase_pair_total_.load();
+        const double candidate_pairs_avg = static_cast<double>(candidate_pair_total) / static_cast<double>(call_count);
+        const double aabb_rejected_pairs_avg = static_cast<double>(aabb_rejected_pair_total) / static_cast<double>(call_count);
+        const double narrowphase_pairs_avg = static_cast<double>(narrowphase_pair_total) / static_cast<double>(call_count);
+        const double aabb_reject_rate = candidate_pair_total > 0
+            ? (static_cast<double>(aabb_rejected_pair_total) / static_cast<double>(candidate_pair_total)) * 100.0
+            : 0.0;
         RCLCPP_WARN(this->get_logger(),
-                    "Collision service metrics: calls=%llu avg_ms=%.2f visualized=%llu self_short_circuits=%llu last_ms=%.2f",
+                    "Collision service metrics: calls=%llu avg_ms=%.2f visualized=%llu self_short_circuits=%llu self_pairs_avg=%.1f aabb_reject_avg=%.1f narrowphase_avg=%.1f aabb_reject_rate=%.1f%% last_pairs=%llu last_reject=%llu last_narrow=%llu last_ms=%.2f",
                     static_cast<unsigned long long>(call_count),
                     avg_ms,
                     static_cast<unsigned long long>(collision_service_visualized_calls_.load()),
                     static_cast<unsigned long long>(collision_service_short_circuit_count_.load()),
+                    candidate_pairs_avg,
+                    aabb_rejected_pairs_avg,
+                    narrowphase_pairs_avg,
+                    aabb_reject_rate,
+                    static_cast<unsigned long long>(g_self_collision_broadphase_stats.candidate_pairs),
+                    static_cast<unsigned long long>(g_self_collision_broadphase_stats.aabb_rejected_pairs),
+                    static_cast<unsigned long long>(g_self_collision_broadphase_stats.narrowphase_pairs),
                     static_cast<double>(elapsed_ns) / 1.0e6);
     }
 }
@@ -2436,7 +2751,7 @@ void PathCollisionChecking::getCollisionModel(const KDL::JntArray& kdl_joint_pos
     {
         // Get current segment
         KDL::Segment seg = chain_.getSegment(i);
-        if (shouldSkipSimplifiedMobileBaseLink(seg.getName()))
+        if (shouldSkipSimplifiedCollisionLink(seg.getName()))
         {
             continue;
         }
@@ -2454,9 +2769,9 @@ void PathCollisionChecking::getCollisionModel(const KDL::JntArray& kdl_joint_pos
         Eigen::Vector3d collision_frame_center_offset = Eigen::Vector3d::Zero();
         if (populate_shapes)
         {
-            if (shouldUseSimplifiedMobileBaseGeometry(seg.getName()))
+            if (shouldUseSimplifiedCollisionBoxGeometry(seg.getName()))
             {
-                if (!buildSimplifiedMobileBaseBox(seg.getName(), link_coll, &shape, &collision_frame_center_offset))
+                if (!buildSimplifiedCollisionBox(seg.getName(), link_coll, &shape, &collision_frame_center_offset))
                 {
                     shape = constructShape(link_coll->geometry.get());
                 }
@@ -2466,9 +2781,9 @@ void PathCollisionChecking::getCollisionModel(const KDL::JntArray& kdl_joint_pos
                 shape = constructShape(link_coll->geometry.get());
             }
         }
-        else if (shouldUseSimplifiedMobileBaseGeometry(seg.getName()))
+        else if (shouldUseSimplifiedCollisionBoxGeometry(seg.getName()))
         {
-            buildSimplifiedMobileBaseBox(seg.getName(), link_coll, nullptr, &collision_frame_center_offset);
+            buildSimplifiedCollisionBox(seg.getName(), link_coll, nullptr, &collision_frame_center_offset);
         }
 
         // Get collision origin
@@ -2531,7 +2846,7 @@ std::vector<std::string> PathCollisionChecking::addBranchCollisionGeometry(const
         if (!link->collision)
             continue;
 
-        if (shouldSkipSimplifiedMobileBaseLink(link_name))
+        if (shouldSkipSimplifiedCollisionLink(link_name))
             continue;
 
         RCLCPP_DEBUG(this->get_logger(), "Processing branch link: %s", link_name.c_str());
@@ -2551,9 +2866,9 @@ std::vector<std::string> PathCollisionChecking::addBranchCollisionGeometry(const
         Eigen::Vector3d collision_frame_center_offset = Eigen::Vector3d::Zero();
         if (populate_shapes)
         {
-            if (shouldUseSimplifiedMobileBaseGeometry(link_name))
+            if (shouldUseSimplifiedCollisionBoxGeometry(link_name))
             {
-                if (!buildSimplifiedMobileBaseBox(link_name, link->collision, &shape, &collision_frame_center_offset))
+                if (!buildSimplifiedCollisionBox(link_name, link->collision, &shape, &collision_frame_center_offset))
                 {
                     shape = constructShape(link->collision->geometry.get());
                 }
@@ -2569,9 +2884,9 @@ std::vector<std::string> PathCollisionChecking::addBranchCollisionGeometry(const
                 continue;
             }
         }
-        else if (shouldUseSimplifiedMobileBaseGeometry(link_name))
+        else if (shouldUseSimplifiedCollisionBoxGeometry(link_name))
         {
-            buildSimplifiedMobileBaseBox(link_name, link->collision, nullptr, &collision_frame_center_offset);
+            buildSimplifiedCollisionBox(link_name, link->collision, nullptr, &collision_frame_center_offset);
         }
 
         // Get collision origin transform
