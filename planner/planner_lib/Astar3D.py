@@ -247,6 +247,7 @@ def get_valid_neighbors_dual_frame(
     start_idx: Tuple[int, int, int] = None,
     max_dist_grid: float = None,
     dual_frame_validity_cache: Dict[Tuple[int, int, int], bool] = None,
+    dual_frame_cache_stats: Dict[str, int] = None,
     cylinder_center_xy: Tuple[float, float] = None,
     cylinder_radius: float = None,
     cylinder_z_range: Tuple[float, float] = None
@@ -298,14 +299,19 @@ def get_valid_neighbors_dual_frame(
     start_idx_array = np.array(start_idx, dtype=float)
     if dual_frame_validity_cache is None:
         dual_frame_validity_cache = {}
+    if dual_frame_cache_stats is None:
+        dual_frame_cache_stats = {}
     
     for nx, ny, nz in possible_moves:
         neighbor_pos = (nx, ny, nz)
         cached_validity = dual_frame_validity_cache.get(neighbor_pos)
         if cached_validity is not None:
+            dual_frame_cache_stats['hits'] = dual_frame_cache_stats.get('hits', 0) + 1
             if cached_validity:
                 valid_neighbors.append(neighbor_pos)
             continue
+
+        dual_frame_cache_stats['misses'] = dual_frame_cache_stats.get('misses', 0) + 1
 
         # Compute orientation specifically for this neighbor
         neighbor_idx_array = np.array(neighbor_pos, dtype=float)
@@ -333,6 +339,7 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
               T_wrist3_tool0: np.ndarray = None,
               start_orientation: np.ndarray = None,
               goal_orientation: np.ndarray = None,
+              stats_out: Dict[str, int] = None,
               cylinder_center_xy: Tuple[float, float] = None,
               cylinder_radius: float = None,
               cylinder_z_range: Tuple[float, float] = None) -> List[Tuple[int, int, int]]:
@@ -375,10 +382,12 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
         # Compute diagonal distance for progress estimation (in grid index space)
         max_dist_grid = calculate_heuristic(start, goal)
         dual_frame_validity_cache = {}
+        dual_frame_cache_stats = {'hits': 0, 'misses': 0}
     else:
         slerp = None
         max_dist_grid = None
         dual_frame_validity_cache = None
+        dual_frame_cache_stats = None
     
     # Initialize start node
     start_node = create_node(
@@ -395,6 +404,22 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
     # Add max iterations to prevent infinite loops
     MAX_ITERATIONS = 100000  # Reasonable limit for most paths
     iterations = 0
+
+    def record_search_stats():
+        if stats_out is None:
+            return
+
+        stats_out.clear()
+        stats_out['iterations'] = iterations
+        stats_out['dual_frame_cache_enabled'] = int(dual_frame_enabled)
+        if dual_frame_enabled:
+            stats_out['dual_frame_cache_hits'] = int(dual_frame_cache_stats.get('hits', 0))
+            stats_out['dual_frame_cache_misses'] = int(dual_frame_cache_stats.get('misses', 0))
+            stats_out['dual_frame_cache_entries'] = int(len(dual_frame_validity_cache))
+        else:
+            stats_out['dual_frame_cache_hits'] = 0
+            stats_out['dual_frame_cache_misses'] = 0
+            stats_out['dual_frame_cache_entries'] = 0
     
     while open_list and iterations < MAX_ITERATIONS:
         iterations += 1
@@ -405,6 +430,7 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
         
         # Check if we've reached the goal
         if current_pos == goal:
+            record_search_stats()
             return reconstruct_path(current_node)
             
         closed_set.add(current_pos)
@@ -415,6 +441,7 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
             grid, current_pos, x_vals, y_vals, z_vals,
             T_wrist3_tool0, slerp, start, max_dist_grid,
             dual_frame_validity_cache,
+            dual_frame_cache_stats,
             cylinder_center_xy, cylinder_radius, cylinder_z_range
         ):
             # Skip if already explored
@@ -444,6 +471,8 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
     # No path found (either open list empty or max iterations reached)
     if iterations >= MAX_ITERATIONS:
         print(f"WARNING: A* search terminated after {MAX_ITERATIONS} iterations without finding a path")
+
+    record_search_stats()
     return []  # No path found
 
 def visualize_path(grid: np.ndarray, path: List[Tuple[int, int, int]]):

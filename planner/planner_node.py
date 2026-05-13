@@ -81,6 +81,12 @@ class PlannerNode(Node):
         self.collision_cache_round_digits = self.get_parameter('collision_cache_round_digits').get_parameter_value().integer_value
         self.declare_parameter('enable_batch_collision_checks', True)
         self.enable_batch_collision_checks = self.get_parameter('enable_batch_collision_checks').get_parameter_value().bool_value
+        self.declare_parameter('hot_loop_info_logging', False)
+        self.hot_loop_info_logging = self.get_parameter('hot_loop_info_logging').get_parameter_value().bool_value
+        self.declare_parameter('publish_replanning_visualization', False)
+        self.publish_replanning_visualization = self.get_parameter('publish_replanning_visualization').get_parameter_value().bool_value
+        self.declare_parameter('validate_post_astar_tool0_path', False)
+        self.validate_post_astar_tool0_path = self.get_parameter('validate_post_astar_tool0_path').get_parameter_value().bool_value
 
         # Number of neighbor layers to mark around collision cells during replanning
         # 0 = mark only the collision cell itself
@@ -1267,7 +1273,7 @@ class PlannerNode(Node):
         m.pose.orientation.w = 1.0
         return m
     
-    def _prune_path_endpoints(self, path_world, current_pos, goal_pos, tol_m=0.02, log=True):
+    def _prune_path_endpoints(self, path_world, current_pos, goal_pos, tol_m=0.02, log=True, return_trim=False):
         """
         Single-pass endpoint pruning + allow pruning down to empty.
 
@@ -1283,9 +1289,11 @@ class PlannerNode(Node):
         if not path_world:
             if log:
                 self.get_logger().info("[prune] input path empty -> return []")
-                return []
+            return ([], 0, 0) if return_trim else []
 
         pw = [(float(x), float(y), float(z)) for (x, y, z) in path_world]
+        start_trim = 0
+        end_trim = 0
 
         def d2(a, b):
             dx = a[0] - b[0]
@@ -1317,6 +1325,7 @@ class PlannerNode(Node):
                         f"d2(cur,w1)={d2(cur,w1):.4f} d2(cur,w2)={d2(cur,w2):.4f}"
                     )
                 pw.pop(0)
+                start_trim += 1
 
             # Detour rule (re-evaluate after possible pop)
             if len(pw) >= 2:
@@ -1331,6 +1340,7 @@ class PlannerNode(Node):
                             f"d(cur,w2)={d_direct:.4f} d(cur,w1)+d(w1,w2)={d_detour:.4f}"
                         )
                     pw.pop(0)
+                    start_trim += 1
 
             # Progress rule (re-evaluate current first waypoint after possible pop)
             if len(pw) >= 1:
@@ -1343,6 +1353,7 @@ class PlannerNode(Node):
                             f"d2(w1,goal)={d2(w1,goal):.4f} d2(cur,goal)={d2(cur,goal):.4f}"
                         )
                     pw.pop(0)
+                    start_trim += 1
 
         # ---------- END pruning ----------
         if len(pw) >= 2:
@@ -1357,6 +1368,7 @@ class PlannerNode(Node):
                         f"d2(goal,wn_1)={d2(goal,wn_1):.4f} d2(goal,wn)={d2(goal,wn):.4f}"
                     )
                 pw.pop(-1)
+                end_trim += 1
 
             # Detour rule (re-evaluate after possible pop)
             if len(pw) >= 2:
@@ -1371,6 +1383,7 @@ class PlannerNode(Node):
                             f"d(wn_1,goal)={d_direct:.4f} d(wn_1,wn)+d(wn,goal)={d_detour:.4f}"
                         )
                     pw.pop(-1)
+                    end_trim += 1
 
             # Progress rule (re-evaluate current last waypoint after possible pop)
             if len(pw) >= 1:
@@ -1383,6 +1396,7 @@ class PlannerNode(Node):
                             f"d2(wn,cur)={d2(wn,cur):.4f} d2(goal,cur)={d2(goal,cur):.4f}"
                         )
                     pw.pop(-1)
+                    end_trim += 1
 
         # ---------- 1-point collapse to empty ----------
         if len(pw) == 1:
@@ -1396,10 +1410,13 @@ class PlannerNode(Node):
                         f"d2(cur,goal)={d2(cur,goal):.4f} d2(cur,w)={d2(cur,w):.4f} d2(goal,w)={d2(goal,w):.4f}"
                     )
                 pw.pop(0)
+                start_trim += 1
 
         after = len(pw)
         if log:
             self.get_logger().info(f"[prune] result: {before} -> {after} waypoints")
+        if return_trim:
+            return pw, start_trim, end_trim
         return pw
     
     def _mark_cell_and_neighbors_as_obstacles(self, occupancy_grid, i, j, k, num_layers=1):
@@ -1719,10 +1736,25 @@ class PlannerNode(Node):
         self._collision_check_cache = {}
         self._collision_check_cache_hits = 0
         self._collision_check_cache_misses = 0
+        self._astar_search_count = 0
+        self._astar_dual_frame_cache_hits = 0
+        self._astar_dual_frame_cache_misses = 0
+        self._astar_dual_frame_cache_entries = 0
+        self._astar_iteration_total = 0
 
     def _start_plan_metrics(self):
         self._reset_plan_metrics()
         self._plan_started_at = time.monotonic()
+
+    def _record_astar_search_metrics(self, path_stats):
+        if not path_stats:
+            return
+
+        self._astar_search_count += 1
+        self._astar_iteration_total += int(path_stats.get('iterations', 0))
+        self._astar_dual_frame_cache_hits += int(path_stats.get('dual_frame_cache_hits', 0))
+        self._astar_dual_frame_cache_misses += int(path_stats.get('dual_frame_cache_misses', 0))
+        self._astar_dual_frame_cache_entries += int(path_stats.get('dual_frame_cache_entries', 0))
 
     def _make_collision_cache_key(self, joint_values):
         canonical_joint_values = np.arctan2(np.sin(joint_values), np.cos(joint_values))
@@ -1778,6 +1810,11 @@ class PlannerNode(Node):
 
         self.get_logger().warn(
             f"Planner metrics [{outcome}]: total_sec={total_sec:.2f} "
+            f"astar_searches={self._astar_search_count} "
+            f"astar_iters={self._astar_iteration_total} "
+            f"astar_cache_hits={self._astar_dual_frame_cache_hits} "
+            f"astar_cache_misses={self._astar_dual_frame_cache_misses} "
+            f"astar_cache_entries={self._astar_dual_frame_cache_entries} "
             f"collision_checks={self._collision_check_call_count} "
             f"collision_requests={self._collision_check_request_count} "
             f"batch_requests={self._collision_check_batch_request_count} "
@@ -1824,7 +1861,8 @@ class PlannerNode(Node):
             plan_generation = self._plan_generation
 
         self.publish_planner_goal_failed(False)
-        self.clear_goal_and_path_markers()
+        if self._should_publish_planner_markers():
+            self.clear_goal_and_path_markers()
         pose_data = (
             next_goal.pose.position.x,
             next_goal.pose.position.y,
@@ -1834,8 +1872,9 @@ class PlannerNode(Node):
             next_goal.pose.orientation.z,
             next_goal.pose.orientation.w
         )
-        self.publish_goal_marker(pose_data)
-        self.publish_reachability_boundary_marker()
+        if self._should_publish_planner_markers():
+            self.publish_goal_marker(pose_data)
+            self.publish_reachability_boundary_marker()
         self._planning_thread = threading.Thread(
             target=self._plan_goal_worker,
             args=(copy.deepcopy(next_goal), plan_generation),
@@ -1928,6 +1967,17 @@ class PlannerNode(Node):
         The existing `max_ik_solutions_to_test` parameter limits how many nearby
         candidates are considered for both direct selection and collision fallback.
         """
+        ik_solutions_array = np.asarray(ik_solutions, dtype=float)
+        if ik_solutions_array.ndim == 1:
+            if np.any(np.isnan(ik_solutions_array)):
+                if waypoint_idx is not None:
+                    self.get_logger().error(f"Waypoint {waypoint_idx}: No valid IK solutions found")
+                return []
+
+            delta = np.arctan2(np.sin(q_current - ik_solutions_array), np.cos(q_current - ik_solutions_array))
+            candidate_dist = float(np.sqrt(np.sum(delta ** 2)))
+            return [(0, ik_solutions_array.copy(), candidate_dist)]
+
         sorted_indices, sorted_distances = self._sort_ik_solutions_by_distance(ik_solutions, q_current)
 
         if len(sorted_indices) == 0:
@@ -1940,10 +1990,10 @@ class PlannerNode(Node):
             sorted_indices = sorted_indices[:self.max_ik_solutions_to_test]
             sorted_distances = sorted_distances[:self.max_ik_solutions_to_test]
             if waypoint_idx == 0:
-                self.get_logger().info(
+                self._log_hot_loop_info(lambda: (
                     f"Testing only {len(sorted_indices)}/{original_count} closest IK solutions "
                     f"(max_ik_solutions_to_test={self.max_ik_solutions_to_test})"
-                )
+                ))
 
         ranked_candidates = []
         for candidate_idx, candidate_dist in zip(sorted_indices, sorted_distances):
@@ -1986,10 +2036,10 @@ class PlannerNode(Node):
 
             if collision_status == CollisionCheckStatus.FREE:
                 if candidate_rank == 1:
-                    self.get_logger().info(
+                    self._log_hot_loop_info(lambda: (
                         f"Waypoint {waypoint_idx}: ✓ Closest solution {candidate_idx} collision-free "
                         f"(dist: {candidate_dist:.3f})"
-                    )
+                    ))
                 else:
                     self.get_logger().warn(
                         f"Waypoint {waypoint_idx}: recovered with fallback IK solution {candidate_idx} "
@@ -2335,6 +2385,52 @@ class PlannerNode(Node):
             cancel_check=cancel_check,
         )
 
+    def _normalize_joint_solution(self, joint_values, q_reference):
+        normalized = np.asarray(joint_values, dtype=float).copy()
+        q_reference = np.asarray(q_reference, dtype=float)
+
+        delta = (normalized - q_reference + np.pi) % (2 * np.pi) - np.pi
+        normalized = q_reference + delta
+
+        for joint_idx in range(len(normalized)):
+            while normalized[joint_idx] > 2 * np.pi:
+                normalized[joint_idx] -= 2 * np.pi
+            while normalized[joint_idx] < -2 * np.pi:
+                normalized[joint_idx] += 2 * np.pi
+
+        return normalized
+
+    def _log_hot_loop_info(self, message_factory):
+        if not self.hot_loop_info_logging:
+            return
+
+        if callable(message_factory):
+            self.get_logger().info(message_factory())
+            return
+
+        self.get_logger().info(message_factory)
+
+    def _should_publish_replanning_visualization(self):
+        if not self.publish_replanning_visualization:
+            return False
+
+        return (
+            self.goal_marker_pub.get_subscription_count() > 0
+            or self.ee_path_marker_pub.get_subscription_count() > 0
+        )
+
+    def _should_publish_planner_markers(self):
+        if not self.publish_replanning_visualization:
+            return False
+
+        return (
+            self.goal_marker_pub.get_subscription_count() > 0
+            or self.ee_path_marker_pub.get_subscription_count() > 0
+            or self.cyl_marker_pub.get_subscription_count() > 0
+            or self.wall_marker_pub.get_subscription_count() > 0
+            or self.reachability_marker_pub.get_subscription_count() > 0
+        )
+
     def plan_and_send_trajectory(self, msg: PoseStamped, plan_generation=None):
         self._start_plan_metrics()
         current_joint_state, end_effector_pose, joint_indices = self._snapshot_planning_inputs()
@@ -2556,30 +2652,30 @@ class PlannerNode(Node):
                     "Falling back to hardcoded polygon footprint."
                 )
 
-        # Publish obstacle markers for visualization
-        self.publish_cylinder_marker(self.cyl_center_xy, self.cyl_radius, self.z_min, self.z_max)
-        
-        # Publish base marker (mode-dependent)
-        if self.mode == 'full' and self.urdf_base_solid is not None and self.urdf_base_pose is not None:
-            self.get_logger().info("Publishing URDF-based marker...")
-            self.publish_urdf_base_marker(self.urdf_base_solid, self.urdf_base_pose)
-        else:
-            self.get_logger().info(
-                f"Publishing hardcoded footprint marker (mode={self.mode}, "
-                f"urdf_solid_available={self.urdf_base_solid is not None})"
-            )
-            self.publish_base_footprint_marker(self.base_footprint_xy, self.base_z_min, self.base_z_max)
-        
-        self.publish_wall()
+        if self._should_publish_planner_markers():
+            # Publish obstacle markers for visualization
+            self.publish_cylinder_marker(self.cyl_center_xy, self.cyl_radius, self.z_min, self.z_max)
+
+            # Publish base marker (mode-dependent)
+            if self.mode == 'full' and self.urdf_base_solid is not None and self.urdf_base_pose is not None:
+                self._log_hot_loop_info("Publishing URDF-based marker...")
+                self.publish_urdf_base_marker(self.urdf_base_solid, self.urdf_base_pose)
+            else:
+                self._log_hot_loop_info(lambda: (
+                    f"Publishing hardcoded footprint marker (mode={self.mode}, "
+                    f"urdf_solid_available={self.urdf_base_solid is not None})"
+                ))
+                self.publish_base_footprint_marker(self.base_footprint_xy, self.base_z_min, self.base_z_max)
+
+            self.publish_wall()
 
         # Define the dilation distance (in meters)
         dilation_distance = 0.05  # Enlarge obstacles by 0.X meters in all directions
 
         # Apply dilation
         self.get_logger().info(f"Applying obstacle dilation to grid shape {occupancy_grid.shape}...")
-        # occupancy_grid_dilated is now created fresh each replanning iteration (moved into loop)
-        # occupancy_grid_dilated = dilate_obstacles(occupancy_grid, dilation_distance, self.x_vals)
-        self.get_logger().info(f"Obstacle dilation will be applied each iteration.")
+        occupancy_grid_dilated_base = dilate_obstacles(occupancy_grid, dilation_distance, self.x_vals)
+        self.get_logger().info("Obstacle dilation computed once for the static occupancy grid.")
         # occupancy_grid_dilated = np.zeros(self.grid_shape, dtype=np.uint8)      # Eliminating all obstacles for now
 
         # Initialize collision waypoint tracking for replanning
@@ -2588,6 +2684,7 @@ class PlannerNode(Node):
         # Number of neighbor layers to mark around this collision cell
         # Boundary collisions use 0 layers (cell only), interior collisions use configured value
         collision_waypoints_to_avoid = {}
+        collision_waypoint_repeat_counts = {}
         MAX_REPLANNING_ATTEMPTS = 150  # Increased to allow multiple boundary narrowings (each gets 15 attempts) + grid resets
         replanning_attempt = 0
         
@@ -2621,14 +2718,15 @@ class PlannerNode(Node):
         # Track boundary pairs we've already tried with clean grids (to avoid pointless resets)
         # Set of tuples: (start_grid_idx, goal_grid_idx)
         tried_clean_boundaries = set()
+        seen_replanning_states = set()
         
-        self.get_logger().info(f"Starting replanning loop (max {MAX_REPLANNING_ATTEMPTS} attempts)...")
+        self._log_hot_loop_info(lambda: f"Starting replanning loop (max {MAX_REPLANNING_ATTEMPTS} attempts)...")
         # Main planning loop with replanning support
         while replanning_attempt < MAX_REPLANNING_ATTEMPTS:
             if self._abort_if_requested(plan_generation, "goal was cancelled during replanning"):
                 return
 
-            self.get_logger().info(f"Replanning iteration {replanning_attempt}...")
+            self._log_hot_loop_info(lambda: f"Replanning iteration {replanning_attempt}...")
             
             # Initialize previous boundaries on first iteration
             if replanning_attempt == 0:
@@ -2637,16 +2735,15 @@ class PlannerNode(Node):
                 # Mark initial boundaries as tried with clean grid (iteration 0 always has clean grid)
                 tried_clean_boundaries.add((current_planning_start_grid, current_planning_goal_grid))
             
-            # Recreate dilated grid fresh each iteration to avoid accumulating old obstacle markings
-            # Only current collision_waypoints_to_avoid will be marked
-            occupancy_grid_dilated = dilate_obstacles(occupancy_grid, dilation_distance, self.x_vals)
-            occupancy_grid_dilated_base = occupancy_grid_dilated.copy()
+            # Start from the static dilated occupancy grid and overlay the current
+            # collision-waypoint exclusions for this replanning iteration.
+            occupancy_grid_dilated = occupancy_grid_dilated_base.copy()
             
             if replanning_attempt > 0:
-                self.get_logger().info(
+                self._log_hot_loop_info(lambda: (
                     f"🔄 Replanning attempt {replanning_attempt}/{MAX_REPLANNING_ATTEMPTS - 1}: "
                     f"Avoiding {len(collision_waypoints_to_avoid)} waypoints with collisions"
-                )
+                ))
                 
             # Mark collision waypoints (and optionally their neighbors) as obstacles in the dilated grid
             total_cells_marked = 0
@@ -2686,7 +2783,7 @@ class PlannerNode(Node):
                 msg = f"🚫 Marked {total_cells_marked} grid cells as obstacles ({len(collision_waypoints_to_avoid)} waypoints)"
                 if cells_already_occupied > 0:
                     msg += f"\n   ⚠️  {cells_already_occupied} waypoints already at environment obstacles (unreachable!)"
-                self.get_logger().info(msg)
+                self._log_hot_loop_info(msg)
             
             # Note: Visualization happens after collision detection (line ~2613) to reduce message rate
             
@@ -2695,17 +2792,17 @@ class PlannerNode(Node):
                 sample_grid_idx = list(collision_waypoints_to_avoid.keys())[0]
                 si, sj, sk = sample_grid_idx
                 cell_value = occupancy_grid_dilated[si, sj, sk]
-                self.get_logger().info(
+                self._log_hot_loop_info(lambda: (
                     f"🔍 Verification: grid cell {sample_grid_idx} has value {cell_value} "
                     f"({'OBSTACLE' if cell_value == 1 else 'FREE' if cell_value == 0 else 'UNKNOWN'})"
-                )
+                ))
             
             # --- Pre-flight check: verify start and goal are not inside obstacles ---
-            self.get_logger().info(f"Performing pre-flight checks (start_idx={start_idx}, goal_idx={goal_idx})...")
+            self._log_hot_loop_info(lambda: f"Performing pre-flight checks (start_idx={start_idx}, goal_idx={goal_idx})...")
             start_i, start_j, start_k = start_idx
             goal_i, goal_j, goal_k = goal_idx
 
-            self.get_logger().info(f"Checking if indices within bounds...")
+            self._log_hot_loop_info("Checking if indices within bounds...")
             # Check if indices are within bounds
             if not start_in_bounds:
                 self._fail_current_goal(
@@ -2713,7 +2810,7 @@ class PlannerNode(Node):
                     f"pos_wrist3={start_pos_wrist3}. Start IK target is outside reachable workspace."
                 )
                 return
-            self.get_logger().info(f"Start indices OK. Checking goal bounds...")
+            self._log_hot_loop_info("Start indices OK. Checking goal bounds...")
                     
             if not goal_in_bounds:
                 self._fail_current_goal(
@@ -2726,13 +2823,13 @@ class PlannerNode(Node):
             # Check if start wrist_3 is inside an obstacle
             # IMPORTANT: Skip this check during replanning - robot is already at start position
             if replanning_attempt == 0:
-                self.get_logger().info(f"Goal indices OK. Checking if start is inside obstacle...")
+                self._log_hot_loop_info("Goal indices OK. Checking if start is inside obstacle...")
                 if occupancy_grid_dilated[start_i, start_j, start_k] == 1:
                     # Identify which obstacle
-                    self.get_logger().info(f"Start is inside obstacle! Identifying...")
+                    self._log_hot_loop_info("Start is inside obstacle! Identifying...")
                     obstacle_name = self._identify_obstacle(start_pos_wrist3, occupancy_grid, start_idx)
                     self.get_logger().error(f"Identified obstacle: {obstacle_name}")
-                    self.get_logger().info(f"Calling _fail_current_goal...")
+                    self._log_hot_loop_info("Calling _fail_current_goal...")
                     self._fail_current_goal(
                         f"❌ Start wrist_3 position is INSIDE OBSTACLE: {obstacle_name}\n"
                         f"  Start pos (wrist_3): {[round(x, 3) for x in start_pos_wrist3]}\n"
@@ -2741,13 +2838,13 @@ class PlannerNode(Node):
                         f"  Obstacle detection: dilated grid shows occupied voxel.\n"
                         f"  → Cannot plan path - start wrist_3 is in collision!"
                     )
-                    self.get_logger().info(f"_fail_current_goal returned, exiting callback")
+                    self._log_hot_loop_info("_fail_current_goal returned, exiting callback")
                     return
             else:
-                self.get_logger().info(
+                self._log_hot_loop_info(lambda: (
                     f"Goal indices OK. Skipping start obstacle check during replanning "
                     f"(robot is already at start position)"
-                )
+                ))
             
             # Check if start tool0 is inside an obstacle (if within grid bounds)
             if start_tool0_in_bounds:
@@ -2813,23 +2910,41 @@ class PlannerNode(Node):
             # Visualize gap boundaries AND collision waypoints in RViz
             gap_start_world = grid_to_world(*current_planning_start_grid, self.x_vals, self.y_vals, self.z_vals)
             gap_goal_world = grid_to_world(*current_planning_goal_grid, self.x_vals, self.y_vals, self.z_vals)
+
+            publish_replanning_visualization = self._should_publish_replanning_visualization()
+            if publish_replanning_visualization:
+                self._log_hot_loop_info(lambda: (
+                    f"📊 Visualization: Publishing {len(collision_waypoints_to_avoid)} collision waypoints to RViz "
+                    f"(Grid has {total_marked_obstacles} newly marked collision cells)"
+                ))
+                self._publish_gap_boundary_markers(gap_start_world, gap_goal_world, collision_waypoints_to_avoid)
             
-            # Log what we're about to visualize
-            self.get_logger().info(
-                f"📊 Visualization: Publishing {len(collision_waypoints_to_avoid)} collision waypoints to RViz "
-                f"(Grid has {total_marked_obstacles} newly marked collision cells)"
-            )
-            
-            self._publish_gap_boundary_markers(gap_start_world, gap_goal_world, collision_waypoints_to_avoid)
-            
-            self.get_logger().info(
+            self._log_hot_loop_info(lambda: (
                 f"Running A* pathfinding with dual-frame collision checking (wrist_3 + tool0)...\n"
                 f"  From: {current_planning_start_grid} → {current_planning_goal_grid}\n"
                 f"  Obstacles in grid: {total_all_obstacles} cells ({total_env_obstacles} environment + {total_marked_obstacles} collision waypoints)"
+            ))
+
+            replanning_state_signature = (
+                tuple(current_planning_start_grid),
+                tuple(current_planning_goal_grid),
+                tuple(sorted((tuple(grid_idx), int(num_layers)) for grid_idx, num_layers in collision_waypoints_to_avoid.items())),
             )
+            if replanning_state_signature in seen_replanning_states:
+                repeated_waypoint_samples = [grid_idx for grid_idx, _ in replanning_state_signature[2][:3]]
+                self._fail_current_goal(
+                    f"❌ Path planning repeated an identical replanning state before A* search\n"
+                    f"   Boundaries: {current_planning_start_grid} → {current_planning_goal_grid}\n"
+                    f"   Collision waypoints: {len(replanning_state_signature[2])} (sample: {repeated_waypoint_samples})\n"
+                    f"   The planner is about to rerun A* with the same inputs, so the result would repeat.\n"
+                    f"   Suggestion: Goal likely unreachable through this gap - try a different goal or robot starting pose."
+                )
+                return
+            seen_replanning_states.add(replanning_state_signature)
             
             # A* searches between current planning boundaries (initially full path, later narrowed gap)
             # Grid dimensions are always the full workspace - only start/goal positions change
+            path_stats = {}
             path = find_path(
                 occupancy_grid_dilated,
                 current_planning_start_grid,
@@ -2840,11 +2955,13 @@ class PlannerNode(Node):
                 T_wrist3_tool0=self._T_wrist3_tool0,
                 start_orientation=current_planning_start_orientation,
                 goal_orientation=current_planning_goal_orientation,
+                stats_out=path_stats,
                 cylinder_center_xy=self.cyl_center_xy,
                 cylinder_radius=self.cyl_radius,
                 cylinder_z_range=(self.z_min, self.z_max)
             )
-            self.get_logger().info(f"Found path with length {len(path)}")
+            self._record_astar_search_metrics(path_stats)
+            self._log_hot_loop_info(lambda: f"Found path with length {len(path)}")
             
             # Diagnostic: check if A* path goes through any marked collision waypoints
             if replanning_attempt > 0 and path and collision_waypoints_to_avoid:
@@ -2885,21 +3002,29 @@ class PlannerNode(Node):
             path_grid_indices = path  # Store grid indices before pruning
 
             # Debug: publish raw path (pre-prune)
-            self.publish_ee_path_markers(
-                path_world_raw,
-                frame_id="arm_base",
-                current_ee_xyz=start_pos_wrist3,
-                goal_xyz=goal_pos_wrist3,
-                ns="ee_path_raw",
-                id_offset=100,
-                rgba=(0.0, 1.0, 1.0, 0.5),   # cyan
-                z_offset=0.002,              # 2mm above
-                line_width=0.01,             # thicker
-                sphere_diam=0.03             # bigger
-            )
+            if publish_replanning_visualization:
+                self.publish_ee_path_markers(
+                    path_world_raw,
+                    frame_id="arm_base",
+                    current_ee_xyz=start_pos_wrist3,
+                    goal_xyz=goal_pos_wrist3,
+                    ns="ee_path_raw",
+                    id_offset=100,
+                    rgba=(0.0, 1.0, 1.0, 0.5),   # cyan
+                    z_offset=0.002,              # 2mm above
+                    line_width=0.01,             # thicker
+                    sphere_diam=0.03             # bigger
+                )
 
             # Prune path endpoints
-            path_world = self._prune_path_endpoints(path_world_raw, start_pos_wrist3, goal_pos_wrist3, tol_m=0.02, log=True)
+            path_world, path_trim_start, path_trim_end = self._prune_path_endpoints(
+                path_world_raw,
+                start_pos_wrist3,
+                goal_pos_wrist3,
+                tol_m=0.02,
+                log=self.hot_loop_info_logging,
+                return_trim=True,
+            )
             path_len = len(path_world)
             if path_len == 0:
                 self.get_logger().warn("Path pruned to empty. Falling back to direct goal IK.")
@@ -2931,127 +3056,113 @@ class PlannerNode(Node):
                 interp_rot_matrices = np.array([R.from_matrix(current_planning_goal_orientation).as_matrix()])
                 pruned_path_grid_indices = []
             else:
-                # Find which unpruned waypoints correspond to pruned waypoints
-                # Match by finding closest unpruned position to each pruned position
-                interp_rot_matrices = []
-                pruned_path_grid_indices = []
-                for pruned_pos in path_world:
-                    # Find closest unpruned waypoint (should be exact match unless floating point drift)
-                    min_dist = float('inf')
-                    best_idx = 0
-                    for i, unpruned_pos in enumerate(path_world_raw):
-                        dist = np.linalg.norm(np.array(pruned_pos) - np.array(unpruned_pos))
-                        if dist < min_dist:
-                            min_dist = dist
-                            best_idx = i
-                    interp_rot_matrices.append(unpruned_orientations[best_idx])
-                    pruned_path_grid_indices.append(path_grid_indices[best_idx])
-                interp_rot_matrices = np.array(interp_rot_matrices)
+                pruned_end_index = len(path_grid_indices) - path_trim_end if path_trim_end > 0 else len(path_grid_indices)
+                pruned_path_grid_indices = list(path_grid_indices[path_trim_start:pruned_end_index])
+                interp_rot_matrices = np.array(unpruned_orientations[path_trim_start:pruned_end_index])
 
-                self.get_logger().info(
+                self._log_hot_loop_info(lambda: (
                     f"Orientation interpolation: using {len(interp_rot_matrices)} orientations "
                     f"from unpruned path (A*-consistent) for {path_len} pruned waypoints"
-                )
+                ))
 
-            # Build full path lists for visualization (waypoints + final goal)
-            if path_len == 0:
-                _vis_rots = [goal_orientation_wrist3.as_matrix()]
-            else:
-                _vis_rots = list(interp_rot_matrices) + [goal_orientation_wrist3.as_matrix()]
-            _vis_wrist3 = list(path_world) + [tuple(goal_pos_wrist3)]
+            validate_tool0_path_post_astar = self.validate_post_astar_tool0_path
+            if publish_replanning_visualization or validate_tool0_path_post_astar:
+                # Build full path lists for visualization (waypoints + final goal)
+                if path_len == 0:
+                    _vis_rots = [goal_orientation_wrist3.as_matrix()]
+                else:
+                    _vis_rots = list(interp_rot_matrices) + [goal_orientation_wrist3.as_matrix()]
+                _vis_wrist3 = list(path_world) + [tuple(goal_pos_wrist3)]
 
-            # Compute tool0 positions by applying T_wrist3_tool0 at each wrist_3 pose
-            _vis_tool0 = []
-            for _pf, _rf in zip(_vis_wrist3, _vis_rots):
-                _T = np.eye(4)
-                _T[:3, :3] = _rf
-                _T[:3, 3] = np.array(_pf)
-                _vis_tool0.append(tuple((_T @ self._T_wrist3_tool0)[:3, 3]))
+                # Compute tool0 positions by applying T_wrist3_tool0 at each wrist_3 pose
+                _vis_tool0 = []
+                for _pf, _rf in zip(_vis_wrist3, _vis_rots):
+                    _T = np.eye(4)
+                    _T[:3, :3] = _rf
+                    _T[:3, 3] = np.array(_pf)
+                    _vis_tool0.append(tuple((_T @ self._T_wrist3_tool0)[:3, 3]))
 
-            # --- SAFETY CHECK: Validate tool0 path (should never fail since A* checked it) ---
-            # This is a redundant check since A* now validates both frames during search,
-            # but kept as a sanity check in case of numerical/rounding issues.
-            # NOTE: Tool0 being out of bounds is ALLOWED (it's not the IK target).
-            tool0_collision_detected = False
-            tool0_out_of_bounds_count = 0
-            for idx, tool0_pos in enumerate(_vis_tool0):
-                if self._abort_if_requested(plan_generation, "goal was cancelled during tool0 path validation"):
-                    return
+                if validate_tool0_path_post_astar:
+                    # --- SAFETY CHECK: Validate tool0 path (should never fail since A* checked it) ---
+                    # This is a redundant check since A* now validates both frames during search,
+                    # but can be re-enabled for debugging numerical/rounding issues.
+                    tool0_collision_detected = False
+                    tool0_out_of_bounds_count = 0
+                    for idx, tool0_pos in enumerate(_vis_tool0):
+                        if self._abort_if_requested(plan_generation, "goal was cancelled during tool0 path validation"):
+                            return
 
-                tool0_grid_idx, tool0_in_bounds = world_to_grid_checked(
-                    *tool0_pos, self.x_vals, self.y_vals, self.z_vals
-                )
-                ti, tj, tk = tool0_grid_idx
-
-                # Tool0 out of bounds is ALLOWED - it extends beyond wrist_3 reachability map
-                # This is expected when wrist_3 is near workspace edges
-                if not tool0_in_bounds:
-                    tool0_out_of_bounds_count += 1
-                    continue
-
-                # Check if in collision (only if within bounds, where we can verify)
-                if occupancy_grid_dilated[ti, tj, tk] == 1:
-                    obstacle_name = self._identify_obstacle(tool0_pos, occupancy_grid, tool0_grid_idx)
-
-                    # Compute what A* would have seen for debugging
-                    if idx < len(pruned_path_grid_indices):
-                        grid_idx_for_waypoint = pruned_path_grid_indices[idx]
-                        dist_from_start_grid = np.linalg.norm(
-                            np.array(grid_idx_for_waypoint, dtype=float) - np.array(start_idx, dtype=float)
+                        tool0_grid_idx, tool0_in_bounds = world_to_grid_checked(
+                            *tool0_pos, self.x_vals, self.y_vals, self.z_vals
                         )
-                        max_dist_grid = np.linalg.norm(
-                            np.array(goal_idx, dtype=float) - np.array(start_idx, dtype=float)
-                        )
-                        a_star_progress = min(dist_from_start_grid / max_dist_grid, 1.0) if max_dist_grid > 0 else 0.0
-                    else:
-                        a_star_progress = 1.0  # Goal
+                        ti, tj, tk = tool0_grid_idx
 
-                    self._fail_current_goal(
-                        f"❌ UNEXPECTED: Tool0 waypoint {idx} COLLIDES despite dual-frame A*: {obstacle_name}\n"
-                        f"  Tool0 position: {[round(x, 3) for x in tool0_pos]}\n"
-                        f"  Corresponding wrist_3: {[round(x, 3) for x in _vis_wrist3[idx]]}\n"
-                        f"  Grid index (tool0): {tool0_grid_idx}\n"
-                        f"  A* progress metric: {a_star_progress:.4f}\n"
-                        f"  This indicates a bug in A* dual-frame collision checking or orientation interpolation mismatch."
-                    )
-                    tool0_collision_detected = True
-                    break
+                        if not tool0_in_bounds:
+                            tool0_out_of_bounds_count += 1
+                            continue
 
-            if tool0_out_of_bounds_count > 0:
-                self.get_logger().info(
-                    f"ℹ️  Tool0 extends beyond workspace bounds at {tool0_out_of_bounds_count}/{len(_vis_tool0)} waypoints.\n"
-                    f"  This is expected/allowed - wrist_3 (IK target) remains within reachable workspace."
-                )
+                        if occupancy_grid_dilated[ti, tj, tk] == 1:
+                            obstacle_name = self._identify_obstacle(tool0_pos, occupancy_grid, tool0_grid_idx)
 
-            if tool0_collision_detected:
-                return  # Path validation failed, abort trajectory
+                            if idx < len(pruned_path_grid_indices):
+                                grid_idx_for_waypoint = pruned_path_grid_indices[idx]
+                                dist_from_start_grid = np.linalg.norm(
+                                    np.array(grid_idx_for_waypoint, dtype=float) - np.array(start_idx, dtype=float)
+                                )
+                                max_dist_grid = np.linalg.norm(
+                                    np.array(goal_idx, dtype=float) - np.array(start_idx, dtype=float)
+                                )
+                                a_star_progress = min(dist_from_start_grid / max_dist_grid, 1.0) if max_dist_grid > 0 else 0.0
+                            else:
+                                a_star_progress = 1.0
+
+                            self._fail_current_goal(
+                                f"❌ UNEXPECTED: Tool0 waypoint {idx} COLLIDES despite dual-frame A*: {obstacle_name}\n"
+                                f"  Tool0 position: {[round(x, 3) for x in tool0_pos]}\n"
+                                f"  Corresponding wrist_3: {[round(x, 3) for x in _vis_wrist3[idx]]}\n"
+                                f"  Grid index (tool0): {tool0_grid_idx}\n"
+                                f"  A* progress metric: {a_star_progress:.4f}\n"
+                                f"  This indicates a bug in A* dual-frame collision checking or orientation interpolation mismatch."
+                            )
+                            tool0_collision_detected = True
+                            break
+
+                    if tool0_out_of_bounds_count > 0:
+                        self._log_hot_loop_info(lambda: (
+                            f"ℹ️  Tool0 extends beyond workspace bounds at {tool0_out_of_bounds_count}/{len(_vis_tool0)} waypoints.\n"
+                            f"  This is expected/allowed - wrist_3 (IK target) remains within reachable workspace."
+                        ))
+
+                    if tool0_collision_detected:
+                        return  # Path validation failed, abort trajectory
 
             # Publish pruned wrist_3 path (orange)
-            self.publish_ee_path_markers(
-                _vis_wrist3,
-                frame_id="arm_base",
-                current_ee_xyz=start_pos_wrist3,
-                goal_xyz=goal_pos_wrist3,
-                ns="ee_path_pruned",
-                id_offset=200,
-                rgba=(1.0, 0.5, 0.0, 1.0),  # orange - wrist_3 path
-                z_offset=0.0,
-                line_width=0.01,
-                sphere_diam=0.02
-            )
-            # Publish corresponding tool0 path (magenta)
-            self.publish_ee_path_markers(
-                _vis_tool0,
-                frame_id="arm_base",
-                current_ee_xyz=start_pos,
-                goal_xyz=goal_pos,
-                ns="ee_path_tool0",
-                id_offset=300,
-                rgba=(0.8, 0.0, 0.8, 1.0),  # magenta - tool0 path
-                z_offset=0.0,
-                line_width=0.01,
-                sphere_diam=0.02
-            )
+            if publish_replanning_visualization:
+                self.publish_ee_path_markers(
+                    _vis_wrist3,
+                    frame_id="arm_base",
+                    current_ee_xyz=start_pos_wrist3,
+                    goal_xyz=goal_pos_wrist3,
+                    ns="ee_path_pruned",
+                    id_offset=200,
+                    rgba=(1.0, 0.5, 0.0, 1.0),  # orange - wrist_3 path
+                    z_offset=0.0,
+                    line_width=0.01,
+                    sphere_diam=0.02
+                )
+                # Publish corresponding tool0 path (magenta)
+                self.publish_ee_path_markers(
+                    _vis_tool0,
+                    frame_id="arm_base",
+                    current_ee_xyz=start_pos,
+                    goal_xyz=goal_pos,
+                    ns="ee_path_tool0",
+                    id_offset=300,
+                    rgba=(0.8, 0.0, 0.8, 1.0),  # magenta - tool0 path
+                    z_offset=0.0,
+                    line_width=0.01,
+                    sphere_diam=0.02
+                )
             # End of A* path planning and processing
 
             # Plan joint values for this iteration's path
@@ -3067,7 +3178,7 @@ class PlannerNode(Node):
                 # First iteration: validate all waypoints
                 waypoints_to_validate_start = 0
                 waypoints_to_validate_end = len(path_world) - 1
-                self.get_logger().info(f"First iteration: validating all {len(path_world)} waypoints")
+                self._log_hot_loop_info(lambda: f"First iteration: validating all {len(path_world)} waypoints")
                 
                 # Initialize q_current from robot state
                 try:
@@ -3082,10 +3193,10 @@ class PlannerNode(Node):
                 waypoints_to_validate_start = 0 if validated_start_segment is None else 1  # Skip first if it's the boundary
                 waypoints_to_validate_end = len(path_world) - (2 if validated_goal_segment is not None else 1)
                 
-                self.get_logger().info(
+                self._log_hot_loop_info(lambda: (
                     f"Gap validation: checking waypoints {waypoints_to_validate_start} to {waypoints_to_validate_end} "
                     f"({waypoints_to_validate_end - waypoints_to_validate_start + 1} new waypoints)"
-                )
+                ))
                 
                 # Start from the validated start segment's last joint configuration
                 if validated_start_segment and validated_start_segment['joint_solutions']:
@@ -3096,6 +3207,8 @@ class PlannerNode(Node):
             all_joint_values_print.append(q_current)
 
             selected_waypoint_candidates = []
+            provisional_q_current = q_current.copy()
+            committed_q_current = q_current.copy()
 
             # Process waypoints by selecting the closest IK first; collision validation happens in batch afterwards.
             for i in range(waypoints_to_validate_start, waypoints_to_validate_end + 1):
@@ -3109,8 +3222,13 @@ class PlannerNode(Node):
                 )
 
                 T = create_pose_matrix(path_world[i], interp_rot_matrices[i])
-                ik_solutions = closed_form_algorithm(T, q_current=q_current, type=0, return_all_solutions=True)
-                ranked_candidates = self._get_ranked_ik_candidates(ik_solutions, q_current, waypoint_idx=i)
+                ik_solutions = closed_form_algorithm(
+                    T,
+                    q_current=provisional_q_current,
+                    type=0,
+                    return_all_solutions=(self.max_ik_solutions_to_test != 1),
+                )
+                ranked_candidates = self._get_ranked_ik_candidates(ik_solutions, provisional_q_current, waypoint_idx=i)
 
                 if not ranked_candidates:
                     self.get_logger().error(
@@ -3128,31 +3246,74 @@ class PlannerNode(Node):
                     waypoint_collision_status.append((i, False, None, grid_idx))
                     continue
 
-                q_reference = q_current.copy()
+                q_reference = provisional_q_current.copy()
                 closest_idx, q_new, _ = ranked_candidates[0]
+                q_new = self._normalize_joint_solution(q_new, q_reference)
 
-                # Apply unwrapping and limits to the selected solution.
-                delta = (q_new - q_reference + np.pi) % (2 * np.pi) - np.pi
-                q_new = q_reference + delta
-
-                for j in range(len(q_new)):
-                    while q_new[j] > 2 * np.pi:
-                        q_new[j] -= 2 * np.pi
-                    while q_new[j] < -2 * np.pi:
-                        q_new[j] += 2 * np.pi
-
-                selected_waypoint_candidates.append((i, q_new, grid_idx, ranked_candidates[1:], q_reference, closest_idx))
-                q_current = q_new
+                selected_waypoint_candidates.append({
+                    'waypoint_idx': i,
+                    'grid_idx': grid_idx,
+                    'ik_solutions': ik_solutions,
+                    'q_reference': q_reference,
+                    'q_candidate': q_new,
+                    'closest_idx': closest_idx,
+                    'fallback_candidates': ranked_candidates[1:],
+                })
+                provisional_q_current = q_new
 
             if self.enable_collision_checking and selected_waypoint_candidates:
                 collision_statuses = self._check_collision_batch_sync(
-                    [candidate[1] for candidate in selected_waypoint_candidates],
+                    [candidate['q_candidate'] for candidate in selected_waypoint_candidates],
                     publish_visualization_index=0 if self.visualize_collision_checks else None,
                     timeout_sec=2.0,
                     cancel_check=lambda: self._should_abort_plan(plan_generation),
                 )
 
-                for (waypoint_idx, q_new, grid_idx, fallback_candidates, q_reference, closest_idx), collision_status in zip(selected_waypoint_candidates, collision_statuses):
+                rerank_remaining_waypoints = False
+                for candidate, collision_status in zip(selected_waypoint_candidates, collision_statuses):
+                    waypoint_idx = candidate['waypoint_idx']
+                    grid_idx = candidate['grid_idx']
+
+                    if not rerank_remaining_waypoints and np.allclose(candidate['q_reference'], committed_q_current, atol=1e-9):
+                        q_reference = candidate['q_reference']
+                        q_new = candidate['q_candidate']
+                        closest_idx = candidate['closest_idx']
+                        fallback_candidates = candidate['fallback_candidates']
+                    else:
+                        rerank_remaining_waypoints = True
+                        q_reference = committed_q_current.copy()
+                        ranked_candidates = self._get_ranked_ik_candidates(
+                            candidate['ik_solutions'],
+                            committed_q_current,
+                            waypoint_idx=waypoint_idx,
+                        )
+
+                        if not ranked_candidates:
+                            self.get_logger().error(
+                                f"Waypoint {waypoint_idx} at {path_world[waypoint_idx]} has no valid IK solution. "
+                                f"Grid index: {grid_idx if grid_idx is not None else 'unknown'}"
+                            )
+                            waypoints_requiring_replan.append(
+                                (
+                                    waypoint_idx,
+                                    path_world[waypoint_idx],
+                                    grid_idx,
+                                    "no valid IK solution",
+                                )
+                            )
+                            waypoint_collision_status.append((waypoint_idx, False, None, grid_idx))
+                            continue
+
+                        closest_idx, q_new, _ = ranked_candidates[0]
+                        q_new = self._normalize_joint_solution(q_new, q_reference)
+                        fallback_candidates = ranked_candidates[1:]
+                        collision_status = self._check_collision_sync(
+                            q_new,
+                            publish_visualization=False,
+                            timeout_sec=2.0,
+                            cancel_check=lambda: self._should_abort_plan(plan_generation),
+                        )
+
                     if collision_status == CollisionCheckStatus.CHECK_FAILED:
                         self._fail_current_goal(
                             f"Waypoint {waypoint_idx} could not be collision-validated. Aborting instead of replanning on uncertain data."
@@ -3173,18 +3334,14 @@ class PlannerNode(Node):
                                 )
                                 return
                             if fallback_solution is not None:
-                                delta = (fallback_solution - q_reference + np.pi) % (2 * np.pi) - np.pi
-                                fallback_solution = q_reference + delta
-
-                                for j in range(len(fallback_solution)):
-                                    while fallback_solution[j] > 2 * np.pi:
-                                        fallback_solution[j] -= 2 * np.pi
-                                    while fallback_solution[j] < -2 * np.pi:
-                                        fallback_solution[j] += 2 * np.pi
+                                fallback_solution = self._normalize_joint_solution(fallback_solution, q_reference)
 
                                 all_joint_values.append(fallback_solution)
                                 all_joint_values_print.append(fallback_solution)
                                 waypoint_collision_status.append((waypoint_idx, True, fallback_solution, grid_idx))
+                                committed_q_current = fallback_solution.copy()
+                                if not np.allclose(fallback_solution, q_new, atol=1e-9):
+                                    rerank_remaining_waypoints = True
                                 continue
 
                         self.get_logger().error(
@@ -3200,16 +3357,24 @@ class PlannerNode(Node):
                             )
                         )
                         waypoint_collision_status.append((waypoint_idx, False, None, grid_idx))
+                        rerank_remaining_waypoints = True
                         continue
 
                     all_joint_values.append(q_new)
                     all_joint_values_print.append(q_new)
                     waypoint_collision_status.append((waypoint_idx, True, q_new, grid_idx))
+                    committed_q_current = q_new.copy()
             else:
-                for waypoint_idx, q_new, grid_idx in selected_waypoint_candidates:
+                for candidate in selected_waypoint_candidates:
+                    waypoint_idx = candidate['waypoint_idx']
+                    q_new = candidate['q_candidate']
+                    grid_idx = candidate['grid_idx']
                     all_joint_values.append(q_new)
                     all_joint_values_print.append(q_new)
                     waypoint_collision_status.append((waypoint_idx, True, q_new, grid_idx))
+                    committed_q_current = q_new.copy()
+
+            q_current = committed_q_current.copy()
             
             # After processing waypoints, analyze segments and update preserved segments
             if waypoint_collision_status and waypoints_requiring_replan:
@@ -3222,7 +3387,7 @@ class PlannerNode(Node):
                     last_segment = segments[-1] if segments else None
                     
                     # Log segment analysis
-                    self.get_logger().info(f"Path segment analysis: {len(segments)} segment(s) found")
+                    self._log_hot_loop_info(lambda: f"Path segment analysis: {len(segments)} segment(s) found")
                     
                     # Update/extend start-connected segment if present
                     if first_segment and first_segment['is_collision_free']:
@@ -3233,20 +3398,20 @@ class PlannerNode(Node):
                                               for wp_idx in first_segment['waypoints']],
                                 'joint_solutions': first_segment['joint_solutions']
                             }
-                            self.get_logger().info(
+                            self._log_hot_loop_info(lambda: (
                                 f"✅ Preserved start segment: {len(validated_start_segment['waypoints'])} waypoints "
                                 f"(from robot pose)"
-                            )
+                            ))
                         else:
                             # Subsequent iterations: extend start segment with validated gap waypoints
                             new_waypoints = [(path_world[wp_idx], interp_rot_matrices[wp_idx], pruned_path_grid_indices[wp_idx]) 
                                             for wp_idx in first_segment['waypoints']]
                             validated_start_segment['waypoints'].extend(new_waypoints[1:])  # Skip first (boundary point)
                             validated_start_segment['joint_solutions'].extend(first_segment['joint_solutions'][1:])
-                            self.get_logger().info(
+                            self._log_hot_loop_info(lambda: (
                                 f"✅ Extended start segment: added {len(new_waypoints) - 1} waypoints "
                                 f"(total: {len(validated_start_segment['waypoints'])} waypoints)"
-                            )
+                            ))
                     
                     # Update/extend goal-connected segment if present
                     if last_segment and last_segment['is_collision_free']:
@@ -3257,24 +3422,24 @@ class PlannerNode(Node):
                                              for wp_idx in last_segment['waypoints']],
                                 'joint_solutions': last_segment['joint_solutions']
                             }
-                            self.get_logger().info(
+                            self._log_hot_loop_info(lambda: (
                                 f"✅ Preserved goal segment: {len(validated_goal_segment['waypoints'])} waypoints "
                                 f"(to goal pose)"
-                            )
+                            ))
                         else:
                             # Subsequent iterations: prepend validated gap waypoints to goal segment
                             new_waypoints = [(path_world[wp_idx], interp_rot_matrices[wp_idx], pruned_path_grid_indices[wp_idx]) 
                                             for wp_idx in last_segment['waypoints']]
                             validated_goal_segment['waypoints'] = new_waypoints[:-1] + validated_goal_segment['waypoints']  # Skip last (boundary)
                             validated_goal_segment['joint_solutions'] = last_segment['joint_solutions'][:-1] + validated_goal_segment['joint_solutions']
-                            self.get_logger().info(
+                            self._log_hot_loop_info(lambda: (
                                 f"✅ Extended goal segment: added {len(new_waypoints) - 1} waypoints "
                                 f"(total: {len(validated_goal_segment['waypoints'])} waypoints)"
-                            )
+                            ))
                     
                     # Check if we have a complete collision-free path now
                     if len(segments) == 1 and segments[0]['is_collision_free']:
-                        self.get_logger().info("🎉 Complete collision-free path found!")
+                        self._log_hot_loop_info("🎉 Complete collision-free path found!")
                         # Break out of replanning loop - path is valid
                         break
                     
@@ -3310,7 +3475,7 @@ class PlannerNode(Node):
                             # Track new boundaries as tried with clean grid
                             tried_clean_boundaries.add((current_planning_start_grid, current_planning_goal_grid))
                             
-                            self.get_logger().info(
+                            self._log_hot_loop_info(lambda: (
                                 f"📍 Planning boundaries changed (gap narrowed):\n"
                                 f"    New start: {[round(x, 3) for x in current_planning_start_pose]} (grid {current_planning_start_grid})\n"
                                 f"    New goal:  {[round(x, 3) for x in current_planning_goal_pose]} (grid {current_planning_goal_grid})\n"
@@ -3318,20 +3483,20 @@ class PlannerNode(Node):
                                 f"    ✅ Dict now has {len(collision_waypoints_to_avoid)} waypoints (should be 0)\n"
                                 f"    🔄 Resetting iteration counter (was {iterations_at_same_boundaries}) - fresh start with 0/{MAX_ITERATIONS_SAME_BOUNDARIES} for new boundaries\n"
                                 f"    📊 Global attempt: {replanning_attempt}/{MAX_REPLANNING_ATTEMPTS}"
-                            )
+                            ))
                             # Update tracked boundaries
                             previous_planning_start_grid = current_planning_start_grid
                             previous_planning_goal_grid = current_planning_goal_grid
                         else:
                             # Boundaries unchanged - keep accumulating collision waypoints
                             iterations_at_same_boundaries += 1
-                            self.get_logger().info(
+                            self._log_hot_loop_info(lambda: (
                                 f"📍 Planning boundaries unchanged (iteration {iterations_at_same_boundaries}/{MAX_ITERATIONS_SAME_BOUNDARIES}):\n"
                                 f"    Start: {[round(x, 3) for x in current_planning_start_pose]} (grid {current_planning_start_grid})\n"
                                 f"    Goal:  {[round(x, 3) for x in current_planning_goal_pose]} (grid {current_planning_goal_grid})\n"
                                 f"    Accumulating collision waypoints ({len(collision_waypoints_to_avoid)} existing)\n"
                                 f"    📊 Global attempt: {replanning_attempt}/{MAX_REPLANNING_ATTEMPTS}"
-                            )
+                            ))
                             
                             # Early termination if stuck at same boundaries
                             if iterations_at_same_boundaries >= MAX_ITERATIONS_SAME_BOUNDARIES:
@@ -3380,10 +3545,10 @@ class PlannerNode(Node):
                                 # Markers will be cleared automatically on next _publish_gap_boundary_markers call
                                 iterations_at_same_boundaries = 0
                                 
-                                self.get_logger().info(
+                                self._log_hot_loop_info(lambda: (
                                     f"   Cleared {num_cleared} collision waypoints - starting fresh with clean grid\n"
                                     f"   Boundaries unchanged: {current_planning_start_grid} → {current_planning_goal_grid}"
-                                )
+                                ))
                                 
                                 # Continue replanning with clean grid
                                 continue
@@ -3391,11 +3556,11 @@ class PlannerNode(Node):
                         # First iteration or only one segment validated - keep existing collision waypoints
                         if replanning_attempt > 0:
                             iterations_at_same_boundaries += 1
-                            self.get_logger().info(
+                            self._log_hot_loop_info(lambda: (
                                 f"📍 Continuing with current boundaries (segments not yet converged, iteration {iterations_at_same_boundaries}/{MAX_ITERATIONS_SAME_BOUNDARIES})\n"
                                 f"    Accumulating collision waypoints ({len(collision_waypoints_to_avoid)} existing)\n"
                                 f"    📊 Global attempt: {replanning_attempt}/{MAX_REPLANNING_ATTEMPTS}"
-                            )
+                            ))
                             
                             # Early termination if stuck before segments converge
                             if iterations_at_same_boundaries >= MAX_ITERATIONS_SAME_BOUNDARIES:
@@ -3442,9 +3607,12 @@ class PlannerNode(Node):
                     # Add collision waypoints to avoid set with appropriate marking strategy
                     new_collision_waypoints = []
                     repeated_collision_waypoints = []
+                    escalated_collision_waypoints = []
                     for wp_idx, is_free, _, grid_idx in waypoint_collision_status:
                         if not is_free and grid_idx is not None:
                             grid_tuple = tuple(grid_idx)
+                            repeat_count = collision_waypoint_repeat_counts.get(grid_tuple, 0) + 1
+                            collision_waypoint_repeat_counts[grid_tuple] = repeat_count
                             # Track if this is a new or repeated collision
                             if grid_tuple in collision_waypoints_to_avoid:
                                 repeated_collision_waypoints.append(grid_tuple)
@@ -3453,15 +3621,19 @@ class PlannerNode(Node):
                             
                             # Check if this is a boundary or interior collision waypoint
                             is_boundary = wp_idx in boundary_collision_indices
-                            # Boundary: 0 layers (cell only), Interior: configured layers
+                            # First-seen boundary collisions stay cell-only to preserve narrow passages.
+                            # If the same cell collides again, escalate it to the configured neighbor layers.
                             num_layers = 0 if is_boundary else self.collision_avoidance_neighbor_layers
+                            if is_boundary and repeat_count > 1:
+                                num_layers = self.collision_avoidance_neighbor_layers
+                                escalated_collision_waypoints.append(grid_tuple)
                             collision_waypoints_to_avoid[grid_tuple] = num_layers
                     
-                    self.get_logger().info(
+                    self._log_hot_loop_info(lambda: (
                         f"Identified {len(collision_waypoint_indices)} collision waypoints: "
                         f"{len(boundary_collision_indices)} boundary (first/last 2 per segment, cell-only), "
                         f"{len(collision_waypoint_indices) - len(boundary_collision_indices)} interior ({self.collision_avoidance_neighbor_layers} layers)"
-                    )
+                    ))
                     # Collision waypoints will be visualized on next A* iteration via gap_boundaries
                     
                     if repeated_collision_waypoints:
@@ -3469,6 +3641,34 @@ class PlannerNode(Node):
                             f"⚠️  {len(repeated_collision_waypoints)} waypoints are REPEATED collisions from previous iterations: {repeated_collision_waypoints}"
                             f"\n   → A* cannot find alternative paths - gap forces path through these waypoints!"
                         )
+
+                    if escalated_collision_waypoints:
+                        escalated_samples = list(dict.fromkeys(escalated_collision_waypoints))[:3]
+                        self._log_hot_loop_info(lambda: (
+                            f"Escalated {len(escalated_collision_waypoints)} repeated boundary collision waypoints "
+                            f"to {self.collision_avoidance_neighbor_layers} neighbor layer(s): {escalated_samples}"
+                        ))
+
+                    if repeated_collision_waypoints and not new_collision_waypoints:
+                        repeated_collision_samples = list(dict.fromkeys(repeated_collision_waypoints))[:3]
+                        if validated_start_segment and validated_goal_segment:
+                            gap_distance = np.linalg.norm(
+                                np.array(current_planning_goal_grid) - np.array(current_planning_start_grid)
+                            )
+                            self._fail_current_goal(
+                                f"❌ Path planning plateau: gap {current_planning_start_grid} → {current_planning_goal_grid} keeps reproducing the same collision waypoints\n"
+                                f"   Repeated collision waypoints: {repeated_collision_samples}\n"
+                                f"   Gap distance: {gap_distance:.1f} grid cells\n"
+                                f"   No new obstacle cells were added in this iteration, so another A* search would repeat the same result.\n"
+                                f"   Suggestion: Goal likely unreachable through this gap - try a different goal or robot starting pose."
+                            )
+                        else:
+                            self._fail_current_goal(
+                                f"❌ Path planning plateau before segments converged: repeated collision waypoints {repeated_collision_samples}\n"
+                                f"   No new obstacle cells were added in this iteration, so another A* search would repeat the same result.\n"
+                                f"   Suggestion: Goal likely unreachable from the current pose - try a different goal or robot starting pose."
+                            )
+                        return
             
             # Check if we need to continue replanning
             if waypoints_requiring_replan:
@@ -3486,13 +3686,13 @@ class PlannerNode(Node):
                     return
                 else:
                     # Continue to next replanning iteration with updated obstacles and narrowed gap
-                    self.get_logger().info(f"🔄 Continuing to replanning iteration {replanning_attempt}...")
+                    self._log_hot_loop_info(lambda: f"🔄 Continuing to replanning iteration {replanning_attempt}...")
                     continue
             
             # If we reach here, all waypoints are collision-free!
             # Reconstruct complete path from validated segments
             if validated_start_segment and validated_goal_segment:
-                self.get_logger().info("🎉 Complete collision-free path validated!")
+                self._log_hot_loop_info("🎉 Complete collision-free path validated!")
                 
                 # Build full joint trajectory from preserved segments
                 all_joint_values = validated_start_segment['joint_solutions'] + validated_goal_segment['joint_solutions']
@@ -3501,23 +3701,28 @@ class PlannerNode(Node):
                 # Build complete waypoint list for visualization
                 all_waypoints = [wp[0] for wp in validated_start_segment['waypoints']] + [wp[0] for wp in validated_goal_segment['waypoints']]
                 
-                self.get_logger().info(
+                self._log_hot_loop_info(lambda: (
                     f"Final path statistics:\n"
                     f"    Start segment: {len(validated_start_segment['waypoints'])} waypoints\n"
                     f"    Goal segment:  {len(validated_goal_segment['waypoints'])} waypoints\n"
                     f"    Total:         {len(all_joint_values)} waypoints"
-                )
+                ))
             else:
                 # First iteration with no collisions - use all validated waypoints
                 all_joint_values_print = all_joint_values
-                self.get_logger().info(f"🎉 Path validated with {len(all_joint_values)} collision-free waypoints!")
+                self._log_hot_loop_info(lambda: f"🎉 Path validated with {len(all_joint_values)} collision-free waypoints!")
             
             # Break out of replanning loop - we have a valid path!
             pos = goal_pos_wrist3
             orn = goal_orientation_wrist3.as_matrix()
             T = create_pose_matrix(pos, orn)
             
-            precise_goal_solutions = closed_form_algorithm(T, q_current=q_current, type=0, return_all_solutions=True)
+            precise_goal_solutions = closed_form_algorithm(
+                T,
+                q_current=q_current,
+                type=0,
+                return_all_solutions=(self.max_ik_solutions_to_test != 1),
+            )
 
             # Use collision checking for final goal as well
             precise_goal_joint_values, goal_selection_outcome = self._select_best_collision_free_solution(
@@ -3555,10 +3760,10 @@ class PlannerNode(Node):
             
             # Path planning successful - break out of replanning loop
             if replanning_attempt > 0:
-                self.get_logger().info(
+                self._log_hot_loop_info(lambda: (
                     f"✅ Replanning successful on attempt {replanning_attempt}: "
                     f"Found collision-free path avoiding {len(collision_waypoints_to_avoid)} problematic waypoints"
-                )
+                ))
             break  # Exit replanning loop
         
         # (END OF REPLANNING LOOP - Continue with jump detection and trajectory publishing)
@@ -3595,7 +3800,7 @@ class PlannerNode(Node):
             self._log_plan_metrics('jump_detected')
             return
 
-        self.get_logger().info(f"Joint values: {all_joint_values_print}")
+        self._log_hot_loop_info(lambda: f"Joint values: {all_joint_values_print}")
         # joints_msg = Float64MultiArray()
         # flat_values = [item for sublist in all_joint_values_print for item in sublist]
         # joints_msg.data = flat_values
@@ -3608,11 +3813,11 @@ class PlannerNode(Node):
             # msg.position = q.tolist()
             # msg.header.stamp = self.get_clock().now().to_msg()
             # self.joint_pub.publish(msg)
-            self.get_logger().info(f"Published step {i}: {np.round(q, 3)}")
+            self._log_hot_loop_info(lambda: f"Published step {i}: {np.round(q, 3)}")
             # time.sleep(0.1)  # 10 Hz
 
         # Publish success
-        self.get_logger().info("Joint planning published.")
+        self._log_hot_loop_info("Joint planning published.")
 
         if self._abort_if_requested(plan_generation, "goal was cancelled before trajectory publication"):
             return

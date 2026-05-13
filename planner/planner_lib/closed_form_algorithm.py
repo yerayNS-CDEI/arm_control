@@ -271,16 +271,14 @@ def _select_best_solution(ik_solutions, q_ref=None):
     if not np.any(valid_rows):
         return np.full(6, np.nan)
 
-    idx_valid = np.where(valid_rows)[0]
+    valid_solutions = np.asarray(ik_solutions[valid_rows], dtype=float)
     if q_ref is None:
-        return np.array(ik_solutions[idx_valid[0]], dtype=float)
+        return valid_solutions[0].copy()
 
-    weights = np.ones(6)
-    diffs = np.array([
-        np.sqrt(np.sum(weights * np.abs(np.arctan2(np.sin(q_ref - ik_solutions[i]), np.cos(q_ref - ik_solutions[i])))))
-        for i in idx_valid
-    ])
-    best_sol = np.array(ik_solutions[idx_valid[np.argmin(diffs)]], dtype=float)
+    q_ref = np.asarray(q_ref, dtype=float)
+    deltas = np.arctan2(np.sin(q_ref - valid_solutions), np.cos(q_ref - valid_solutions))
+    distances = np.sqrt(np.sum(deltas ** 2, axis=1))
+    best_sol = valid_solutions[int(np.argmin(distances))].copy()
 
     # Use the equivalent joint angles closest to q_ref.
     delta = (best_sol - q_ref + np.pi) % (2 * np.pi) - np.pi
