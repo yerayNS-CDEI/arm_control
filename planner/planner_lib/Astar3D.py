@@ -246,6 +246,7 @@ def get_valid_neighbors_dual_frame(
     slerp = None,
     start_idx: Tuple[int, int, int] = None,
     max_dist_grid: float = None,
+    dual_frame_validity_cache: Dict[Tuple[int, int, int], bool] = None,
     cylinder_center_xy: Tuple[float, float] = None,
     cylinder_radius: float = None,
     cylinder_z_range: Tuple[float, float] = None
@@ -289,24 +290,37 @@ def get_valid_neighbors_dual_frame(
             and grid[nx, ny, nz] == 0
         ]
     
-    # Dual-frame checking: validate both wrist_3 AND tool0
-    # CRITICAL: Each neighbor gets its OWN orientation based on its distance from start
+    # Dual-frame checking: validate both wrist_3 AND tool0.
+    # For a single A* search, validity is deterministic per voxel because start/goal,
+    # SLERP interpolation, tool transform, and occupancy grid stay fixed.
+    # Cache those results so repeated neighbor expansions do not recompute them.
     valid_neighbors = []
     start_idx_array = np.array(start_idx, dtype=float)
+    if dual_frame_validity_cache is None:
+        dual_frame_validity_cache = {}
     
     for nx, ny, nz in possible_moves:
+        neighbor_pos = (nx, ny, nz)
+        cached_validity = dual_frame_validity_cache.get(neighbor_pos)
+        if cached_validity is not None:
+            if cached_validity:
+                valid_neighbors.append(neighbor_pos)
+            continue
+
         # Compute orientation specifically for this neighbor
-        neighbor_idx_array = np.array([nx, ny, nz], dtype=float)
+        neighbor_idx_array = np.array(neighbor_pos, dtype=float)
         dist_from_start_grid = np.linalg.norm(neighbor_idx_array - start_idx_array)
         progress = min(dist_from_start_grid / max_dist_grid, 1.0) if max_dist_grid > 0 else 0.0
         neighbor_orientation = slerp([progress])[0].as_matrix()
         
-        if check_dual_frame_collision(
-            (nx, ny, nz), grid, x_vals, y_vals, z_vals,
+        is_valid = check_dual_frame_collision(
+            neighbor_pos, grid, x_vals, y_vals, z_vals,
             T_wrist3_tool0, neighbor_orientation,
             cylinder_center_xy, cylinder_radius, cylinder_z_range
-        ):
-            valid_neighbors.append((nx, ny, nz))
+        )
+        dual_frame_validity_cache[neighbor_pos] = is_valid
+        if is_valid:
+            valid_neighbors.append(neighbor_pos)
     
     return valid_neighbors
 
@@ -360,9 +374,11 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
         
         # Compute diagonal distance for progress estimation (in grid index space)
         max_dist_grid = calculate_heuristic(start, goal)
+        dual_frame_validity_cache = {}
     else:
         slerp = None
         max_dist_grid = None
+        dual_frame_validity_cache = None
     
     # Initialize start node
     start_node = create_node(
@@ -398,6 +414,7 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
         for neighbor_pos in get_valid_neighbors_dual_frame(
             grid, current_pos, x_vals, y_vals, z_vals,
             T_wrist3_tool0, slerp, start, max_dist_grid,
+            dual_frame_validity_cache,
             cylinder_center_xy, cylinder_radius, cylinder_z_range
         ):
             # Skip if already explored

@@ -1921,6 +1921,89 @@ class PlannerNode(Node):
         
         return sorted_indices, sorted_distances
 
+    def _get_ranked_ik_candidates(self, ik_solutions, q_current, waypoint_idx=None):
+        """
+        Return IK candidates ordered by proximity to the reference configuration.
+
+        The existing `max_ik_solutions_to_test` parameter limits how many nearby
+        candidates are considered for both direct selection and collision fallback.
+        """
+        sorted_indices, sorted_distances = self._sort_ik_solutions_by_distance(ik_solutions, q_current)
+
+        if len(sorted_indices) == 0:
+            if waypoint_idx is not None:
+                self.get_logger().error(f"Waypoint {waypoint_idx}: No valid IK solutions found")
+            return []
+
+        if self.max_ik_solutions_to_test > 0:
+            original_count = len(sorted_indices)
+            sorted_indices = sorted_indices[:self.max_ik_solutions_to_test]
+            sorted_distances = sorted_distances[:self.max_ik_solutions_to_test]
+            if waypoint_idx == 0:
+                self.get_logger().info(
+                    f"Testing only {len(sorted_indices)}/{original_count} closest IK solutions "
+                    f"(max_ik_solutions_to_test={self.max_ik_solutions_to_test})"
+                )
+
+        ranked_candidates = []
+        for candidate_idx, candidate_dist in zip(sorted_indices, sorted_distances):
+            ranked_candidates.append(
+                (int(candidate_idx), np.asarray(ik_solutions[candidate_idx], dtype=float).copy(), float(candidate_dist))
+            )
+        return ranked_candidates
+
+    def _select_collision_free_ranked_candidate(
+        self,
+        ranked_candidates,
+        waypoint_idx,
+        timeout_sec=2.0,
+        cancel_check=None,
+    ):
+        """
+        Try ranked IK candidates in order until one validates collision-free.
+        """
+        if not ranked_candidates:
+            return None, IKSelectionOutcome.NO_VALID_SOLUTIONS
+
+        if cancel_check is not None and cancel_check():
+            return None, IKSelectionOutcome.CHECK_FAILED
+
+        collided_candidate_indices = []
+        for candidate_rank, (candidate_idx, candidate_solution, candidate_dist) in enumerate(ranked_candidates, start=1):
+            collision_status = self._check_collision_sync(
+                candidate_solution,
+                publish_visualization=self.visualize_collision_checks,
+                timeout_sec=timeout_sec,
+                cancel_check=cancel_check,
+            )
+
+            if collision_status == CollisionCheckStatus.CHECK_FAILED:
+                self.get_logger().warn(
+                    f"Waypoint {waypoint_idx}: IK candidate {candidate_idx} could not be collision-validated "
+                    f"(rank {candidate_rank}, dist: {candidate_dist:.3f})"
+                )
+                return None, IKSelectionOutcome.CHECK_FAILED
+
+            if collision_status == CollisionCheckStatus.FREE:
+                if candidate_rank == 1:
+                    self.get_logger().info(
+                        f"Waypoint {waypoint_idx}: ✓ Closest solution {candidate_idx} collision-free "
+                        f"(dist: {candidate_dist:.3f})"
+                    )
+                else:
+                    self.get_logger().warn(
+                        f"Waypoint {waypoint_idx}: recovered with fallback IK solution {candidate_idx} "
+                        f"(rank {candidate_rank}, dist: {candidate_dist:.3f}) after collisions in {collided_candidate_indices}"
+                    )
+                return candidate_solution, IKSelectionOutcome.SUCCESS
+
+            collided_candidate_indices.append(candidate_idx)
+
+        self.get_logger().warn(
+            f"Waypoint {waypoint_idx}: all tested IK solutions are in collision {collided_candidate_indices}"
+        )
+        return None, IKSelectionOutcome.ALL_IN_COLLISION
+
     def _check_collision_sync(
         self,
         joint_values,
@@ -2225,32 +2308,19 @@ class PlannerNode(Node):
             best_solution: (6,) array of closest collision-free solution, or None if none found
             IKSelectionOutcome describing why the selection succeeded or failed
         """
-        sorted_indices, sorted_distances = self._sort_ik_solutions_by_distance(ik_solutions, q_current)
-        
-        if len(sorted_indices) == 0:
-            self.get_logger().error(f"Waypoint {waypoint_idx}: No valid IK solutions found")
+        ranked_candidates = self._get_ranked_ik_candidates(ik_solutions, q_current, waypoint_idx=waypoint_idx)
+
+        if not ranked_candidates:
             return None, IKSelectionOutcome.NO_VALID_SOLUTIONS
-        
-        # Limit the number of solutions to test if parameter is set
-        if self.max_ik_solutions_to_test > 0:
-            original_count = len(sorted_indices)
-            sorted_indices = sorted_indices[:self.max_ik_solutions_to_test]
-            sorted_distances = sorted_distances[:self.max_ik_solutions_to_test]
-            if waypoint_idx == 0:  # Log once per trajectory
-                self.get_logger().info(
-                    f"Testing only {len(sorted_indices)}/{original_count} closest IK solutions "
-                    f"(max_ik_solutions_to_test={self.max_ik_solutions_to_test})"
-                )
-        
+
         single_service_ready = self.collision_check_client.service_is_ready()
         if not test_collision:
-            best_idx = sorted_indices[0]
-            best_dist = sorted_distances[0]
+            best_idx, best_solution, best_dist = ranked_candidates[0]
             self.get_logger().info(
                 f"Waypoint {waypoint_idx}: Using closest solution {best_idx} "
                 f"(dist: {best_dist:.3f}, collision checking disabled)"
             )
-            return ik_solutions[best_idx], IKSelectionOutcome.SUCCESS
+            return best_solution, IKSelectionOutcome.SUCCESS
 
         if not single_service_ready:
             self.get_logger().error(
@@ -2258,38 +2328,12 @@ class PlannerNode(Node):
             )
             return None, IKSelectionOutcome.CHECK_FAILED
 
-        if cancel_check is not None and cancel_check():
-            return None, IKSelectionOutcome.CHECK_FAILED
-
-        best_idx = sorted_indices[0]
-        best_dist = sorted_distances[0]
-        best_solution = ik_solutions[best_idx]
-        collision_status = self._check_collision_sync(
-            best_solution,
-            publish_visualization=self.visualize_collision_checks,
+        return self._select_collision_free_ranked_candidate(
+            ranked_candidates,
+            waypoint_idx=waypoint_idx,
             timeout_sec=timeout_sec,
             cancel_check=cancel_check,
         )
-
-        if collision_status == CollisionCheckStatus.CHECK_FAILED:
-            self.get_logger().warn(
-                f"Waypoint {waypoint_idx}: closest solution {best_idx} could not be collision-validated "
-                f"(dist: {best_dist:.3f})"
-            )
-            return None, IKSelectionOutcome.CHECK_FAILED
-
-        if collision_status == CollisionCheckStatus.FREE:
-            self.get_logger().info(
-                f"Waypoint {waypoint_idx}: ✓ Closest solution {best_idx} collision-free "
-                f"(dist: {best_dist:.3f})"
-            )
-            return best_solution, IKSelectionOutcome.SUCCESS
-
-        self.get_logger().warn(
-            f"Waypoint {waypoint_idx}: ✗ Closest solution {best_idx} in COLLISION "
-            f"(dist: {best_dist:.3f})"
-        )
-        return None, IKSelectionOutcome.ALL_IN_COLLISION
 
     def plan_and_send_trajectory(self, msg: PoseStamped, plan_generation=None):
         self._start_plan_metrics()
@@ -3066,48 +3110,39 @@ class PlannerNode(Node):
 
                 T = create_pose_matrix(path_world[i], interp_rot_matrices[i])
                 ik_solutions = closed_form_algorithm(T, q_current=q_current, type=0, return_all_solutions=True)
-                # Select the closest IK solution only. If it later collides, replanning should avoid that waypoint.
-                q_new, selection_outcome = self._select_best_collision_free_solution(
-                    ik_solutions,
-                    q_current,
-                    waypoint_idx=i,
-                    test_collision=False,
-                    cancel_check=lambda: self._should_abort_plan(plan_generation),
-                )
+                ranked_candidates = self._get_ranked_ik_candidates(ik_solutions, q_current, waypoint_idx=i)
 
-                if q_new is None:
-                    if selection_outcome == IKSelectionOutcome.NO_VALID_SOLUTIONS:
-                        self.get_logger().error(
-                            f"Waypoint {i} at {path_world[i]} has no valid IK solution. "
-                            f"Grid index: {grid_idx if grid_idx is not None else 'unknown'}"
+                if not ranked_candidates:
+                    self.get_logger().error(
+                        f"Waypoint {i} at {path_world[i]} has no valid IK solution. "
+                        f"Grid index: {grid_idx if grid_idx is not None else 'unknown'}"
+                    )
+                    waypoints_requiring_replan.append(
+                        (
+                            i,
+                            path_world[i],
+                            grid_idx,
+                            "no valid IK solution",
                         )
-                        waypoints_requiring_replan.append(
-                            (
-                                i,
-                                path_world[i],
-                                grid_idx,
-                                "no valid IK solution",
-                            )
-                        )
-                        waypoint_collision_status.append((i, False, None, grid_idx))
-                    else:
-                        self._fail_current_goal(f"Unexpected IK selection outcome at waypoint {i}: {selection_outcome}")
-                        return
-                else:
-                    # Apply unwrapping and limits to collision-free solution
-                    # Unwrap each joint to the equivalent angle nearest the current state.
-                    delta = (q_new - q_current + np.pi) % (2 * np.pi) - np.pi
-                    q_new = q_current + delta
+                    )
+                    waypoint_collision_status.append((i, False, None, grid_idx))
+                    continue
 
-                    # Keep joints inside UR controller limits.
-                    for j in range(len(q_new)):
-                        while q_new[j] > 2 * np.pi:
-                            q_new[j] -= 2 * np.pi
-                        while q_new[j] < -2 * np.pi:
-                            q_new[j] += 2 * np.pi
+                q_reference = q_current.copy()
+                closest_idx, q_new, _ = ranked_candidates[0]
 
-                    selected_waypoint_candidates.append((i, q_new, grid_idx))
-                    q_current = q_new
+                # Apply unwrapping and limits to the selected solution.
+                delta = (q_new - q_reference + np.pi) % (2 * np.pi) - np.pi
+                q_new = q_reference + delta
+
+                for j in range(len(q_new)):
+                    while q_new[j] > 2 * np.pi:
+                        q_new[j] -= 2 * np.pi
+                    while q_new[j] < -2 * np.pi:
+                        q_new[j] += 2 * np.pi
+
+                selected_waypoint_candidates.append((i, q_new, grid_idx, ranked_candidates[1:], q_reference, closest_idx))
+                q_current = q_new
 
             if self.enable_collision_checking and selected_waypoint_candidates:
                 collision_statuses = self._check_collision_batch_sync(
@@ -3117,7 +3152,7 @@ class PlannerNode(Node):
                     cancel_check=lambda: self._should_abort_plan(plan_generation),
                 )
 
-                for (waypoint_idx, q_new, grid_idx), collision_status in zip(selected_waypoint_candidates, collision_statuses):
+                for (waypoint_idx, q_new, grid_idx, fallback_candidates, q_reference, closest_idx), collision_status in zip(selected_waypoint_candidates, collision_statuses):
                     if collision_status == CollisionCheckStatus.CHECK_FAILED:
                         self._fail_current_goal(
                             f"Waypoint {waypoint_idx} could not be collision-validated. Aborting instead of replanning on uncertain data."
@@ -3125,8 +3160,35 @@ class PlannerNode(Node):
                         return
 
                     if collision_status == CollisionCheckStatus.COLLISION:
+                        if fallback_candidates:
+                            fallback_solution, fallback_outcome = self._select_collision_free_ranked_candidate(
+                                fallback_candidates,
+                                waypoint_idx=waypoint_idx,
+                                timeout_sec=2.0,
+                                cancel_check=lambda: self._should_abort_plan(plan_generation),
+                            )
+                            if fallback_outcome == IKSelectionOutcome.CHECK_FAILED:
+                                self._fail_current_goal(
+                                    f"Waypoint {waypoint_idx} fallback IK solution could not be collision-validated. Aborting instead of replanning on uncertain data."
+                                )
+                                return
+                            if fallback_solution is not None:
+                                delta = (fallback_solution - q_reference + np.pi) % (2 * np.pi) - np.pi
+                                fallback_solution = q_reference + delta
+
+                                for j in range(len(fallback_solution)):
+                                    while fallback_solution[j] > 2 * np.pi:
+                                        fallback_solution[j] -= 2 * np.pi
+                                    while fallback_solution[j] < -2 * np.pi:
+                                        fallback_solution[j] += 2 * np.pi
+
+                                all_joint_values.append(fallback_solution)
+                                all_joint_values_print.append(fallback_solution)
+                                waypoint_collision_status.append((waypoint_idx, True, fallback_solution, grid_idx))
+                                continue
+
                         self.get_logger().error(
-                            f"Waypoint {waypoint_idx} at {path_world[waypoint_idx]} has closest IK solution in collision. "
+                            f"Waypoint {waypoint_idx} at {path_world[waypoint_idx]} has closest IK solution {closest_idx} in collision. "
                             f"Grid index: {grid_idx if grid_idx is not None else 'unknown'}"
                         )
                         waypoints_requiring_replan.append(
