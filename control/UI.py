@@ -121,6 +121,15 @@ class RobotControlUI(QMainWindow):
         self.cleared_status_backup = None
         self.base_cleared_status_backup = None
         self.gpr_cleared_status_backup = None
+        self.fsm_cleared_status_backup = None
+
+        # FSM processes
+        self.fsm_launch_process = None
+        self.fsm_node_process = None
+
+        # FSM log buffer (html, plain_text, add_newline) for filter rebuilds
+        self.fsm_log_entries = []
+        self.fsm_log_backup = []
         
         # Store process list for kill functionality
         self.current_process_list = []
@@ -179,6 +188,10 @@ class RobotControlUI(QMainWindow):
         self.gpr_request_groups = self._build_gpr_request_groups()
         self.gpr_group_combos = {}
         self.gpr_request_processes = {}
+        # Generic per-widget log buffers and filter inputs
+        self.tab_log_entries: dict = {}   # id(widget) -> list of (html, plain_text, add_newline)
+        self.tab_log_backups: dict = {}   # id(widget) -> backup list for clear/restore
+        self.tab_filter_inputs: dict = {} # id(widget) -> QLineEdit
         # ===== ARM CONTROL TAB =====
         arm_tab = QWidget()
         arm_tab_layout = QVBoxLayout(arm_tab)
@@ -422,25 +435,14 @@ class RobotControlUI(QMainWindow):
         status_header.addWidget(QLabel("Arm Control - Live Joints + Status"))
         status_header.addStretch()
 
-        # Search bar
-        status_header.addWidget(QLabel("Search:"))
+        # Filter bar
+        status_header.addWidget(QLabel("Filter:"))
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Enter search term...")
-        self.search_input.setMaximumWidth(150)
-        self.search_input.returnPressed.connect(lambda: self.search_status(forward=True))
+        self.search_input.setPlaceholderText("Filter output lines...")
+        self.search_input.setMaximumWidth(200)
+        self.search_input.textChanged.connect(lambda: self._log_apply_filter(self.status_text))
         status_header.addWidget(self.search_input)
-
-        btn_search_prev = QPushButton("◀")
-        btn_search_prev.clicked.connect(lambda: self.search_status(forward=False))
-        btn_search_prev.setMaximumWidth(40)
-        btn_search_prev.setToolTip("Find previous")
-        status_header.addWidget(btn_search_prev)
-
-        btn_search_next = QPushButton("▶")
-        btn_search_next.clicked.connect(lambda: self.search_status(forward=True))
-        btn_search_next.setMaximumWidth(40)
-        btn_search_next.setToolTip("Find next")
-        status_header.addWidget(btn_search_next)
+        self.tab_filter_inputs[id(self.status_text)] = self.search_input
 
         self.btn_restore_status = QPushButton("Restore")
         self.btn_restore_status.clicked.connect(self.restore_status)
@@ -590,25 +592,14 @@ class RobotControlUI(QMainWindow):
         base_status_header.addWidget(QLabel("Terminal + Status:"))
         base_status_header.addStretch()
 
-        # Search bar
-        base_status_header.addWidget(QLabel("Search:"))
+        # Filter bar
+        base_status_header.addWidget(QLabel("Filter:"))
         self.base_search_input = QLineEdit()
-        self.base_search_input.setPlaceholderText("Enter search term...")
-        self.base_search_input.setMaximumWidth(150)
-        self.base_search_input.returnPressed.connect(lambda: self.search_base_status(forward=True))
+        self.base_search_input.setPlaceholderText("Filter output lines...")
+        self.base_search_input.setMaximumWidth(200)
+        self.base_search_input.textChanged.connect(lambda: self._log_apply_filter(self.base_status_text))
         base_status_header.addWidget(self.base_search_input)
-
-        btn_base_search_prev = QPushButton("◀")
-        btn_base_search_prev.clicked.connect(lambda: self.search_base_status(forward=False))
-        btn_base_search_prev.setMaximumWidth(40)
-        btn_base_search_prev.setToolTip("Find previous")
-        base_status_header.addWidget(btn_base_search_prev)
-
-        btn_base_search_next = QPushButton("▶")
-        btn_base_search_next.clicked.connect(lambda: self.search_base_status(forward=True))
-        btn_base_search_next.setMaximumWidth(40)
-        btn_base_search_next.setToolTip("Find next")
-        base_status_header.addWidget(btn_base_search_next)
+        self.tab_filter_inputs[id(self.base_status_text)] = self.base_search_input
 
         self.btn_restore_base_status = QPushButton("Restore")
         self.btn_restore_base_status.clicked.connect(self.restore_base_status)
@@ -1157,25 +1148,14 @@ class RobotControlUI(QMainWindow):
         full_control_status_header.addWidget(QLabel("Full Control - Live Joints + Status"))
         full_control_status_header.addStretch()
 
-        # Search bar for Full Control
-        full_control_status_header.addWidget(QLabel("Search:"))
+        # Filter bar for Full Control
+        full_control_status_header.addWidget(QLabel("Filter:"))
         self.full_control_search_input = QLineEdit()
-        self.full_control_search_input.setPlaceholderText("Enter search term...")
-        self.full_control_search_input.setMaximumWidth(150)
-        self.full_control_search_input.returnPressed.connect(lambda: self.search_full_control_status(forward=True))
+        self.full_control_search_input.setPlaceholderText("Filter output lines...")
+        self.full_control_search_input.setMaximumWidth(200)
+        self.full_control_search_input.textChanged.connect(lambda: self._log_apply_filter(self.full_control_status_text))
         full_control_status_header.addWidget(self.full_control_search_input)
-
-        btn_full_control_search_prev = QPushButton("◀")
-        btn_full_control_search_prev.clicked.connect(lambda: self.search_full_control_status(forward=False))
-        btn_full_control_search_prev.setMaximumWidth(40)
-        btn_full_control_search_prev.setToolTip("Find previous")
-        full_control_status_header.addWidget(btn_full_control_search_prev)
-
-        btn_full_control_search_next = QPushButton("▶")
-        btn_full_control_search_next.clicked.connect(lambda: self.search_full_control_status(forward=True))
-        btn_full_control_search_next.setMaximumWidth(40)
-        btn_full_control_search_next.setToolTip("Find next")
-        full_control_status_header.addWidget(btn_full_control_search_next)
+        self.tab_filter_inputs[id(self.full_control_status_text)] = self.full_control_search_input
 
         self.btn_restore_full_control_status = QPushButton("Restore")
         self.btn_restore_full_control_status.clicked.connect(self.restore_full_control_status)
@@ -1193,6 +1173,7 @@ class RobotControlUI(QMainWindow):
         # Add Full Control tab after Joint Control
         tabs.addTab(full_control_tab, "Full Control")
         tabs.addTab(self._create_gpr_api_test_tab(), "GPR API Test")
+        tabs.addTab(self._create_fsm_tab(), "FSM")
 
         # Connect tab change signal to check joint states when Joint Control tab is activated
         tabs.currentChanged.connect(lambda index: self._on_tab_changed(index, tabs))
@@ -1652,6 +1633,34 @@ class RobotControlUI(QMainWindow):
             self.joint_status_text.insertHtml("<b style='color: #539bf5;'> Checking for current joint positions...</b>")
             self.read_joint_positions()
  
+    @staticmethod
+    def _strip_html(text):
+        """Strip HTML tags to get plain text for filter matching."""
+        import re as _re
+        return _re.sub(r'<[^>]+>', '', text)
+
+    def _log_append(self, widget, content, add_newline=True):
+        """Store entry in the per-widget log buffer and render it if it passes the current filter."""
+        plain = self._strip_html(content)
+        self.tab_log_entries.setdefault(id(widget), []).append((content, plain, add_newline))
+        filt = self.tab_filter_inputs.get(id(widget))
+        term = filt.text().strip().lower() if filt else ''
+        if not term or term in plain.lower():
+            self._append_to_text_widget(widget, content, add_newline)
+
+    def _log_apply_filter(self, widget):
+        """Rebuild the widget showing only entries whose plain text matches the current filter."""
+        filt = self.tab_filter_inputs.get(id(widget))
+        term = filt.text().strip().lower() if filt else ''
+        scrollbar = widget.verticalScrollBar()
+        was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 10
+        widget.clear()
+        for h, plain, nl in self.tab_log_entries.get(id(widget), []):
+            if not term or term in plain.lower():
+                self._append_to_text_widget(widget, h, nl)
+        if was_at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+
     def _ansi_to_html(self, text):
         """Convert ANSI color codes to HTML"""
         # ANSI color code mapping
@@ -2239,24 +2248,13 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         gpr_status_header = QHBoxLayout()
         gpr_status_header.addWidget(QLabel("GPR API Test - Curl Command + Response"))
         gpr_status_header.addStretch()
-        gpr_status_header.addWidget(QLabel("Search:"))
+        gpr_status_header.addWidget(QLabel("Filter:"))
         self.gpr_search_input = QLineEdit()
-        self.gpr_search_input.setPlaceholderText("Enter search term...")
-        self.gpr_search_input.setMaximumWidth(180)
-        self.gpr_search_input.returnPressed.connect(lambda: self.search_gpr_status(forward=True))
+        self.gpr_search_input.setPlaceholderText("Filter output lines...")
+        self.gpr_search_input.setMaximumWidth(200)
+        self.gpr_search_input.textChanged.connect(lambda: self._log_apply_filter(self.gpr_status_text))
         gpr_status_header.addWidget(self.gpr_search_input)
-
-        btn_gpr_search_prev = QPushButton("◀")
-        btn_gpr_search_prev.clicked.connect(lambda: self.search_gpr_status(forward=False))
-        btn_gpr_search_prev.setMaximumWidth(40)
-        btn_gpr_search_prev.setToolTip("Find previous")
-        gpr_status_header.addWidget(btn_gpr_search_prev)
-
-        btn_gpr_search_next = QPushButton("▶")
-        btn_gpr_search_next.clicked.connect(lambda: self.search_gpr_status(forward=True))
-        btn_gpr_search_next.setMaximumWidth(40)
-        btn_gpr_search_next.setToolTip("Find next")
-        gpr_status_header.addWidget(btn_gpr_search_next)
+        self.tab_filter_inputs[id(self.gpr_status_text)] = self.gpr_search_input
 
         self.btn_restore_gpr_status = QPushButton("Restore")
         self.btn_restore_gpr_status.clicked.connect(self.restore_gpr_status)
@@ -2313,7 +2311,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         """Send the selected GPR HTTP request using curl."""
         request = combo.currentData()
         if not request:
-            self._append_to_text_widget(
+            self._log_append(
                 self.gpr_status_text,
                 "<span style='color: #c69026;'>⚠ No GPR request selected</span>",
             )
@@ -2321,7 +2319,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         base_url = self.gpr_base_url_input.text().strip().rstrip('/')
         if not base_url:
-            self._append_to_text_widget(
+            self._log_append(
                 self.gpr_status_text,
                 "<span style='color: #c69026;'>⚠ Base URL is empty</span>",
             )
@@ -2351,11 +2349,11 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             ])
 
         cmd_str = 'curl ' + ' '.join(shlex.quote(arg) for arg in args)
-        self._append_to_text_widget(
+        self._log_append(
             self.gpr_status_text,
             f"<b style='color: #57ab5a;'>▶ {html.escape(cmd_str)}</b>",
         )
-        self._append_to_text_widget(
+        self._log_append(
             self.gpr_status_text,
             f"<span style='color: #76e3ea;'>Request: {html.escape(request['description'])}</span>",
         )
@@ -2382,7 +2380,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             return
 
         process.setProperty('had_output', True)
-        self._append_to_text_widget(
+        self._log_append(
             self.gpr_status_text,
             (
                 "<pre style=\"margin: 0; font-family: 'Courier New', monospace;\">"
@@ -2399,17 +2397,17 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         if exit_code == 0:
             if not bool(process.property('had_output')):
-                self._append_to_text_widget(
+                self._log_append(
                     self.gpr_status_text,
                     "<span style='color: #57ab5a;'>✓ Request completed (no response body)</span>",
                 )
             else:
-                self._append_to_text_widget(
+                self._log_append(
                     self.gpr_status_text,
                     "<span style='color: #57ab5a;'>✓ Request completed</span>",
                 )
         else:
-            self._append_to_text_widget(
+            self._log_append(
                 self.gpr_status_text,
                 (
                     "<span style='color: #f47067;'>"
@@ -2417,43 +2415,25 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 ),
             )
 
-        self.gpr_status_text.append("")
+        self._log_append(self.gpr_status_text, "")
         process.deleteLater()
 
     def clear_gpr_status(self):
-        """Clear GPR status text and save backup for restore."""
-        self.gpr_cleared_status_backup = self.gpr_status_text.toHtml()
-        self.gpr_status_text.clear()
+        widget = self.gpr_status_text
+        self.tab_log_backups[id(widget)] = list(self.tab_log_entries.get(id(widget), []))
+        self.tab_log_entries[id(widget)] = []
+        widget.clear()
         self.btn_restore_gpr_status.setVisible(True)
 
     def restore_gpr_status(self):
-        """Restore previously cleared GPR status text."""
-        if self.gpr_cleared_status_backup:
-            current_content = self.gpr_status_text.toHtml()
-            self.gpr_status_text.setHtml(self.gpr_cleared_status_backup + current_content)
-            self.gpr_cleared_status_backup = None
+        widget = self.gpr_status_text
+        backup = self.tab_log_backups.get(id(widget))
+        if backup:
+            current = self.tab_log_entries.get(id(widget), [])
+            self.tab_log_entries[id(widget)] = backup + current
+            self.tab_log_backups[id(widget)] = []
+            self._log_apply_filter(widget)
             self.btn_restore_gpr_status.setVisible(False)
-
-    def search_gpr_status(self, forward=True):
-        """Search for text in the GPR status box."""
-        search_text = self.gpr_search_input.text()
-        if not search_text:
-            return
-
-        from PyQt5.QtGui import QTextDocument
-        flags = QTextDocument.FindFlags()
-        if not forward:
-            flags = QTextDocument.FindBackward
-
-        found = self.gpr_status_text.find(search_text, flags)
-        if not found:
-            cursor = self.gpr_status_text.textCursor()
-            if forward:
-                cursor.movePosition(cursor.Start)
-            else:
-                cursor.movePosition(cursor.End)
-            self.gpr_status_text.setTextCursor(cursor)
-            self.gpr_status_text.find(search_text, flags)
 
     def toggle_arm_launch(self):
         sim_mode = self.arm_sim_mode_combo.currentText()
@@ -2556,27 +2536,27 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             'is in remote control'
         ]
         
-        status_text.append("=" * 50)
-        status_text.append("📋 Sending all status commands...")
-        status_text.append("=" * 50)
-        
+        self._log_append(status_text, "=" * 50)
+        self._log_append(status_text, "📋 Sending all status commands...")
+        self._log_append(status_text, "=" * 50)
+
         success_count = 0
         for command in status_commands:
             response = self._send_robot_command(command, status_text=status_text)
             if response is not None:
                 success_count += 1
             # Add a small visual separator between commands
-            status_text.append("-" * 50)
+            self._log_append(status_text, "-" * 50)
 
         if success_count == len(status_commands):
-            status_text.append("✓ All status commands sent")
+            self._log_append(status_text, "✓ All status commands sent")
         elif success_count == 0:
-            status_text.append("✗ All status commands failed")
+            self._log_append(status_text, "✗ All status commands failed")
         else:
-            status_text.append(
+            self._log_append(status_text,
                 f"⚠ {success_count}/{len(status_commands)} status commands succeeded"
             )
-        status_text.append("")
+        self._log_append(status_text, "")
 
     def toggle_rqt_controller(self):
         self._toggle_process('rqt_controller', self.btn_rqt_controller, 'RQT Joint Controller',
@@ -2718,7 +2698,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             db_path = os.path.join(pkg_share, 'maps', 'rtabmap.db')
         except Exception as e:
             status_text = self.full_control_status_text if mode == 'full' else self.base_status_text
-            status_text.append(f"Error: Could not find navi_wall package: {e}")
+            self._log_append(status_text, f"Error: Could not find navi_wall package: {e}")
             return
         
         process_key = 'full_view_map' if mode == 'full' else 'view_map'
@@ -2794,41 +2774,21 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         return None
 
     def clear_full_control_status(self):
-        """Clear full control status text and save backup for restore"""
-        self.full_control_cleared_status_backup = self.full_control_status_text.toHtml()
-        self.full_control_status_text.clear()
+        widget = self.full_control_status_text
+        self.tab_log_backups[id(widget)] = list(self.tab_log_entries.get(id(widget), []))
+        self.tab_log_entries[id(widget)] = []
+        widget.clear()
         self.btn_restore_full_control_status.setVisible(True)
 
     def restore_full_control_status(self):
-        """Restore previously cleared full control status text"""
-        if hasattr(self, 'full_control_cleared_status_backup') and self.full_control_cleared_status_backup:
-            current_content = self.full_control_status_text.toHtml()
-            self.full_control_status_text.setHtml(self.full_control_cleared_status_backup + current_content)
-            self.full_control_cleared_status_backup = None
+        widget = self.full_control_status_text
+        backup = self.tab_log_backups.get(id(widget))
+        if backup:
+            current = self.tab_log_entries.get(id(widget), [])
+            self.tab_log_entries[id(widget)] = backup + current
+            self.tab_log_backups[id(widget)] = []
+            self._log_apply_filter(widget)
             self.btn_restore_full_control_status.setVisible(False)
-
-    def search_full_control_status(self, forward=True):
-        """Search for text in full control status box"""
-        search_text = self.full_control_search_input.text()
-        if not search_text:
-            return
-        
-        from PyQt5.QtGui import QTextDocument
-        flags = QTextDocument.FindFlags()
-        if not forward:
-            flags = QTextDocument.FindBackward
-        
-        found = self.full_control_status_text.find(search_text, flags)
-        
-        if not found:
-            # Wrap around: move cursor to start/end and try again
-            cursor = self.full_control_status_text.textCursor()
-            if forward:
-                cursor.movePosition(cursor.Start)
-            else:
-                cursor.movePosition(cursor.End)
-            self.full_control_status_text.setTextCursor(cursor)
-            self.full_control_status_text.find(search_text, flags)
 
     def toggle_rqt(self, mode='base', button=None):
         """Toggle RQT on/off"""
@@ -2845,8 +2805,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
         # Display command in bold green
         cmd_str = 'ps aux | grep -E \'ros2|robot\' | grep -v grep'
-        self._append_to_text_widget(self.base_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
- 
+        self._log_append(self.base_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         # Run the command using shell to support pipe
         process_key = 'ps_ros2'
         process.finished.connect(lambda: self._cleanup_ps_ros(process_key))
@@ -2881,8 +2841,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
         # Display command in bold green
         cmd_str = "for cm in $(ros2 node list | grep -E '(^|/)controller_manager$'); do ros2 control list_controllers -c $cm; done"
-        self._append_to_text_widget(self.base_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
- 
+        self._log_append(self.base_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         # Run the command with timeout (10 seconds)
         process_key = 'list_base_controllers'
         process.finished.connect(lambda: self._cleanup_list_base_controllers(process_key))
@@ -2895,9 +2855,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             exit_code = self.process_map[process_key].exitCode()
             del self.process_map[process_key]
             if exit_code != 0:
-                self.base_status_text.append(f"<span style='color: #c69026;'>⚠ List controllers command finished with exit code {exit_code}</span>")
+                self._log_append(self.base_status_text, f"<span style='color: #c69026;'>⚠ List controllers command finished with exit code {exit_code}</span>")
             else:
-                self.base_status_text.append("✓ List controllers command completed")
+                self._log_append(self.base_status_text, "✓ List controllers command completed")
 
     def run_list_full_controllers(self):
         """List controllers for all detected controller_manager nodes (Full Control tab)."""
@@ -2907,7 +2867,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         # Display command in bold green
         cmd_str = "for cm in $(ros2 node list | grep -E '(^|/)controller_manager$'); do ros2 control list_controllers -c $cm; done"
-        self._append_to_text_widget(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+        self._log_append(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
 
         # Run the command with timeout (10 seconds)
         process_key = 'full_list_base_controllers'
@@ -2921,11 +2881,11 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             exit_code = self.process_map[process_key].exitCode()
             del self.process_map[process_key]
             if exit_code != 0:
-                self.full_control_status_text.append(
+                self._log_append(self.full_control_status_text,
                     f"<span style='color: #c69026;'>⚠ List controllers command finished with exit code {exit_code}</span>"
                 )
             else:
-                self.full_control_status_text.append("✓ List controllers command completed")
+                self._log_append(self.full_control_status_text, "✓ List controllers command completed")
  
     def refresh_topics_list(self):
         """Refresh the list of available ROS2 topics"""
@@ -2934,8 +2894,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         
         # Display command in status
         cmd_str = 'ros2 topic list'
-        self._append_to_text_widget(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        
+        self._log_append(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         # Start process and capture output
         process.finished.connect(lambda: self._on_topics_list_finished(process))
         process.start('ros2', ['topic', 'list'])
@@ -2950,9 +2910,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         
         if topics:
             self.topics_combo.addItems(topics)
-            self.full_control_status_text.append(f"✓ Found {len(topics)} topics")
+            self._log_append(self.full_control_status_text, f"✓ Found {len(topics)} topics")
         else:
-            self.full_control_status_text.append("<span style='color: #c69026;'>⚠ No topics found</span>")
+            self._log_append(self.full_control_status_text, "<span style='color: #c69026;'>⚠ No topics found</span>")
     
     def check_topic_bandwidth(self):
         """Check bandwidth of selected topic"""
@@ -3049,7 +3009,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         """Echo selected topic once"""
         topic = self.topics_combo.currentText()
         if not topic:
-            self.full_control_status_text.append("<span style='color: #c69026;'>⚠ No topic selected</span>")
+            self._log_append(self.full_control_status_text, "<span style='color: #c69026;'>⚠ No topic selected</span>")
             return
         
         process = QProcess(self)
@@ -3058,8 +3018,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         
         # Display command
         cmd_str = f'timeout 10 ros2 topic echo --once {topic}'
-        self._append_to_text_widget(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        
+        self._log_append(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         # Start process with timeout
         process_key = f'topic_echo_{topic}'
         process.finished.connect(lambda: self._cleanup_topic_command(process_key))
@@ -3137,11 +3097,11 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             exit_code = self.process_map[process_key].exitCode()
             del self.process_map[process_key]
             if exit_code == 124:  # timeout exit code
-                self.full_control_status_text.append("<span style='color: #c69026;'>⚠ Command timed out</span>")
+                self._log_append(self.full_control_status_text, "<span style='color: #c69026;'>⚠ Command timed out</span>")
             elif exit_code != 0:
-                self.full_control_status_text.append(f"<span style='color: #c69026;'>⚠ Command finished with exit code {exit_code}</span>")
+                self._log_append(self.full_control_status_text, f"<span style='color: #c69026;'>⚠ Command finished with exit code {exit_code}</span>")
             else:
-                self.full_control_status_text.append("✓ Command completed")
+                self._log_append(self.full_control_status_text, "✓ Command completed")
 
     def _toggle_process(self, process_key, button, name, program, args):
         """Toggle a process on/off and update button state"""
@@ -3177,17 +3137,17 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             del self.process_map[process_key]
             button.setText(f"Start {name}")
             button.setStyleSheet("")
-            self.status_text.append(f"⏹ Stopped {name}")
+            self._log_append(self.status_text, f"⏹ Stopped {name}")
         else:
             # Start the process
             process = QProcess(self)
             process.setProcessChannelMode(QProcess.MergedChannels)
             process.readyReadStandardOutput.connect(lambda: self.handle_output(process))
             process.finished.connect(lambda: self._on_process_finished(process_key, button, name))
- 
+
             # Display command in bold green
             cmd_str = program + ' ' + ' '.join(args)
-            self._append_to_text_widget(self.status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+            self._log_append(self.status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
  
             process.start(program, args)
             self.process_map[process_key] = process
@@ -3217,13 +3177,13 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                     # Longer wait for mapping to save rtabmap.db
                     wait_ms = 5000 if 'mapping' in process_key else 3000
                     if 'mapping' in process_key:
-                        status_text.append("💾 Saving mapping database... (waiting for shutdown)")
+                        self._log_append(status_text, "💾 Saving mapping database... (waiting for shutdown)")
                     process.waitForFinished(wait_ms)
                 except ProcessLookupError:
                     # Process already gone
                     pass
                 except Exception as e:
-                    status_text.append(f"⚠ Could not send SIGINT: {e}")
+                    self._log_append(status_text, f"⚠ Could not send SIGINT: {e}")
 
             # If still running, escalate
             if process.state() == QProcess.Running:
@@ -3259,7 +3219,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             button.setStyleSheet("")
             if self._is_robot_bringup_process(process_key):
                 button.setProperty('uses_gazebo', False)
-            status_text.append(f"⏹ Stopped {name}")
+            self._log_append(status_text, f"⏹ Stopped {name}")
 
             # Re‑enable mutually exclusive buttons
             if 'mapping' in process_key:
@@ -3290,7 +3250,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             process.finished.connect(lambda: self._on_base_process_finished(process_key, button, name))
 
             cmd_str = program + ' ' + ' '.join(args)
-            self._append_to_text_widget(status_text, f"<b style='color:#57ab5a;'>▶ {cmd_str}</b>")
+            self._log_append(status_text, f"<b style='color:#57ab5a;'>▶ {cmd_str}</b>")
 
             process.start(program, args)
             self.process_map[process_key] = process
@@ -3313,7 +3273,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 html_line = self._ansi_to_html(line)
 
                 # Use insertHtml to properly render HTML entities
-                self._append_to_text_widget(self.full_control_status_text, html_line)
+                self._log_append(self.full_control_status_text, html_line)
 
     def handle_joint_output(self, process):
         """Handle output for joint control processes (outputs to joint_status_text)"""
@@ -3337,7 +3297,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             del self.process_map[process_key]
             button.setText(f"Start {name}")
             button.setStyleSheet("")
-            self.status_text.append(f"⚠ {name} exited")
+            self._log_append(self.status_text, f"⚠ {name} exited")
             
             # Update tab states when arm processes finish
             if process_key == 'arm_launch':
@@ -3357,7 +3317,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             else:
                 status_text = self.base_status_text
             
-            status_text.append(f"{name} exited")
+            self._log_append(status_text, f"{name} exited")
 
             if self._is_robot_bringup_process(process_key) and bool(button.property('uses_gazebo')):
                 self._kill_gazebo_processes()
@@ -3402,8 +3362,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 html_line = self._ansi_to_html(line)
  
                 # Use insertHtml to properly render HTML entities
-                self._append_to_text_widget(self.status_text, html_line)
- 
+                self._log_append(self.status_text, html_line)
+
     def handle_base_output(self, process):
         """Handle output for base control processes (outputs to base_status_text)"""
         output = process.readAllStandardOutput().data().decode()
@@ -3419,8 +3379,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 html_line = self._ansi_to_html(line)
  
                 # Use insertHtml to properly render HTML entities
-                self._append_to_text_widget(self.base_status_text, html_line)
- 
+                self._log_append(self.base_status_text, html_line)
+
     def _connect_robot_socket(self, status_text=None):
         """Connect to robot dashboard if not already connected"""
         if status_text is None:
@@ -3445,10 +3405,10 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 # Read initial connection message
                 data = self.robot_socket.recv(1024)
                 response = data.decode('utf-8').strip()
-                status_text.append(f"✓ Connected to robot: {response}")
+                self._log_append(status_text, f"✓ Connected to robot: {response}")
                 return True
             except Exception as e:
-                status_text.append(f"<span style='color: #f47067;'>✗ Failed to connect to robot: {e}</span>")
+                self._log_append(status_text, f"<span style='color: #f47067;'>✗ Failed to connect to robot: {e}</span>")
                 self.robot_socket = None
                 return False
         return True
@@ -3462,15 +3422,15 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
         try:
             self.robot_socket.send(str.encode(command + '\n'))
-            status_text.append(f"<b style='color: #57ab5a;'>→ SENT: {command}</b>")
-            status_text.append("")  # Add newline after command
- 
+            self._log_append(status_text, f"<b style='color: #57ab5a;'>→ SENT: {command}</b>")
+            self._log_append(status_text, "")  # Add newline after command
+
             data = self.robot_socket.recv(1024)
             response = data.decode('utf-8').strip()
-            status_text.append(f"← RECV: {response}")
+            self._log_append(status_text, f"← RECV: {response}")
             return response
         except Exception as e:
-            status_text.append(f"<span style='color: #f47067;'>✗ Command failed: {e}</span>")
+            self._log_append(status_text, f"<span style='color: #f47067;'>✗ Command failed: {e}</span>")
             # Close socket on error so it reconnects next time
             if self.robot_socket:
                 self.robot_socket.close()
@@ -3503,27 +3463,27 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             'is in remote control'
         ]
         
-        self.full_control_status_text.append("=" * 50)
-        self.full_control_status_text.append("📋 Sending all status commands...")
-        self.full_control_status_text.append("=" * 50)
-        
+        self._log_append(self.full_control_status_text, "=" * 50)
+        self._log_append(self.full_control_status_text, "📋 Sending all status commands...")
+        self._log_append(self.full_control_status_text, "=" * 50)
+
         success_count = 0
         for command in status_commands:
             response = self._send_robot_command(command, status_text=self.full_control_status_text)
             if response is not None:
                 success_count += 1
             # Add a small visual separator between commands
-            self.full_control_status_text.append("-" * 50)
+            self._log_append(self.full_control_status_text, "-" * 50)
 
         if success_count == len(status_commands):
-            self.full_control_status_text.append("✓ All status commands sent")
+            self._log_append(self.full_control_status_text, "✓ All status commands sent")
         elif success_count == 0:
-            self.full_control_status_text.append("✗ All status commands failed")
+            self._log_append(self.full_control_status_text, "✗ All status commands failed")
         else:
-            self.full_control_status_text.append(
+            self._log_append(self.full_control_status_text,
                 f"⚠ {success_count}/{len(status_commands)} status commands succeeded"
             )
-        self.full_control_status_text.append("")
+        self._log_append(self.full_control_status_text, "")
     
     def send_full_control_control_command(self):
         """Send selected control command to robot (Full Control tab)"""
@@ -3543,8 +3503,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
         # Display command in bold green
         cmd_str = 'ps aux | grep -E \'ros2|robot\' | grep -v grep'
-        self._append_to_text_widget(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
- 
+        self._log_append(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         # Run the command using shell to support pipe
         process_key = 'full_ps_ros2'
         process.finished.connect(lambda: self._cleanup_full_ps_ros(process_key, process))
@@ -3563,8 +3523,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             for line in lines:
                 if line.strip():
                     html_line = self._ansi_to_html(line)
-                    self._append_to_text_widget(self.full_control_status_text, html_line)
-    
+                    self._log_append(self.full_control_status_text, html_line)
+
     def _cleanup_full_ps_ros(self, process_key, process):
         """Clean up finished ps aux process and populate process combobox (Full Control tab)"""
         # Read any remaining output
@@ -3602,17 +3562,17 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             del self.process_map[process_key]
             button.setText(f"Start {name}")
             button.setStyleSheet("")
-            self.full_control_status_text.append(f"⏹ Stopped {name}")
+            self._log_append(self.full_control_status_text, f"⏹ Stopped {name}")
         else:
             # Start the process
             process = QProcess(self)
             process.setProcessChannelMode(QProcess.MergedChannels)
             process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
             process.finished.connect(lambda: self._on_full_control_process_finished(process_key, button, name))
- 
+
             # Display command in bold green
             cmd_str = program + ' ' + ' '.join(args)
-            self._append_to_text_widget(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+            self._log_append(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
  
             process.start(program, args)
             self.process_map[process_key] = process
@@ -3625,7 +3585,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             del self.process_map[process_key]
             button.setText(f"Start {name}")
             button.setStyleSheet("")
-            self.full_control_status_text.append(f"⚠ {name} exited")
+            self._log_append(self.full_control_status_text, f"⚠ {name} exited")
 
     def list_controllers(self):
         """List controllers for all detected controller_manager nodes (Arm tab)."""
@@ -3635,8 +3595,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
         # Display command in bold green
         cmd_str = "for cm in $(ros2 node list | grep -E '(^|/)controller_manager$'); do ros2 control list_controllers -c $cm; done"
-        self._append_to_text_widget(self.status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
- 
+        self._log_append(self.status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         # Run the command
         process_key = 'list_controllers'
         process.finished.connect(lambda: self._cleanup_list_controllers(process_key))
@@ -3649,82 +3609,44 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             exit_code = self.process_map[process_key].exitCode()
             del self.process_map[process_key]
             if exit_code != 0:
-                self.status_text.append(f"<span style='color: #c69026;'>⚠ List controllers command finished with exit code {exit_code}</span>")
+                self._log_append(self.status_text, f"<span style='color: #c69026;'>⚠ List controllers command finished with exit code {exit_code}</span>")
             else:
-                self.status_text.append("✓ List controllers command completed")
+                self._log_append(self.status_text, "✓ List controllers command completed")
  
     def clear_status(self):
-        """Clear status text and save backup for restore"""
-        self.cleared_status_backup = self.status_text.toHtml()
-        self.status_text.clear()
+        widget = self.status_text
+        self.tab_log_backups[id(widget)] = list(self.tab_log_entries.get(id(widget), []))
+        self.tab_log_entries[id(widget)] = []
+        widget.clear()
         self.btn_restore_status.setVisible(True)
- 
+
     def restore_status(self):
-        """Restore previously cleared status text (prepends old content like Ctrl+L undo)"""
-        if self.cleared_status_backup:
-            current_content = self.status_text.toHtml()
-            self.status_text.setHtml(self.cleared_status_backup + current_content)
-            self.cleared_status_backup = None
+        widget = self.status_text
+        backup = self.tab_log_backups.get(id(widget))
+        if backup:
+            current = self.tab_log_entries.get(id(widget), [])
+            self.tab_log_entries[id(widget)] = backup + current
+            self.tab_log_backups[id(widget)] = []
+            self._log_apply_filter(widget)
             self.btn_restore_status.setVisible(False)
- 
+
     def clear_base_status(self):
-        """Clear base status text and save backup for restore"""
-        self.base_cleared_status_backup = self.base_status_text.toHtml()
-        self.base_status_text.clear()
+        widget = self.base_status_text
+        self.tab_log_backups[id(widget)] = list(self.tab_log_entries.get(id(widget), []))
+        self.tab_log_entries[id(widget)] = []
+        widget.clear()
         self.btn_restore_base_status.setVisible(True)
- 
+
     def restore_base_status(self):
-        """Restore previously cleared base status text (prepends old content like Ctrl+L undo)"""
-        if self.base_cleared_status_backup:
-            current_content = self.base_status_text.toHtml()
-            self.base_status_text.setHtml(self.base_cleared_status_backup + current_content)
-            self.base_cleared_status_backup = None
+        widget = self.base_status_text
+        backup = self.tab_log_backups.get(id(widget))
+        if backup:
+            current = self.tab_log_entries.get(id(widget), [])
+            self.tab_log_entries[id(widget)] = backup + current
+            self.tab_log_backups[id(widget)] = []
+            self._log_apply_filter(widget)
             self.btn_restore_base_status.setVisible(False)
- 
-    def search_status(self, forward=True):
-        """Search for text in arm status box"""
-        search_text = self.search_input.text()
-        if not search_text:
-            return
- 
-        from PyQt5.QtGui import QTextDocument
-        flags = QTextDocument.FindFlags()
-        if not forward:
-            flags |= QTextDocument.FindBackward
- 
-        found = self.status_text.find(search_text, flags)
-        if not found:
-            # Wrap around: move cursor to start/end and try again
-            cursor = self.status_text.textCursor()
-            if forward:
-                cursor.movePosition(cursor.Start)
-            else:
-                cursor.movePosition(cursor.End)
-            self.status_text.setTextCursor(cursor)
-            self.status_text.find(search_text, flags)
- 
-    def search_base_status(self, forward=True):
-        """Search for text in base status box"""
-        search_text = self.base_search_input.text()
-        if not search_text:
-            return
- 
-        from PyQt5.QtGui import QTextDocument
-        flags = QTextDocument.FindFlags()
-        if not forward:
-            flags |= QTextDocument.FindBackward
- 
-        found = self.base_status_text.find(search_text, flags)
-        if not found:
-            # Wrap around: move cursor to start/end and try again
-            cursor = self.base_status_text.textCursor()
-            if forward:
-                cursor.movePosition(cursor.Start)
-            else:
-                cursor.movePosition(cursor.End)
-            self.base_status_text.setTextCursor(cursor)
-            self.base_status_text.find(search_text, flags)
-   
+
     def clear_joint_status(self):
         """Clear joint control status text"""
         self.joint_status_text.clear()
@@ -3976,7 +3898,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
     def send_goal(self):
         if not rclpy.ok():
-            self.status_text.append("<span style='color: #c69026;'>⚠ ROS context invalid - cannot publish</span>")
+            self._log_append(self.status_text, "<span style='color: #c69026;'>⚠ ROS context invalid - cannot publish</span>")
             return
         try:
             pose = Pose()
@@ -3988,9 +3910,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             pose.orientation.z = self.qz_input.value()
             pose.orientation.w = self.qw_input.value()
             self.goal_publisher.publish(pose)
-            self.status_text.append(f"Sent goal: pos({pose.position.x:.2f}, {pose.position.y:.2f}, {pose.position.z:.2f}) orn({pose.orientation.x:.2f}, {pose.orientation.y:.2f}, {pose.orientation.z:.2f}, {pose.orientation.w:.2f})")
+            self._log_append(self.status_text, f"Sent goal: pos({pose.position.x:.2f}, {pose.position.y:.2f}, {pose.position.z:.2f}) orn({pose.orientation.x:.2f}, {pose.orientation.y:.2f}, {pose.orientation.z:.2f}, {pose.orientation.w:.2f})")
         except Exception as e:
-            self.status_text.append(f"<span style='color: #f47067;'>❌ Failed to send goal: {e}</span>")
+            self._log_append(self.status_text, f"<span style='color: #f47067;'>❌ Failed to send goal: {e}</span>")
  
     def send_position_command(self):
         """Send selected position using dynamic send_position service endpoint (Arm Control tab)."""
@@ -4041,7 +3963,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         
         # Display command in bold green
         cmd_str = command + ' ' + ' '.join(args)
-        self._append_to_text_widget(status_text_widget, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+        self._log_append(status_text_widget, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
         
         # Connect output handler
         process.readyReadStandardOutput.connect(lambda: output_handler(process))
@@ -4224,7 +4146,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         ]
 
         cmd_str = f'ros2 service call {service_name} arm_control/srv/SendPosition "{payload}"'
-        self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+        self._log_append(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
 
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
@@ -4247,9 +4169,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         del self.process_map[process_key]
 
         if exit_code == 0:
-            status_text.append(f"✓ Position '{position_name}' request completed")
+            self._log_append(status_text, f"✓ Position '{position_name}' request completed")
         else:
-            status_text.append(
+            self._log_append(status_text,
                 f"<span style='color: #c69026;'>⚠ Position '{position_name}' request finished with exit code {exit_code}</span>"
             )
  
@@ -4288,7 +4210,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         status_text = self._get_status_text_for_context(context)
 
         if not rclpy.ok():
-            status_text.append("<span style='color: #c69026;'>⚠ ROS context invalid - cannot set emergency stop</span>")
+            self._log_append(status_text, "<span style='color: #c69026;'>⚠ ROS context invalid - cannot set emergency stop</span>")
             return
 
         # Determine the correct topic based on context and simulation settings
@@ -4297,7 +4219,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         # Display the command being executed in green color
         action_str = "true" if active else "false"
         cmd_str = f'ros2 topic pub --once {emergency_stop_topic} std_msgs/msg/Bool "{{data: {action_str}}}"'
-        self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+        self._log_append(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
 
         # Publish only on user-triggered change
         try:
@@ -4319,37 +4241,37 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             publisher.publish(stop_msg)
 
         except Exception as e:
-            status_text.append(f"<span style='color: #f47067;'>❌ Failed to publish {emergency_stop_topic}: {e}</span>")
+            self._log_append(status_text, f"<span style='color: #f47067;'>❌ Failed to publish {emergency_stop_topic}: {e}</span>")
             return
 
         # User-triggered side-effects only
         try:
             if active:
-                status_text.append("<span style='color: #c69026; font-weight: bold;'>⚠ EMERGENCY STOP - Published stop signal</span>")
+                self._log_append(status_text, "<span style='color: #c69026; font-weight: bold;'>⚠ EMERGENCY STOP - Published stop signal</span>")
 
                 if self.current_goal_handle is not None:
                     self.current_goal_handle.cancel_goal_async()
-                    status_text.append("<span style='color: #c69026;'>⚠ Canceling current trajectory goal...</span>")
+                    self._log_append(status_text, "<span style='color: #c69026;'>⚠ Canceling current trajectory goal...</span>")
                     self.current_goal_handle = None
 
                 response = self._send_robot_command('stop', status_text=status_text)
                 if response:
-                    status_text.append("<span style='color: #c69026; font-weight: bold;'>⚠ Robot protective stop triggered</span>")
+                    self._log_append(status_text, "<span style='color: #c69026; font-weight: bold;'>⚠ Robot protective stop triggered</span>")
 
             else:
-                status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ EMERGENCY STOP RELEASED - Published release signal</span>")
+                self._log_append(status_text, "<span style='color: #57ab5a; font-weight: bold;'>✓ EMERGENCY STOP RELEASED - Published release signal</span>")
 
                 self._send_robot_command('close safety popup', status_text=status_text)
                 response = self._send_robot_command('unlock protective stop', status_text=status_text)
                 if response:
-                    status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ Robot protective stop released (requested)</span>")
-                    
+                    self._log_append(status_text, "<span style='color: #57ab5a; font-weight: bold;'>✓ Robot protective stop released (requested)</span>")
+
                     play_resp = self._send_robot_command('play', status_text=status_text)
                     if play_resp:
-                        status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ Robot program started (play)</span>")
-                    
+                        self._log_append(status_text, "<span style='color: #57ab5a; font-weight: bold;'>✓ Robot program started (play)</span>")
+
         except Exception as e:
-            status_text.append(f"<span style='color: #f47067;'>❌ Error while applying emergency stop state: {e}</span>")
+            self._log_append(status_text, f"<span style='color: #f47067;'>❌ Error while applying emergency stop state: {e}</span>")
 
 
     def _update_emergency_stop_button_ui(self, context='arm'):
@@ -4378,14 +4300,14 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
     def closeEvent(self, event):
         self.timer.stop()
-        self.status_text.append("Shutting down and cleaning up processes...")
+        self._log_append(self.status_text, "Shutting down and cleaning up processes...")
  
         # Terminate all launched processes
         for process_key, process in list(self.process_map.items()):
             if process.state() == QProcess.Running:
                 # Get PID and kill entire process group
                 pid = process.processId()
-                self.status_text.append(f"Terminating {process_key} (PID: {pid})...")
+                self._log_append(self.status_text, f"Terminating {process_key} (PID: {pid})...")
  
                 # Try graceful termination first
                 process.terminate()
@@ -4511,140 +4433,446 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         if not self.current_process_list:
             self.process_combo.addItem("No processes found")
         else:
-            self._append_to_text_widget(self.full_control_status_text, 
-                                       f"<span style='color: #57ab5a;'>Found {len(self.current_process_list)} ROS2 processes</span>")
-    
+            self._log_append(self.full_control_status_text,
+                             f"<span style='color: #57ab5a;'>Found {len(self.current_process_list)} ROS2 processes</span>")
+
     def kill_selected_process(self):
         """Kill the process selected in the combobox"""
         current_index = self.process_combo.currentIndex()
-        
+
         if current_index < 0 or current_index >= len(self.current_process_list):
-            self._append_to_text_widget(self.full_control_status_text, 
-                                       "<span style='color: #d73a49;'>No process selected or invalid selection</span>")
+            self._log_append(self.full_control_status_text,
+                             "<span style='color: #d73a49;'>No process selected or invalid selection</span>")
             return
-        
+
         process_info = self.current_process_list[current_index]
         pid = process_info['pid']
         command = process_info['command']
-        
+
         # Confirm and kill
         from PyQt5.QtWidgets import QMessageBox
         reply = QMessageBox.question(
-            self, 
+            self,
             'Confirm Kill Process',
             f"Are you sure you want to kill process {pid}?\n\nCommand: {command[:100]}",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
-        
+
         if reply == QMessageBox.Yes:
             # Execute kill command
             kill_process = QProcess(self)
             kill_process.setProcessChannelMode(QProcess.MergedChannels)
-            
+
             cmd_str = f'kill -9 {pid}'
-            self._append_to_text_widget(self.full_control_status_text, 
-                                       f"<b style='color: #d73a49;'>▶ {cmd_str}</b>")
-            
+            self._log_append(self.full_control_status_text,
+                             f"<b style='color: #d73a49;'>▶ {cmd_str}</b>")
+
             kill_process.finished.connect(lambda: self._on_kill_process_finished(pid, kill_process))
             kill_process.start('kill', ['-9', pid])
-    
+
     def _on_kill_process_finished(self, pid, process):
         """Handle kill process completion"""
         exit_code = process.exitCode()
-        
+
         if exit_code == 0:
-            self._append_to_text_widget(self.full_control_status_text, 
-                                       f"<span style='color: #57ab5a;'>✓ Successfully killed process {pid}</span>")
+            self._log_append(self.full_control_status_text,
+                             f"<span style='color: #57ab5a;'>✓ Successfully killed process {pid}</span>")
             # Refresh the process list after killing
             QTimer.singleShot(500, self.run_full_control_ps_ros)
         else:
             error_output = process.readAllStandardOutput().data().decode()
-            self._append_to_text_widget(self.full_control_status_text, 
-                                       f"<span style='color: #d73a49;'>✗ Failed to kill process {pid}: {error_output}</span>")
-    
+            self._log_append(self.full_control_status_text,
+                             f"<span style='color: #d73a49;'>✗ Failed to kill process {pid}: {error_output}</span>")
+
     def kill_all_processes(self):
         """Kill all detected processes except UI itself and ros2 daemon"""
         if not self.current_process_list:
-            self._append_to_text_widget(self.full_control_status_text, 
-                                       "<span style='color: #d73a49;'>No processes to kill</span>")
+            self._log_append(self.full_control_status_text,
+                             "<span style='color: #d73a49;'>No processes to kill</span>")
             return
-        
+
         # Get our own PID to exclude
         ui_pid = os.getpid()
-        
+
         # Filter processes to kill (exclude UI and ros2 daemon)
         processes_to_kill = []
         for process_info in self.current_process_list:
             pid = process_info['pid']
             command = process_info['command'].lower()
-            
+
             # Skip our own process
             if int(pid) == ui_pid:
                 continue
-            
+
             # Skip ros2 daemon
             if 'ros2' in command and 'daemon' in command:
                 continue
-            
+
             # Skip if it's the UI.py script
             if 'ui.py' in command:
                 continue
-            
+
             processes_to_kill.append(process_info)
-        
+
         if not processes_to_kill:
-            self._append_to_text_widget(self.full_control_status_text, 
-                                       "<span style='color: #d73a49;'>No processes to kill (all are protected)</span>")
+            self._log_append(self.full_control_status_text,
+                             "<span style='color: #d73a49;'>No processes to kill (all are protected)</span>")
             return
-        
+
         # Confirm kill all
         from PyQt5.QtWidgets import QMessageBox
         reply = QMessageBox.question(
-            self, 
+            self,
             'Confirm Kill All Processes',
             f"Are you sure you want to kill {len(processes_to_kill)} process(es)?\n\n"
             f"This will kill all detected processes except the UI and ros2 daemon.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
-        
+
         if reply == QMessageBox.Yes:
             killed_count = 0
             failed_count = 0
-            
-            self._append_to_text_widget(self.full_control_status_text, 
-                                       f"<b style='color: #d73a49;'>▶ Killing {len(processes_to_kill)} process(es)...</b>")
-            
+
+            self._log_append(self.full_control_status_text,
+                             f"<b style='color: #d73a49;'>▶ Killing {len(processes_to_kill)} process(es)...</b>")
+
             for process_info in processes_to_kill:
                 pid = process_info['pid']
                 command = process_info['command']
-                
+
                 try:
                     # Use os.kill for synchronous killing
                     os.kill(int(pid), signal.SIGKILL)
-                    self._append_to_text_widget(self.full_control_status_text, 
-                                               f"<span style='color: #57ab5a;'>✓ Killed PID {pid}: {command[:60]}...</span>")
+                    self._log_append(self.full_control_status_text,
+                                     f"<span style='color: #57ab5a;'>✓ Killed PID {pid}: {command[:60]}...</span>")
                     killed_count += 1
                 except ProcessLookupError:
-                    self._append_to_text_widget(self.full_control_status_text, 
-                                               f"<span style='color: #e3b341;'>⚠ Process {pid} already terminated</span>")
+                    self._log_append(self.full_control_status_text,
+                                     f"<span style='color: #e3b341;'>⚠ Process {pid} already terminated</span>")
                     failed_count += 1
                 except PermissionError:
-                    self._append_to_text_widget(self.full_control_status_text, 
-                                               f"<span style='color: #d73a49;'>✗ Permission denied for PID {pid}</span>")
+                    self._log_append(self.full_control_status_text,
+                                     f"<span style='color: #d73a49;'>✗ Permission denied for PID {pid}</span>")
                     failed_count += 1
                 except Exception as e:
-                    self._append_to_text_widget(self.full_control_status_text, 
-                                               f"<span style='color: #d73a49;'>✗ Failed to kill PID {pid}: {str(e)}</span>")
+                    self._log_append(self.full_control_status_text,
+                                     f"<span style='color: #d73a49;'>✗ Failed to kill PID {pid}: {str(e)}</span>")
                     failed_count += 1
-            
-            self._append_to_text_widget(self.full_control_status_text, 
-                                       f"<b style='color: #57ab5a;'>Finished: {killed_count} killed, {failed_count} failed</b>")
+
+            self._log_append(self.full_control_status_text,
+                             f"<b style='color: #57ab5a;'>Finished: {killed_count} killed, {failed_count} failed</b>")
             
             # Refresh the process list after killing
             QTimer.singleShot(500, self.run_full_control_ps_ros)
  
+    # ───────────────────────── FSM TAB ─────────────────────────
+
+    def _create_fsm_tab(self):
+        """Create the FSM control tab."""
+        fsm_tab = QWidget()
+        fsm_tab_layout = QVBoxLayout(fsm_tab)
+
+        # ── Controls row ──
+        controls_row = QHBoxLayout()
+
+        controls_row.addWidget(QLabel("Sim Mode:"))
+        self.fsm_sim_combo = QComboBox()
+        self.fsm_sim_combo.addItems(["true", "false"])
+        controls_row.addWidget(self.fsm_sim_combo)
+
+        controls_row.addSpacing(16)
+        controls_row.addWidget(QLabel("Planner Backend:"))
+        self.fsm_planner_combo = QComboBox()
+        self.fsm_planner_combo.addItems(["legacy", "moveit"])
+        controls_row.addWidget(self.fsm_planner_combo)
+
+        controls_row.addSpacing(16)
+        controls_row.addWidget(QLabel("Initial State:"))
+        self.fsm_state_combo = QComboBox()
+        self.fsm_state_combo.addItems([
+            "ScanWall", "CreateMap", "ExhaustiveScan",
+            "Armfolding", "ArmUnfolding", "NavigateToPose", "BasePlacement",
+        ])
+        controls_row.addWidget(self.fsm_state_combo)
+
+        controls_row.addSpacing(24)
+        self.btn_fsm_start = QPushButton("Start FSM")
+        self.btn_fsm_start.clicked.connect(self._toggle_fsm)
+        controls_row.addWidget(self.btn_fsm_start)
+
+        controls_row.addStretch()
+        fsm_tab_layout.addLayout(controls_row)
+
+        # ── Status header ──
+        fsm_status_header = QHBoxLayout()
+        fsm_status_header.addWidget(QLabel("FSM Output"))
+        fsm_status_header.addStretch()
+
+        fsm_status_header.addWidget(QLabel("Filter:"))
+        self.fsm_filter_input = QLineEdit()
+        self.fsm_filter_input.setPlaceholderText("Filter output lines...")
+        self.fsm_filter_input.setMaximumWidth(200)
+        self.fsm_filter_input.textChanged.connect(self._fsm_apply_filter)
+        fsm_status_header.addWidget(self.fsm_filter_input)
+
+        self.btn_restore_fsm_status = QPushButton("Restore")
+        self.btn_restore_fsm_status.clicked.connect(self.restore_fsm_status)
+        self.btn_restore_fsm_status.setMaximumWidth(80)
+        self.btn_restore_fsm_status.setVisible(False)
+        fsm_status_header.addWidget(self.btn_restore_fsm_status)
+
+        btn_clear_fsm_status = QPushButton("Clear")
+        btn_clear_fsm_status.clicked.connect(self.clear_fsm_status)
+        btn_clear_fsm_status.setMaximumWidth(80)
+        fsm_status_header.addWidget(btn_clear_fsm_status)
+
+        fsm_tab_layout.addLayout(fsm_status_header)
+
+        # ── Status output (full width, wrapped) ──
+        self.fsm_status_text = QTextEdit()
+        self.fsm_status_text.setReadOnly(True)
+        self.fsm_status_text.setAcceptRichText(True)
+        self.fsm_status_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.fsm_status_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.fsm_status_text.setStyleSheet(
+            "background-color: #22272e; color: #adbac7; border: 1px solid #444c56; "
+            "font-family: 'Courier New', monospace; white-space: pre-wrap;"
+        )
+        font_metrics = QFontMetrics(self.fsm_status_text.font())
+        self.fsm_status_text.setTabStopDistance(font_metrics.horizontalAdvance(' ') * 8)
+        fsm_tab_layout.addWidget(self.fsm_status_text, 1)
+
+        # ── Stdin input row ──
+        stdin_row = QHBoxLayout()
+        stdin_row.addWidget(QLabel("Send input:"))
+        self.fsm_stdin_input = QLineEdit()
+        self.fsm_stdin_input.setPlaceholderText("Type input for the running FSM process and press Enter...")
+        self.fsm_stdin_input.setEnabled(False)
+        self.fsm_stdin_input.returnPressed.connect(self._send_fsm_input)
+        stdin_row.addWidget(self.fsm_stdin_input)
+        self.btn_fsm_send_input = QPushButton("Send")
+        self.btn_fsm_send_input.setMaximumWidth(70)
+        self.btn_fsm_send_input.setEnabled(False)
+        self.btn_fsm_send_input.clicked.connect(self._send_fsm_input)
+        stdin_row.addWidget(self.btn_fsm_send_input)
+        fsm_tab_layout.addLayout(stdin_row)
+
+        return fsm_tab
+
+    def _toggle_fsm(self):
+        """Start or stop the FSM launch + node pair."""
+        if self.fsm_launch_process is not None or self.fsm_node_process is not None:
+            self._stop_fsm()
+        else:
+            self._start_fsm()
+
+    def _start_fsm(self):
+        sim = self.fsm_sim_combo.currentText()
+        planner = self.fsm_planner_combo.currentText()
+        state = self.fsm_state_combo.currentText()
+
+        self.btn_fsm_start.setText("Stop FSM")
+        self.btn_fsm_start.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self._fsm_set_input_enabled(True)
+
+        # ── Step 1: launch file ──
+        launch_args = ['launch', 'task_planner_fsm', 'task_planner.launch.py']
+        self._fsm_append_log(
+            f"<b style='color: #57ab5a;'>▶ ros2 {' '.join(launch_args)}</b>",
+            f"▶ ros2 {' '.join(launch_args)}",
+        )
+        proc_launch = QProcess(self)
+        proc_launch.setProcessChannelMode(QProcess.MergedChannels)
+        proc_launch.readyReadStandardOutput.connect(
+            lambda p=proc_launch: self._handle_fsm_output(p)
+        )
+        proc_launch.finished.connect(
+            lambda code, status, p=proc_launch: self._on_fsm_launch_finished(p, code)
+        )
+        proc_launch.start('ros2', launch_args)
+        self.fsm_launch_process = proc_launch
+
+        # ── Step 2: fsm_node (delayed so launch has time to spin up) ──
+        node_args = [
+            'run', 'task_planner_fsm', 'fsm_node',
+            '--sim', sim,
+            '--planner-backend', planner,
+            '--initial-state', state,
+        ]
+        QTimer.singleShot(3000, lambda: self._start_fsm_node(node_args))
+
+    def _start_fsm_node(self, node_args):
+        """Start the fsm_node process (called after launch delay)."""
+        if self.fsm_launch_process is None:
+            # Launch was already stopped before the timer fired
+            return
+        self._fsm_append_log(
+            f"<b style='color: #57ab5a;'>▶ ros2 {' '.join(node_args)}</b>",
+            f"▶ ros2 {' '.join(node_args)}",
+        )
+        proc_node = QProcess(self)
+        proc_node.setProcessChannelMode(QProcess.MergedChannels)
+        proc_node.readyReadStandardOutput.connect(
+            lambda p=proc_node: self._handle_fsm_output(p)
+        )
+        proc_node.finished.connect(
+            lambda code, status, p=proc_node: self._on_fsm_node_finished(p, code)
+        )
+        proc_node.start('ros2', node_args)
+        self.fsm_node_process = proc_node
+
+    def _stop_fsm(self):
+        """Stop both FSM processes using the same teardown sequence as other tabs."""
+        # Stop node first, then the launch file
+        for proc in (self.fsm_node_process, self.fsm_launch_process):
+            if proc is None:
+                continue
+
+            try:
+                proc.finished.disconnect()
+            except Exception:
+                pass
+
+            pid = proc.processId()
+
+            # 1. Graceful SIGINT (Ctrl-C)
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGINT)
+                    proc.waitForFinished(3000)
+                except ProcessLookupError:
+                    pass
+                except Exception as e:
+                    self._fsm_append_log(
+                        f"<span style='color: #e3b341;'>⚠ Could not send SIGINT: {html.escape(str(e))}</span>",
+                        f"⚠ Could not send SIGINT: {e}",
+                    )
+
+            # 2. Escalate to SIGTERM
+            if proc.state() == QProcess.Running:
+                proc.terminate()
+                proc.waitForFinished(2000)
+
+            # 3. Escalate to SIGKILL
+            if proc.state() == QProcess.Running:
+                proc.kill()
+                proc.waitForFinished(2000)
+
+            # 4. Kill orphaned child processes spawned by the launch file
+            if pid:
+                try:
+                    subprocess.run(['pkill', '-9', '-P', str(pid)], timeout=2, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+                self._cleanup_ros_children_of_pid(pid)
+
+            proc.deleteLater()
+
+        self.fsm_node_process = None
+        self.fsm_launch_process = None
+        self.btn_fsm_start.setText("Start FSM")
+        self.btn_fsm_start.setStyleSheet("")
+        self._fsm_set_input_enabled(False)
+        self._fsm_append_log(
+            "<span style='color: #e3b341;'>⏹ FSM stopped</span>",
+            "⏹ FSM stopped",
+        )
+
+    def _handle_fsm_output(self, process):
+        """Stream output from a FSM process into the status pane."""
+        output = process.readAllStandardOutput().data().decode(errors='replace')
+        if not output:
+            return
+        for line in output.split('\n'):
+            if line.strip():
+                self._fsm_append_log(self._ansi_to_html(line), line)
+
+    def _on_fsm_launch_finished(self, process, exit_code):
+        if process is not self.fsm_launch_process:
+            return
+        self.fsm_launch_process = None
+        color = '#57ab5a' if exit_code == 0 else '#f47067'
+        msg = f"Launch exited (code {exit_code})"
+        self._fsm_append_log(f"<span style='color: {color};'>{msg}</span>", msg)
+        process.deleteLater()
+        if self.fsm_node_process is None:
+            self.btn_fsm_start.setText("Start FSM")
+            self.btn_fsm_start.setStyleSheet("")
+            self._fsm_set_input_enabled(False)
+
+    def _on_fsm_node_finished(self, process, exit_code):
+        if process is not self.fsm_node_process:
+            return
+        self.fsm_node_process = None
+        color = '#57ab5a' if exit_code == 0 else '#f47067'
+        msg = f"fsm_node exited (code {exit_code})"
+        self._fsm_append_log(f"<span style='color: {color};'>{msg}</span>", msg)
+        process.deleteLater()
+        if self.fsm_launch_process is None:
+            self.btn_fsm_start.setText("Start FSM")
+            self.btn_fsm_start.setStyleSheet("")
+            self._fsm_set_input_enabled(False)
+
+    def _fsm_set_input_enabled(self, enabled: bool):
+        self.fsm_stdin_input.setEnabled(enabled)
+        self.btn_fsm_send_input.setEnabled(enabled)
+        if not enabled:
+            self.fsm_stdin_input.clear()
+
+    def _send_fsm_input(self):
+        text = self.fsm_stdin_input.text()
+        if not text:
+            return
+        # Prefer the node process; fall back to the launch process
+        target = self.fsm_node_process or self.fsm_launch_process
+        if target is None or target.state() != QProcess.Running:
+            self._fsm_append_log(
+                "<span style='color: #f47067;'>⚠ No running FSM process to send input to</span>",
+                "⚠ No running FSM process to send input to",
+            )
+            return
+        target.write((text + '\n').encode())
+        self._fsm_append_log(
+            f"<span style='color: #76e3ea;'>▷ {html.escape(text)}</span>",
+            f"▷ {text}",
+        )
+        self.fsm_stdin_input.clear()
+
+    def _fsm_append_log(self, html_content, plain_text, add_newline=True):
+        """Store entry in the log buffer and display it if it passes the current filter."""
+        self.fsm_log_entries.append((html_content, plain_text, add_newline))
+        term = self.fsm_filter_input.text().strip().lower()
+        if not term or term in plain_text.lower():
+            self._append_to_text_widget(self.fsm_status_text, html_content, add_newline)
+
+    def _fsm_apply_filter(self):
+        """Rebuild the status pane showing only lines that match the filter text."""
+        term = self.fsm_filter_input.text().strip().lower()
+        scrollbar = self.fsm_status_text.verticalScrollBar()
+        was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 10
+        self.fsm_status_text.clear()
+        for h, plain, nl in self.fsm_log_entries:
+            if not term or term in plain.lower():
+                self._append_to_text_widget(self.fsm_status_text, h, nl)
+        if was_at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+
+    def clear_fsm_status(self):
+        self.fsm_log_backup = list(self.fsm_log_entries)
+        self.fsm_log_entries.clear()
+        self.fsm_status_text.clear()
+        self.btn_restore_fsm_status.setVisible(True)
+
+    def restore_fsm_status(self):
+        if self.fsm_log_backup:
+            self.fsm_log_entries = self.fsm_log_backup + self.fsm_log_entries
+            self.fsm_log_backup = []
+            self._fsm_apply_filter()
+            self.btn_restore_fsm_status.setVisible(False)
+
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
