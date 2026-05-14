@@ -14,7 +14,7 @@ from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import QTimer, QProcess, Qt
-from PyQt5.QtGui import QFontMetrics, QIcon, QPixmap
+from PyQt5.QtGui import QFontMetrics, QIcon, QPixmap, QPalette, QColor
 from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
@@ -27,9 +27,44 @@ from ur_msgs.msg import IOStates
 from ur_msgs.srv import SetIO
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
+def _detect_system_dark():
+    """Return True if the GNOME/Ubuntu system colour-scheme is set to dark."""
+    try:
+        out = subprocess.run(
+            ['gsettings', 'get', 'org.gnome.desktop.interface', 'color-scheme'],
+            capture_output=True, text=True, timeout=2
+        ).stdout
+        return 'dark' in out.lower()
+    except Exception:
+        return False
+
+def _make_dark_palette():
+    p = QPalette()
+    c = QColor
+    p.setColor(QPalette.Window,          c('#1c2128'))
+    p.setColor(QPalette.WindowText,      c('#cdd9e5'))
+    p.setColor(QPalette.Base,            c('#2d333b'))
+    p.setColor(QPalette.AlternateBase,   c('#22272e'))
+    p.setColor(QPalette.ToolTipBase,     c('#2d333b'))
+    p.setColor(QPalette.ToolTipText,     c('#cdd9e5'))
+    p.setColor(QPalette.Text,            c('#cdd9e5'))
+    p.setColor(QPalette.Button,          c('#2d333b'))
+    p.setColor(QPalette.ButtonText,      c('#cdd9e5'))
+    p.setColor(QPalette.BrightText,      c('#ffffff'))
+    p.setColor(QPalette.Link,            c('#539bf5'))
+    p.setColor(QPalette.Highlight,       c('#1f6feb'))
+    p.setColor(QPalette.HighlightedText, c('#ffffff'))
+    p.setColor(QPalette.Disabled, QPalette.WindowText, c('#768390'))
+    p.setColor(QPalette.Disabled, QPalette.Text,       c('#768390'))
+    p.setColor(QPalette.Disabled, QPalette.ButtonText, c('#768390'))
+    p.setColor(QPalette.Disabled, QPalette.Base,       c('#22272e'))
+    p.setColor(QPalette.Disabled, QPalette.Button,     c('#22272e'))
+    return p
+
 class RobotControlUI(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._dark_theme = _detect_system_dark()
  
         # Initialize ROS only if not already initialized
         if not rclpy.ok():
@@ -93,6 +128,10 @@ class RobotControlUI(QMainWindow):
         
         # Emergency stop UI state
         self.emergency_stop_active = False
+        self.freedrive_active = False
+        self.freedrive_transition_in_progress = False
+        self.freedrive_transition_target_active = False
+        self.freedrive_trajectory_controller = None
  
         # Robot dashboard connection
         self.robot_socket = None
@@ -127,6 +166,15 @@ class RobotControlUI(QMainWindow):
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
  
+        # Theme toggle button
+        theme_bar = QHBoxLayout()
+        theme_bar.addStretch()
+        self.btn_theme_toggle = QPushButton("☀ Light Theme")
+        self.btn_theme_toggle.setFixedWidth(120)
+        self.btn_theme_toggle.clicked.connect(self._toggle_theme)
+        theme_bar.addWidget(self.btn_theme_toggle)
+        main_layout.addLayout(theme_bar)
+
         # Create tab widget for Arm Control and Base Control
         tabs = QTabWidget()
         main_layout.addWidget(tabs)
@@ -293,10 +341,19 @@ class RobotControlUI(QMainWindow):
             'unlock protective stop'
         ])
         init_layout.addWidget(self.control_cmd_combo)
- 
+
         btn_send_control = QPushButton("Send Control Command")
         btn_send_control.clicked.connect(lambda: self.send_control_command())
         init_layout.addWidget(btn_send_control)
+
+        init_layout.addWidget(QLabel("Freedrive Mode:"))
+        self.btn_arm_freedrive = QPushButton("Start Freedrive")
+        self.btn_arm_freedrive.clicked.connect(lambda: self.toggle_freedrive(context='arm'))
+        self.btn_arm_freedrive.setToolTip(
+            "Start freedrive with controller switch + keepalive publisher. "
+            "Click again to stop freedrive and restore joint_trajectory_controller."
+        )
+        init_layout.addWidget(self.btn_arm_freedrive)
  
         init_layout.addStretch()
         boxes_layout.addWidget(init_box)
@@ -444,6 +501,16 @@ class RobotControlUI(QMainWindow):
         mapping_loc_box = QGroupBox("Mapping and Localization")
         mapping_loc_layout = QVBoxLayout()
         mapping_loc_box.setLayout(mapping_loc_layout)
+
+        self.btn_launch_base_robot = QPushButton("Launch Base Robot")
+        self.btn_launch_base_robot.clicked.connect(self.toggle_base_control_launch)
+        self.btn_launch_base_robot.setToolTip(
+            "ros2 launch navi_wall platform.launch.py sim:=<mode> mode:=base "
+            "controller_type:=<type> odom_tf_from_controller:=true "
+            "publish_controller_odom_tf:=true launch_rviz:=true "
+            "headless:=<true/false>"
+        )
+        mapping_loc_layout.addWidget(self.btn_launch_base_robot)
  
         # Launch Mapping button
         self.btn_launch_mapping = QPushButton("Start Mapping")
@@ -810,12 +877,23 @@ class RobotControlUI(QMainWindow):
             'unlock protective stop'
         ])
         full_control_init_layout.addWidget(self.full_control_control_cmd_combo)
-        
+
         btn_full_control_send_control = QPushButton("Send Control Command")
         btn_full_control_send_control.clicked.connect(
             lambda: self.send_full_control_control_command()
         )
         full_control_init_layout.addWidget(btn_full_control_send_control)
+
+        full_control_init_layout.addWidget(QLabel("Freedrive Mode:"))
+        self.btn_full_control_freedrive = QPushButton("Start Freedrive")
+        self.btn_full_control_freedrive.clicked.connect(
+            lambda: self.toggle_freedrive(context='full')
+        )
+        self.btn_full_control_freedrive.setToolTip(
+            "Start freedrive with controller switch + keepalive publisher. "
+            "Click again to stop freedrive and restore joint_trajectory_controller."
+        )
+        full_control_init_layout.addWidget(self.btn_full_control_freedrive)
 
         full_control_init_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_init_box)
@@ -1150,6 +1228,7 @@ class RobotControlUI(QMainWindow):
         
         # Initial UI update for consistent visuals
         self._update_emergency_stop_button_ui()
+        self._update_freedrive_button_ui()
         self.BASE_TAB_INDEX = 0
         self.ARM_TAB_INDEX = 1
         self.JOINT_TAB_INDEX = 2
@@ -1163,7 +1242,48 @@ class RobotControlUI(QMainWindow):
         
         # Initial topics list refresh
         QTimer.singleShot(1000, self.refresh_topics_list)  # Delay 1s to ensure ROS is ready
-        
+
+        self._apply_theme()
+
+    def _toggle_theme(self):
+        self._dark_theme = not self._dark_theme
+        self._apply_theme()
+
+    def _apply_theme(self):
+        dark = self._dark_theme
+        app = QApplication.instance()
+        if dark:
+            app.setPalette(_make_dark_palette())
+            log_style = (
+                "background-color: #22272e; color: #adbac7; border: 1px solid #444c56; "
+                "font-family: 'Courier New', monospace;"
+            )
+            info_style = (
+                "background-color: #22272e; color: #adbac7; border: 1px solid #444c56; "
+                "font-family: 'Courier New', monospace; padding: 4px;"
+            )
+        else:
+            app.setPalette(app.style().standardPalette())
+            log_style = (
+                "background-color: #f0f0f0; color: #1f2328; border: 1px solid #d0d7de; "
+                "font-family: 'Courier New', monospace;"
+            )
+            info_style = (
+                "background-color: #f0f0f0; color: #1f2328; border: 1px solid #d0d7de; "
+                "font-family: 'Courier New', monospace; padding: 4px;"
+            )
+
+        for attr in ('status_text', 'base_status_text', 'joint_status_text',
+                     'full_control_status_text', 'gpr_status_text'):
+            if hasattr(self, attr):
+                getattr(self, attr).setStyleSheet(log_style)
+
+        if hasattr(self, 'topic_info_display'):
+            self.topic_info_display.setStyleSheet(info_style)
+
+        if hasattr(self, 'btn_theme_toggle'):
+            self.btn_theme_toggle.setText("☀ Light Theme" if dark else "☾ Dark Theme")
+
     def _update_full_control_sim_mode(self):
         """Refresh Full Control state when its simulation mode changes."""
         self._update_full_control_planner_constraints()
@@ -1174,16 +1294,28 @@ class RobotControlUI(QMainWindow):
         self._update_headless_visibility()
         self._update_full_control_launch_tooltip()
 
+    def _is_robot_bringup_process(self, process_key):
+        """Return whether a process key belongs to a robot bringup launch."""
+        return process_key in {'mobile_platform', 'full_mobile_manipulator'}
+
+    def _is_base_tab_state_process(self, process_key):
+        """Return whether a process should lock the Base Control tab context."""
+        return process_key in {'mobile_platform', 'mapping', 'localization', 'nav2', 'exploration'}
+
     def _get_base_process_start_text(self, process_key, name):
         """Return the idle button label for base/full-control launch buttons."""
         if process_key == 'full_mobile_manipulator':
             return 'Launch Full Robot'
+        if process_key == 'mobile_platform':
+            return 'Launch Base Robot'
         return f"Start {name}"
 
     def _get_base_process_stop_text(self, process_key, name):
         """Return the running button label for base/full-control launch buttons."""
         if process_key == 'full_mobile_manipulator':
             return 'Stop Full Robot'
+        if process_key == 'mobile_platform':
+            return 'Stop Base Robot'
         return f"Stop {name}"
 
     def _sync_full_control_hybrid_sim_state(self):
@@ -1198,10 +1330,8 @@ class RobotControlUI(QMainWindow):
         if sim_mode != 'true':
             desired_hybrid_sim = 'false'
             should_lock_hybrid_sim = True
-        elif planner_backend == 'moveit':
-            desired_hybrid_sim = 'true'
-            should_lock_hybrid_sim = True
         elif hasattr(self, 'full_control_hybrid_sim_combo'):
+            # When sim=true: user is free to choose regardless of planner backend
             desired_hybrid_sim = self.full_control_hybrid_sim_combo.currentText()
             should_lock_hybrid_sim = False
         else:
@@ -1262,20 +1392,18 @@ class RobotControlUI(QMainWindow):
             if planner == 'moveit':
                 # Get current simulation mode
                 sim_mode = self.arm_sim_mode_combo.currentText()
-                # When MoveIt is chosen:
-                # - If simulation is true -> URsim blocked to true
-                # - If simulation is false -> URsim blocked to false (for real robot)
-                ursim_value = 'true' if sim_mode == 'true' else 'false'
-                self.arm_hybrid_sim_combo.setCurrentText(ursim_value)
-                self.arm_hybrid_sim_combo.setEnabled(False)
-
-                # Update status label based on simulation mode
-                if hasattr(self, 'arm_moveit_status_label'):
-                    if sim_mode == 'true':
-                        self.arm_moveit_status_label.setText("Running moveit on URsim [moveit in gazebo not implemented yet]")
-                    else:
+                if sim_mode == 'true':
+                    # Allow user to freely choose URsim or Gazebo when simulating with MoveIt
+                    self.arm_hybrid_sim_combo.setEnabled(True)
+                    if hasattr(self, 'arm_moveit_status_label'):
+                        self.arm_moveit_status_label.setVisible(False)
+                else:
+                    # Real robot: lock URsim to false
+                    self.arm_hybrid_sim_combo.setCurrentText('false')
+                    self.arm_hybrid_sim_combo.setEnabled(False)
+                    if hasattr(self, 'arm_moveit_status_label'):
                         self.arm_moveit_status_label.setText("Running moveit in Real Robot")
-                    self.arm_moveit_status_label.setVisible(True)
+                        self.arm_moveit_status_label.setVisible(True)
             else:
                 self.arm_hybrid_sim_combo.setEnabled(True)
                 # Hide status label when not using MoveIt
@@ -1425,10 +1553,7 @@ class RobotControlUI(QMainWindow):
     def _update_tab_states_for_base(self):
         """Update tab states based on base control processes"""
         # Any base (non-full) process running?
-        base_running = any(
-            key in self.process_map
-            for key in ['mapping', 'localization', 'nav2', 'exploration']
-        )
+        base_running = any(self._is_base_tab_state_process(key) for key in self.process_map)
 
         if base_running:
             # Disable Arm and Full Control tabs (Base stays enabled, Joint stays enabled)
@@ -1651,6 +1776,420 @@ class RobotControlUI(QMainWindow):
         else:
             # User was scrolled up, maintain their position
             scrollbar.setValue(old_scroll_value)
+
+    def _handle_freedrive_output(self, process, status_text):
+        """Stream freedrive command output while suppressing repetitive keepalive spam."""
+        output = process.readAllStandardOutput().data().decode()
+        if not output:
+            return
+
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped == 'publisher: beginning loop' or stripped.startswith('publishing #'):
+                continue
+
+            self._append_to_text_widget(status_text, self._ansi_to_html(line))
+
+    def _build_freedrive_command_text(self, ros2_args):
+        """Format a ros2 command for status display."""
+        return 'ros2 ' + ' '.join(shlex.quote(arg) for arg in ros2_args)
+
+    def _run_freedrive_command(self, process_key, ros2_args, status_text, finished_callback):
+        """Run a one-shot freedrive-related ros2 command."""
+        if process_key in self.process_map:
+            existing_process = self.process_map[process_key]
+            if existing_process.state() == QProcess.Running:
+                existing_process.kill()
+                existing_process.waitForFinished(1000)
+            del self.process_map[process_key]
+
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(
+            lambda: self._handle_freedrive_output(process, status_text)
+        )
+        process.finished.connect(
+            lambda exit_code, _exit_status: self._on_freedrive_command_finished(
+                process_key, exit_code, status_text, finished_callback
+            )
+        )
+
+        cmd_str = self._build_freedrive_command_text(ros2_args)
+        self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
+        process.start('ros2', ros2_args)
+        self.process_map[process_key] = process
+
+    def _on_freedrive_command_finished(self, process_key, exit_code, status_text, finished_callback):
+        """Clean up a one-shot freedrive command and continue the sequence."""
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+        finished_callback(exit_code, status_text)
+
+    def _interrupt_freedrive_process(self, process_key, status_text, label):
+        """Best-effort Ctrl+C style stop for a freedrive-related process."""
+        if process_key not in self.process_map:
+            return False
+
+        process = self.process_map[process_key]
+        try:
+            process.finished.disconnect()
+        except Exception:
+            pass
+
+        pid = process.processId()
+        if pid:
+            try:
+                os.kill(pid, signal.SIGINT)
+                status_text.append(f"⏹ Sent Ctrl+C to {label}")
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                status_text.append(
+                    f"<span style='color: #c69026;'>⚠ Could not send Ctrl+C to {label}: {exc}</span>"
+                )
+
+        if process.state() == QProcess.Running:
+            process.waitForFinished(1500)
+        if process.state() == QProcess.Running:
+            process.terminate()
+            process.waitForFinished(1000)
+        if process.state() == QProcess.Running:
+            process.kill()
+            process.waitForFinished(1000)
+
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+        return True
+
+    def _stop_freedrive_start_processes(self, status_text):
+        """Interrupt the freedrive start-side processes if they are still running."""
+        self._interrupt_freedrive_process(
+            'freedrive_start_switch',
+            status_text,
+            'freedrive controller switch',
+        )
+        self._interrupt_freedrive_process(
+            'freedrive_enable_publisher',
+            status_text,
+            'freedrive keepalive publisher',
+        )
+
+    def _stop_freedrive_stop_processes(self, status_text):
+        """Interrupt any lingering freedrive stop-side commands before restarting."""
+        self._interrupt_freedrive_process(
+            'freedrive_stop_disable',
+            status_text,
+            'freedrive disable publisher',
+        )
+        self._interrupt_freedrive_process(
+            'freedrive_stop_switch',
+            status_text,
+            'trajectory controller restore switch',
+        )
+
+    def _start_freedrive_publisher(self, status_text):
+        """Start the persistent freedrive keepalive publisher."""
+        process_key = 'freedrive_enable_publisher'
+        ros2_args = [
+            'topic',
+            'pub',
+            '--rate',
+            '2',
+            '/freedrive_mode_controller/enable_freedrive_mode',
+            'std_msgs/msg/Bool',
+            '{data: true}',
+        ]
+
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(
+            lambda: self._handle_freedrive_output(process, status_text)
+        )
+        process.finished.connect(
+            lambda exit_code, _exit_status: self._on_freedrive_publisher_finished(
+                exit_code, status_text
+            )
+        )
+
+        cmd_str = self._build_freedrive_command_text(ros2_args)
+        self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
+        process.start('ros2', ros2_args)
+        self.process_map[process_key] = process
+
+    def _on_freedrive_publisher_finished(self, exit_code, status_text):
+        """Handle the persistent freedrive publisher exiting unexpectedly."""
+        process_key = 'freedrive_enable_publisher'
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+
+        self.freedrive_active = False
+        self._update_freedrive_button_ui()
+
+        if exit_code == 0:
+            status_text.append("⏹ Freedrive keepalive publisher stopped")
+        else:
+            status_text.append(
+                f"<span style='color: #f47067;'>✗ Freedrive keepalive publisher exited unexpectedly (exit code {exit_code})</span>"
+            )
+
+    def _update_freedrive_button_ui(self):
+        """Keep freedrive buttons in sync across Arm Control and Full Control tabs."""
+        if self.freedrive_active:
+            text = "Stop Freedrive"
+            style = "background-color: #4CAF50; color: white; font-weight: bold;"
+        else:
+            text = "Start Freedrive"
+            style = ""
+
+        if hasattr(self, "btn_arm_freedrive"):
+            self.btn_arm_freedrive.setText(text)
+            self.btn_arm_freedrive.setStyleSheet(style)
+            self.btn_arm_freedrive.setEnabled(True)
+
+        if hasattr(self, "btn_full_control_freedrive"):
+            self.btn_full_control_freedrive.setText(text)
+            self.btn_full_control_freedrive.setStyleSheet(style)
+            self.btn_full_control_freedrive.setEnabled(True)
+
+    def _get_freedrive_controller_check_command(self):
+        """Return the shell command used to detect freedrive-related controllers."""
+        return "ros2 control list_controllers -c /controller_manager | grep -E 'freedrive|joint_traj'"
+
+    def _get_controller_states(self, status_text=None):
+        """Return freedrive-related controller states parsed from the direct shell command output."""
+        try:
+            result = subprocess.run(
+                ['bash', '-lc', self._get_freedrive_controller_check_command()],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            if status_text is not None:
+                self._append_to_text_widget(
+                    status_text,
+                    "<span style='color: #c69026;'>Freedrive controller check timed out</span>",
+                )
+            return {}
+        except Exception as exc:
+            if status_text is not None:
+                self._append_to_text_widget(
+                    status_text,
+                    f"<span style='color: #c69026;'>Freedrive controller check failed: {html.escape(str(exc))}</span>",
+                )
+            return {}
+
+        controller_output = f"{result.stdout}\n{result.stderr or ''}"
+        controller_states = {}
+
+        if status_text is not None:
+            cmd_str = self._get_freedrive_controller_check_command()
+            self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {html.escape(cmd_str)}</b>")
+            stripped_output = controller_output.strip()
+            if stripped_output:
+                self._append_to_text_widget(
+                    status_text,
+                    (
+                        "<pre style=\"margin: 0; font-family: 'Courier New', monospace;\">"
+                        f"{html.escape(stripped_output)}"
+                        "</pre>"
+                    ),
+                    add_newline=False,
+                )
+
+        for raw_line in controller_output.splitlines():
+            line = re.sub(r'\x1b\[[0-9;]*m', '', raw_line).strip()
+            if not line:
+                continue
+            if line.startswith('[INFO]') or line.startswith('[WARN]') or line.startswith('[ERROR]'):
+                continue
+
+            match = re.match(
+                r'^([A-Za-z0-9_./-]+)\s+([A-Za-z0-9_./:-]+)\s+(active|inactive|unconfigured|finalized)\b',
+                line,
+            )
+            if not match:
+                continue
+
+            controller_states[match.group(1)] = match.group(3)
+
+        return controller_states
+
+    def _get_available_trajectory_controller(self, controller_states=None):
+        """Return the preferred trajectory controller if one is loaded."""
+        if controller_states is None:
+            controller_states = self._get_controller_states()
+        trajectory_controller_candidates = (
+            'joint_trajectory_controller',
+            'scaled_joint_trajectory_controller',
+        )
+
+        for controller_name in trajectory_controller_candidates:
+            if controller_states.get(controller_name) == 'active':
+                return controller_name
+
+        for controller_name in trajectory_controller_candidates:
+            if controller_name in controller_states:
+                return controller_name
+
+        return None
+
+    def _freedrive_controllers_are_loaded(self, status_text=None):
+        """Return True when freedrive and a compatible trajectory controller are available."""
+        controller_states = self._get_controller_states(status_text=status_text)
+        trajectory_controller = self._get_available_trajectory_controller(controller_states)
+        self.freedrive_trajectory_controller = trajectory_controller
+        return bool(trajectory_controller and 'freedrive_mode_controller' in controller_states)
+
+    def _show_no_controllers_running_message(self, status_text):
+        """Notify the user that freedrive cannot start because controllers are unavailable."""
+        message = (
+            "Freedrive requires freedrive_mode_controller and either "
+            "joint_trajectory_controller or scaled_joint_trajectory_controller."
+        )
+        QMessageBox.warning(self, 'Freedrive Mode', message)
+        status_text.append(f"<span style='color: #c69026;'>{message}</span>")
+
+    def _confirm_freedrive_start(self):
+        """Ask the user to confirm the freedrive start sequence."""
+        reply = QMessageBox.question(
+            self,
+            'Confirm Freedrive',
+            "Are you sure you want to start freedrive?\n\n"
+            "Make sure you have calibrated the PAYLOAD in the teach pendant. "
+            "If not hold the arm by hand before it falls or moves up.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        return reply == QMessageBox.Yes
+
+    def toggle_freedrive(self, context='arm'):
+        """Toggle freedrive mode with confirmation before activation."""
+        status_text = self._get_status_text_for_context(context)
+
+        if self.freedrive_active:
+            self._stop_freedrive(status_text)
+            return
+
+        if not self._freedrive_controllers_are_loaded(status_text=status_text):
+            self._show_no_controllers_running_message(status_text)
+            return
+
+        if not self._confirm_freedrive_start():
+            return
+
+        self._start_freedrive(status_text)
+
+    def _start_freedrive(self, status_text):
+        """Activate the freedrive controller and start the enable publisher."""
+        trajectory_controller = self.freedrive_trajectory_controller or self._get_available_trajectory_controller()
+        if not trajectory_controller:
+            self.freedrive_active = False
+            self._update_freedrive_button_ui()
+            self._show_no_controllers_running_message(status_text)
+            return
+
+        self.freedrive_trajectory_controller = trajectory_controller
+        self._stop_freedrive_stop_processes(status_text)
+        self._stop_freedrive_start_processes(status_text)
+        self.freedrive_active = True
+        self.freedrive_transition_in_progress = False
+        self.freedrive_transition_target_active = False
+        self._update_freedrive_button_ui()
+        status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ Freedrive mode requested</span>")
+        self._run_freedrive_command(
+            'freedrive_start_switch',
+            [
+                'control',
+                'switch_controllers',
+                '--deactivate',
+                trajectory_controller,
+                '--activate',
+                'freedrive_mode_controller',
+            ],
+            status_text,
+            self._on_freedrive_start_switch_finished,
+        )
+
+    def _on_freedrive_start_switch_finished(self, exit_code, status_text):
+        """Start the keepalive publisher after the controller switch succeeds."""
+        if exit_code == 0:
+            status_text.append("✓ Freedrive controller activated")
+            self._start_freedrive_publisher(status_text)
+        else:
+            self.freedrive_active = False
+            self._update_freedrive_button_ui()
+            status_text.append(
+                f"<span style='color: #f47067;'>✗ Freedrive controller switch failed (exit code {exit_code})</span>"
+            )
+
+    def _stop_freedrive(self, status_text):
+        """Stop the freedrive publisher, disable freedrive, and restore trajectory control."""
+        trajectory_controller = self.freedrive_trajectory_controller or self._get_available_trajectory_controller()
+        self.freedrive_active = False
+        self.freedrive_transition_in_progress = False
+        self.freedrive_transition_target_active = False
+        self._update_freedrive_button_ui()
+        self._stop_freedrive_start_processes(status_text)
+        self._stop_freedrive_stop_processes(status_text)
+        self._run_freedrive_command(
+            'freedrive_stop_disable',
+            [
+                'topic',
+                'pub',
+                '--once',
+                '/freedrive_mode_controller/enable_freedrive_mode',
+                'std_msgs/msg/Bool',
+                '{data: false}',
+            ],
+            status_text,
+            self._on_freedrive_disable_finished,
+        )
+
+    def _on_freedrive_disable_finished(self, exit_code, status_text):
+        """Switch controllers back after sending the freedrive disable message."""
+        trajectory_controller = self.freedrive_trajectory_controller or self._get_available_trajectory_controller()
+        if exit_code == 0:
+            status_text.append("✓ Freedrive disable message sent")
+        else:
+            status_text.append(
+                f"<span style='color: #c69026;'>⚠ Freedrive disable message failed (exit code {exit_code}); switching controllers back anyway</span>"
+            )
+
+        if not trajectory_controller:
+            status_text.append(
+                "<span style='color: #f47067;'>✗ Could not determine which trajectory controller to restore</span>"
+            )
+            return
+
+        self._run_freedrive_command(
+            'freedrive_stop_switch',
+            [
+                'control',
+                'switch_controllers',
+                '--deactivate',
+                'freedrive_mode_controller',
+                '--activate',
+                trajectory_controller,
+            ],
+            status_text,
+            self._on_freedrive_stop_switch_finished,
+        )
+
+    def _on_freedrive_stop_switch_finished(self, exit_code, status_text):
+        """Finalize freedrive shutdown and restore the button state."""
+        if exit_code == 0:
+            status_text.append(
+                "<span style='color: #57ab5a; font-weight: bold;'>✓ Freedrive mode disabled</span>"
+            )
+        else:
+            status_text.append(
+                f"<span style='color: #f47067;'>✗ Failed to restore joint_trajectory_controller (exit code {exit_code})</span>"
+            )
 
     def _build_gpr_request_groups(self):
         """Return the supported GPR API requests grouped for the UI."""
@@ -2378,6 +2917,34 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         # Update tab states
         self._update_tab_states_for_arm()
 
+    def toggle_base_control_launch(self):
+        """Toggle the base-only bringup from the Base Control tab."""
+        sim_mode = self.sim_mode_combo.currentText()
+        controller_type = self.controller_type_combo.currentText()
+        headless = self.base_headless_combo.currentText()
+
+        launch_args = [
+            'launch', 'navi_wall', 'platform.launch.py',
+            f'sim:={sim_mode}',
+            'mode:=base',
+            f'controller_type:={controller_type}',
+            'odom_tf_from_controller:=true',
+            'publish_controller_odom_tf:=true',
+            'launch_rviz:=true',
+            f'headless:={headless}',
+        ]
+        if 'mobile_platform' not in self.process_map:
+            self.btn_launch_base_robot.setProperty('uses_gazebo', sim_mode == 'true')
+
+        self._toggle_base_process(
+            'mobile_platform',
+            self.btn_launch_base_robot,
+            'Base Robot',
+            'ros2',
+            launch_args,
+        )
+        self._update_tab_states_for_base()
+
     def toggle_full_control_launch(self):
         """Toggle the full mobile manipulator bringup from the Full Control tab."""
         sim_mode = self.full_control_sim_mode_combo.currentText()
@@ -2616,6 +3183,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                                         f'use_sim_time:={sim_mode}', f'controller_type:={controller_type}'])
         if mode == 'full':
             self._update_tab_states_for_full_control()
+        else:
+            self._update_tab_states_for_base()
             
     def toggle_exploration(self, mode='base', button=None, sim_combo=None):
         """Toggle exploration with configurable mode parameter"""
@@ -2637,6 +3206,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                                         '--ros-args', '--params-file', params_file])
         if mode == 'full':
             self._update_tab_states_for_full_control()
+        else:
+            self._update_tab_states_for_base()
    
     # Helper methods to get the correct buttons for each mode
     def _get_mapping_button_for_mode(self, mode):
@@ -3102,7 +3673,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 process.waitForFinished(2000)
 
             # Kill orphaned launch children/Gazebo for simulator-backed launches.
-            if process_key == 'full_mobile_manipulator' and pid:
+            if self._is_robot_bringup_process(process_key) and pid:
                 try:
                     subprocess.run(['pkill', '-9', '-P', str(pid)], timeout=2, stderr=subprocess.DEVNULL)
                 except Exception:
@@ -3115,7 +3686,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             if (
                 'mapping' in process_key
                 or 'localization' in process_key
-                or (process_key == 'full_mobile_manipulator' and uses_gazebo)
+                or (self._is_robot_bringup_process(process_key) and uses_gazebo)
             ):
                 self._kill_gazebo_processes()
 
@@ -3125,7 +3696,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
             button.setText(self._get_base_process_start_text(process_key, name))
             button.setStyleSheet("")
-            if process_key == 'full_mobile_manipulator':
+            if self._is_robot_bringup_process(process_key):
                 button.setProperty('uses_gazebo', False)
             status_text.append(f"⏹ Stopped {name}")
 
@@ -3142,7 +3713,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                     btn.setEnabled(True)
 
             # Only base mode affects tab states
-            if not process_key.startswith('full') and process_key in ['mapping', 'localization']:
+            if not process_key.startswith('full') and self._is_base_tab_state_process(process_key):
                 self._update_tab_states_for_base()
 
         else:
@@ -3227,7 +3798,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             
             status_text.append(f"{name} exited")
 
-            if process_key == 'full_mobile_manipulator' and bool(button.property('uses_gazebo')):
+            if self._is_robot_bringup_process(process_key) and bool(button.property('uses_gazebo')):
                 self._kill_gazebo_processes()
                 button.setProperty('uses_gazebo', False)
             
@@ -3247,7 +3818,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                     btn.setEnabled(True)
             
             # Update tab states when base processes finish
-            if not process_key.startswith('full') and process_key in ['mapping', 'localization']:
+            if not process_key.startswith('full') and self._is_base_tab_state_process(process_key):
                 self._update_tab_states_for_base()
 
             elif process_key.startswith('full') and any(
@@ -4515,6 +5086,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
     window = RobotControlUI()
     window.show()
     sys.exit(app.exec_())

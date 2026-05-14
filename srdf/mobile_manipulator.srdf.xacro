@@ -45,6 +45,11 @@
   <disable_collisions link1="turret_link" link2="turret_caster_bl" reason="Adjacent" />
   <disable_collisions link1="turret_link" link2="turret_caster_br" reason="Adjacent" />
 
+  <disable_collisions link1="turret_link" link2="os_sensor_mount" reason="Adjacent" />
+  <disable_collisions link1="os_sensor_mount" link2="camera_link" reason="Adjacent" />
+  <disable_collisions link1="os_sensor_mount" link2="front_sick_scan" reason="Adjacent" />
+  <disable_collisions link1="os_sensor_mount" link2="rear_sick_scan" reason="Adjacent" />
+
   <disable_collisions link1="column_link" link2="$(arg tf_prefix)base_link" reason="Adjacent" />
   <disable_collisions link1="$(arg tf_prefix)base_link" link2="$(arg tf_prefix)base_link_inertia" reason="Adjacent" />
   <disable_collisions link1="$(arg tf_prefix)base_link_inertia" link2="$(arg tf_prefix)shoulder_link" reason="Adjacent" />

@@ -274,6 +274,19 @@ def generate_launch_description():
         [
             PushRosNamespace(namespace_arm),
             IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(ur_sim_control_launch),
+                launch_arguments={
+                    'ur_type': ur_type,
+                    'tf_prefix': tf_prefix,
+                    'prefix': prefix,
+                    'mode': mode,
+                    'stack_launch_rviz': stack_launch_rviz,
+                    'controllers_file': controllers_file,
+                    'publish_controller_odom_tf': publish_controller_odom_tf,
+                }.items(),
+                condition=IfCondition(AndSubstitution(simulation, NotSubstitution(hybrid_sim))),
+            ),
+            IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(ur_control_launch),
                 launch_arguments={
                     'ur_type': ur_type,
@@ -290,19 +303,6 @@ def generate_launch_description():
                     'publish_controller_odom_tf': publish_controller_odom_tf,
                 }.items(),
                 condition=IfCondition(OrSubstitution(NotSubstitution(simulation), hybrid_sim)),
-            ),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(ur_sim_control_launch),
-                launch_arguments={
-                    'ur_type': ur_type,
-                    'tf_prefix': tf_prefix,
-                    'prefix': prefix,
-                    'mode': mode,
-                    'stack_launch_rviz': stack_launch_rviz,
-                    'controllers_file': controllers_file,
-                    'publish_controller_odom_tf': publish_controller_odom_tf,
-                }.items(),
-                condition=IfCondition(AndSubstitution(simulation, NotSubstitution(hybrid_sim))),
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(publisher_launch),

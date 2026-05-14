@@ -131,12 +131,12 @@ class PositionSenderNode(Node):
                 'pose': (0.17536, 0.43514, 0.28396, -0.16963, 0.98548, 0.00540, 0.00323)
             },
             'under': {
-                'joints': (1.747, -3.119, -1.139, -0.444, 1.564, 2.976),
-                'pose': (0.00068, 1.00176, -0.58394, -0.16963, 0.98548, 0.00540, 0.00323)
+                'joints': (1.346, -2.958, -1.727, -0.069, 1.607, 2.134),
+                'pose': (0.315, 0.667, -0.700, -0.382, 0.923, -0.006, -0.027)
             },
             'under1': {
-                'joints': (),
-                'pose': (0.17461, 0.43615, 0.28621, -0.16950, 0.98540, 0.00600, 0.00140)
+                'joints': (3.810, -2.978, -1.793, 0.103, 1.506, 1.417),
+                'pose': (-0.681, -0.281, -0.700, 0.916, 0.398, -0.030, -0.026)
             },
             'under2': {
                 'joints': (-5.73, 0.176, 1.426, -3.18, 4.714, -3.396),
@@ -171,7 +171,7 @@ class PositionSenderNode(Node):
             'arm_wrist_2_joint',
             'arm_wrist_3_joint'
         ]
-        self.ompl_pose_positions = {'folded_fsm', 'unfolded_fsm'}
+        self.ompl_pose_positions = {'folded_fsm', 'unfolded_fsm', 'unfolded', 'folded'}
         self.joint_indices = None
         
         # Timer for checking status

@@ -637,7 +637,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "reverse_ip",
-            default_value="0.0.0.0",
+            default_value="192.168.1.50",
             description="IP that will be used for the robot controller to communicate back to the driver.",
         )
     )
