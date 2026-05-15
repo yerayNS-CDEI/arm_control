@@ -2171,6 +2171,7 @@ to have access to the internet.""".strip(),
                     'path': '/measurement/export/raw',
                     'body': None,
                     'description': 'Export raw measurement data as an offline SEG-Y zip package.',
+                    'download_extension': 'zip',
                     'tooltip': """Exports raw data of the measurement.
 
 Generates a local (offline) SEG-Y export of the entire measurement. The
@@ -2182,6 +2183,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                     'path': '/measurement/export/bscan',
                     'body': {'migrated': True},
                     'description': 'Export a B-Scan PNG. Additional channel or line fields may be needed for some measurement types.',
+                    'download_extension': 'png',
                     'tooltip': export_bscan_tooltip,
                 },
                 {
@@ -2190,6 +2192,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                     'path': '/measurement/export/cscan',
                     'body': {'width': 300, 'height': 300},
                     'description': 'Export a C-Scan PNG. This is only available for Area Scan measurements.',
+                    'download_extension': 'png',
                     'tooltip': export_cscan_tooltip,
                 },
                 {
@@ -2198,6 +2201,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                     'path': '/measurement/export/ascan',
                     'body': {'index': 0},
                     'description': 'Export an A-Scan CSV. Additional channel or line fields may be needed for some measurement types.',
+                    'download_extension': 'csv',
                     'tooltip': export_ascan_tooltip,
                 },
             ],
@@ -2307,6 +2311,23 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         request = combo.currentData()
         combo.setToolTip(request.get('tooltip', request['description']) if request else "")
 
+    def _get_gpr_download_dir(self):
+        """Return the directory used for downloaded GPR API artifacts."""
+        return os.path.expanduser('~/Downloads/GP_API_Test')
+
+    def _build_gpr_download_path(self, request):
+        """Build a timestamped download path for file-based GPR API responses."""
+        download_dir = self._get_gpr_download_dir()
+        safe_stem = request['path'].strip('/').replace('/', '_') or 'gpr_download'
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        extension = request['download_extension']
+        return os.path.join(download_dir, f'{safe_stem}_{timestamp}.{extension}')
+
+    def _extract_gpr_http_status(self, output_text):
+        """Extract the curl write-out HTTP status code from buffered output."""
+        match = re.search(r'HTTP_STATUS:(\d{3})', output_text or '')
+        return int(match.group(1)) if match else None
+
     def send_gpr_request(self, combo, button):
         """Send the selected GPR HTTP request using curl."""
         request = combo.currentData()
@@ -2326,6 +2347,19 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             return
 
         url = f"{base_url}{request['path']}"
+        output_path = None
+        if request.get('download_extension'):
+            download_dir = self._get_gpr_download_dir()
+            try:
+                os.makedirs(download_dir, exist_ok=True)
+            except OSError as exc:
+                self._log_append(
+                    self.gpr_status_text,
+                    f"<span style='color: #f47067;'>✗ Could not create download directory {html.escape(download_dir)}: {html.escape(str(exc))}</span>",
+                )
+                return
+            output_path = self._build_gpr_download_path(request)
+
         args = [
             '--silent',
             '--show-error',
@@ -2348,6 +2382,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 payload,
             ])
 
+        if output_path:
+            args.extend(['--output', output_path])
+
         cmd_str = 'curl ' + ' '.join(shlex.quote(arg) for arg in args)
         self._log_append(
             self.gpr_status_text,
@@ -2357,10 +2394,17 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             self.gpr_status_text,
             f"<span style='color: #76e3ea;'>Request: {html.escape(request['description'])}</span>",
         )
+        if output_path:
+            self._log_append(
+                self.gpr_status_text,
+                f"<span style='color: #76e3ea;'>Saving response to: {html.escape(output_path)}</span>",
+            )
 
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
         process.setProperty('had_output', False)
+        process.setProperty('gpr_output_buffer', '')
+        process.setProperty('gpr_output_path', output_path or '')
         process.readyReadStandardOutput.connect(lambda p=process: self.handle_gpr_output(p))
         process.finished.connect(
             lambda exit_code, exit_status, p=process, b=button: self._on_gpr_request_finished(
@@ -2380,6 +2424,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             return
 
         process.setProperty('had_output', True)
+        previous_output = process.property('gpr_output_buffer') or ''
+        process.setProperty('gpr_output_buffer', previous_output + output)
         self._log_append(
             self.gpr_status_text,
             (
@@ -2394,9 +2440,27 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.gpr_request_processes.pop(id(process), None)
         button.setEnabled(True)
         button.setText("Send")
+        output_path = process.property('gpr_output_path') or ''
+        output_text = process.property('gpr_output_buffer') or ''
+        http_status = self._extract_gpr_http_status(output_text)
 
         if exit_code == 0:
-            if not bool(process.property('had_output')):
+            if http_status is not None and http_status >= 400:
+                if output_path and os.path.exists(output_path):
+                    try:
+                        os.remove(output_path)
+                    except OSError:
+                        pass
+                self._log_append(
+                    self.gpr_status_text,
+                    f"<span style='color: #f47067;'>✗ Request completed with HTTP status {http_status}</span>",
+                )
+            elif output_path:
+                self._log_append(
+                    self.gpr_status_text,
+                    f"<span style='color: #57ab5a;'>✓ Saved response to {html.escape(output_path)}</span>",
+                )
+            elif not bool(process.property('had_output')):
                 self._log_append(
                     self.gpr_status_text,
                     "<span style='color: #57ab5a;'>✓ Request completed (no response body)</span>",
@@ -2407,6 +2471,11 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                     "<span style='color: #57ab5a;'>✓ Request completed</span>",
                 )
         else:
+            if output_path and os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
             self._log_append(
                 self.gpr_status_text,
                 (
@@ -4300,39 +4369,32 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
     def closeEvent(self, event):
         self.timer.stop()
-        self._log_append(self.status_text, "Shutting down and cleaning up processes...")
- 
-        # Terminate all launched processes
-        for process_key, process in list(self.process_map.items()):
-            if process.state() == QProcess.Running:
-                # Get PID and kill entire process group
-                pid = process.processId()
-                self._log_append(self.status_text, f"Terminating {process_key} (PID: {pid})...")
- 
-                # Try graceful termination first
-                process.terminate()
-                if not process.waitForFinished(2000):
-                    # Force kill if still running
-                    process.kill()
-                    process.waitForFinished(1000)
- 
-                # Kill entire process group to catch child processes
-                if pid:
-                    try:
-                        subprocess.run(['pkill', '-9', '-P', str(pid)], timeout=1, stderr=subprocess.DEVNULL)
-                    except:
-                        pass
 
-        # Kill any remaining ROS2 processes from this session
-        self._cleanup_ros_children()
- 
+        # Detach every QProcess from this window so Qt does NOT send SIGTERM
+        # to the underlying OS processes when the window is destroyed.
+        for process in list(self.process_map.values()):
+            try:
+                process.setParent(None)
+            except Exception:
+                pass
+        self.process_map.clear()
+
+        for proc in (self.fsm_launch_process, self.fsm_node_process):
+            if proc is not None:
+                try:
+                    proc.setParent(None)
+                except Exception:
+                    pass
+        self.fsm_launch_process = None
+        self.fsm_node_process = None
+
         # Close robot socket if connected
         if self.robot_socket:
             try:
                 self.robot_socket.close()
-            except:
+            except Exception:
                 pass
- 
+
         self.node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
@@ -4724,51 +4786,71 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.fsm_node_process = proc_node
 
     def _stop_fsm(self):
-        """Stop both FSM processes using the same teardown sequence as other tabs."""
-        # Stop node first, then the launch file
-        for proc in (self.fsm_node_process, self.fsm_launch_process):
-            if proc is None:
-                continue
+        """Stop both FSM processes and their entire spawned process trees."""
 
+        # ── Phase 1: collect all descendant PIDs BEFORE sending any signals.
+        # Once a parent is killed its children are reparented to init (PID 1),
+        # so pgrep -P <dead_parent> returns nothing. We must snapshot the tree now.
+        def _collect_descendants(parent_pid):
+            pids = []
+            if not parent_pid:
+                return pids
+            try:
+                r = subprocess.run(
+                    ['pgrep', '-P', str(parent_pid)],
+                    capture_output=True, text=True, timeout=1,
+                )
+                for s in r.stdout.strip().split('\n'):
+                    if s.strip():
+                        child = int(s)
+                        pids.extend(_collect_descendants(child))
+                        pids.append(child)
+            except Exception:
+                pass
+            return pids
+
+        procs = [p for p in (self.fsm_node_process, self.fsm_launch_process) if p is not None]
+        proc_pids = []
+        all_descendants = []
+        for proc in procs:
             try:
                 proc.finished.disconnect()
             except Exception:
                 pass
-
             pid = proc.processId()
+            proc_pids.append(pid)
+            if pid:
+                all_descendants.extend(_collect_descendants(pid))
 
-            # 1. Graceful SIGINT (Ctrl-C)
+        # ── Phase 2: graceful SIGINT to parent processes.
+        for pid in proc_pids:
             if pid:
                 try:
                     os.kill(pid, signal.SIGINT)
-                    proc.waitForFinished(3000)
-                except ProcessLookupError:
-                    pass
-                except Exception as e:
-                    self._fsm_append_log(
-                        f"<span style='color: #e3b341;'>⚠ Could not send SIGINT: {html.escape(str(e))}</span>",
-                        f"⚠ Could not send SIGINT: {e}",
-                    )
-
-            # 2. Escalate to SIGTERM
-            if proc.state() == QProcess.Running:
-                proc.terminate()
-                proc.waitForFinished(2000)
-
-            # 3. Escalate to SIGKILL
-            if proc.state() == QProcess.Running:
-                proc.kill()
-                proc.waitForFinished(2000)
-
-            # 4. Kill orphaned child processes spawned by the launch file
-            if pid:
-                try:
-                    subprocess.run(['pkill', '-9', '-P', str(pid)], timeout=2, stderr=subprocess.DEVNULL)
                 except Exception:
                     pass
-                self._cleanup_ros_children_of_pid(pid)
+        for proc in procs:
+            proc.waitForFinished(3000)
 
+        # ── Phase 3: SIGKILL every collected descendant.
+        for dpid in all_descendants:
+            try:
+                os.kill(dpid, signal.SIGKILL)
+            except Exception:
+                pass
+
+        # ── Phase 4: force-kill the parent QProcesses if still alive.
+        for proc in procs:
+            if proc.state() == QProcess.Running:
+                proc.terminate()
+                proc.waitForFinished(1000)
+            if proc.state() == QProcess.Running:
+                proc.kill()
+                proc.waitForFinished(1000)
             proc.deleteLater()
+
+        # ── Phase 5: wipe out Gazebo and any remaining stragglers.
+        self._kill_gazebo_processes()
 
         self.fsm_node_process = None
         self.fsm_launch_process = None
