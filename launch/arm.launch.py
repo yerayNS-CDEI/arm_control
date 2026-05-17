@@ -241,7 +241,7 @@ def generate_launch_description():
     )
     enable_octomap_arg = DeclareLaunchArgument(
         'enable_octomap',
-        default_value='false',
+        default_value='true',
         description='Enable LiDAR pointcloud OctoMap integration in MoveIt (mode:=full only)',
     )
     robot_ip = LaunchConfiguration('robot_ip')

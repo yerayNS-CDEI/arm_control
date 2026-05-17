@@ -185,13 +185,8 @@ def launch_setup(context, *args, **kwargs):
     pilz_capabilities = pilz_planning_pipeline_config["pilz_industrial_motion_planner"].get(
         "capabilities", ""
     )
-    chomp_planning_pipeline_config = {
-        "chomp": load_yaml(
-            "arm_control", os.path.join("config", "moveit", "chomp_planning.yaml")
-        )
-    }
     planning_pipeline_settings = {
-        "planning_pipelines": ["move_group", "pilz_industrial_motion_planner", "chomp"],
+        "planning_pipelines": ["move_group", "pilz_industrial_motion_planner"],
         "default_planning_pipeline": "move_group",
     }
 
@@ -233,15 +228,13 @@ def launch_setup(context, *args, **kwargs):
     # OctoMap / LiDAR pointcloud integration (optional, only in full mode)
     enable_octomap_value = context.perform_substitution(enable_octomap).strip().lower() == 'true'
     octomap_parameters = {}
-    sensors_3d_parameters = {}
     if mode_value == "full" and enable_octomap_value:
-        sensors_yaml = load_yaml("arm_control", os.path.join("config", "moveit", "sensors_3d.yaml"))
-        sensors_3d_parameters = sensors_yaml if sensors_yaml else {}
+        sensors_3d_yaml = load_yaml("arm_control", os.path.join("config", "moveit", "sensors_3d.yaml"))
         octomap_parameters = {
             "octomap_frame": "odom",
             "octomap_resolution": 0.05,
-            "max_range": 5.0,
         }
+        octomap_parameters.update(sensors_3d_yaml)
 
     planning_scene_monitor_parameters = {
         "publish_planning_scene": True,
@@ -264,7 +257,6 @@ def launch_setup(context, *args, **kwargs):
         planning_pipeline_settings,
         ompl_planning_pipeline_config,
         pilz_planning_pipeline_config,
-        chomp_planning_pipeline_config,
         {"capabilities": pilz_capabilities},
         trajectory_execution,
         moveit_controllers,
@@ -272,7 +264,6 @@ def launch_setup(context, *args, **kwargs):
         {"use_sim_time": use_sim_time},
         warehouse_ros_config,
         octomap_parameters,
-        sensors_3d_parameters,
     ]
 
     move_group_node = Node(
@@ -298,7 +289,6 @@ def launch_setup(context, *args, **kwargs):
             planning_pipeline_settings,
             ompl_planning_pipeline_config,
             pilz_planning_pipeline_config,
-            chomp_planning_pipeline_config,
             {"move_group.planning_plugin": "ompl_interface/OMPLPlanner"},
             warehouse_ros_config,
             {"use_sim_time": use_sim_time},
@@ -352,7 +342,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "enable_octomap",
-                default_value="false",
+                default_value="true",
                 description="Enable LiDAR pointcloud OctoMap integration in MoveIt (mode:=full only)",
             ),
             DeclareLaunchArgument(
