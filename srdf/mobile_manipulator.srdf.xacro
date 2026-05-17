@@ -39,66 +39,194 @@
     <joint name="$(arg tf_prefix)wrist_2_joint" value="-0.3670" />
     <joint name="$(arg tf_prefix)wrist_3_joint" value="0.1670" />
   </group_state>
-
-  <disable_collisions link1="base_link" link2="drivewhl_l_joint_link" reason="Adjacent" />
-  <disable_collisions link1="base_link" link2="drivewhl_r_joint_link" reason="Adjacent" />
-  <disable_collisions link1="base_link" link2="turret_link" reason="Adjacent" />
-  <disable_collisions link1="turret_link" link2="column_link" reason="Adjacent" />
-  <disable_collisions link1="turret_link" link2="turret_caster_fl" reason="Adjacent" />
-  <disable_collisions link1="turret_link" link2="turret_caster_fr" reason="Adjacent" />
-  <disable_collisions link1="turret_link" link2="turret_caster_bl" reason="Adjacent" />
-  <disable_collisions link1="turret_link" link2="turret_caster_br" reason="Adjacent" />
-
-  <disable_collisions link1="turret_link" link2="os_sensor_mount" reason="Adjacent" />
-  <disable_collisions link1="os_sensor_mount" link2="camera_link" reason="Adjacent" />
-  <disable_collisions link1="os_sensor_mount" link2="front_sick_scan" reason="Adjacent" />
-  <disable_collisions link1="os_sensor_mount" link2="rear_sick_scan" reason="Adjacent" />
-  <!-- os_lidar is the dome sick sensor placed at origin=0,0,0 inside os_sensor_mount (simulation only).
-       It always has cylinder collision geometry, so without this entry every start state is in collision. -->
-  <disable_collisions link1="os_sensor_mount" link2="os_lidar" reason="Adjacent" />
-  <disable_collisions link1="os_lidar" link2="dome_scan" reason="Adjacent" />
-  <!-- Sick lidar scan-frame links are children of their sensor-body links (offset ~56mm) -->
-  <disable_collisions link1="front_sick_scan" link2="front_sick" reason="Adjacent" />
-  <disable_collisions link1="rear_sick_scan" link2="rear_sick" reason="Adjacent" />
-  <!-- turret_link STL mesh extends into the space occupied by its grandchild sick sensors.
-       Disable all turret_link <-> sick sensor pairs to prevent false start-state collisions. -->
-  <disable_collisions link1="turret_link" link2="rear_sick_scan" reason="Default" />
-  <disable_collisions link1="turret_link" link2="front_sick_scan" reason="Default" />
-  <disable_collisions link1="turret_link" link2="os_lidar" reason="Default" />
-  <!-- lidar_support_link is the vertical arm from turret_link up to the sensor mount area.
-       It is Adjacent to turret_link and shares physical space with the sensor cluster. -->
-  <disable_collisions link1="turret_link" link2="lidar_support_link" reason="Adjacent" />
-  <disable_collisions link1="lidar_support_link" link2="os_sensor_mount" reason="Default" />
-  <disable_collisions link1="lidar_support_link" link2="front_sick_scan" reason="Default" />
-  <disable_collisions link1="lidar_support_link" link2="rear_sick_scan" reason="Default" />
-  <disable_collisions link1="lidar_support_link" link2="os_lidar" reason="Default" />
-  <disable_collisions link1="lidar_support_link" link2="camera_link" reason="Default" />
-
-  <disable_collisions link1="column_link" link2="$(arg tf_prefix)base_link" reason="Adjacent" />
-  <!-- arm_base_link_inertia is physically co-located with arm_base_link; treat column as adjacent -->
-  <disable_collisions link1="column_link" link2="$(arg tf_prefix)base_link_inertia" reason="Adjacent" />
-  <!-- arm_shoulder_link is directly above column_link (separated by arm_base) and can never collide -->
-  <disable_collisions link1="column_link" link2="$(arg tf_prefix)shoulder_link" reason="Never" />
-  <!-- turret_link is at the base of the column; arm_base and its inertia link are at the top -->
-  <disable_collisions link1="turret_link" link2="$(arg tf_prefix)base_link" reason="Never" />
-  <disable_collisions link1="turret_link" link2="$(arg tf_prefix)base_link_inertia" reason="Never" />
-  <disable_collisions link1="$(arg tf_prefix)base_link" link2="$(arg tf_prefix)base_link_inertia" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)base_link_inertia" link2="$(arg tf_prefix)shoulder_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)forearm_link" link2="$(arg tf_prefix)upper_arm_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)forearm_link" link2="$(arg tf_prefix)wrist_1_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)shoulder_link" link2="$(arg tf_prefix)upper_arm_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)wrist_1_link" link2="$(arg tf_prefix)wrist_2_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)wrist_2_link" link2="$(arg tf_prefix)wrist_3_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)wrist_3_link" link2="$(arg tf_prefix)flange" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)flange" link2="$(arg tf_prefix)ee_cylinder_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)flange" link2="$(arg tf_prefix)tool0" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)tool0" link2="$(arg tf_prefix)wrist_3_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)ee_cylinder_link" link2="$(arg tf_prefix)wrist_3_link" reason="Never" />
-  <disable_collisions link1="$(arg tf_prefix)tool0" link2="$(arg tf_prefix)plate_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)ee_cylinder_link" link2="$(arg tf_prefix)plate_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)plate_link" link2="$(arg tf_prefix)sensor_A_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)plate_link" link2="$(arg tf_prefix)sensor_B_link" reason="Adjacent" />
-  <disable_collisions link1="$(arg tf_prefix)plate_link" link2="$(arg tf_prefix)sensor_C_link" reason="Adjacent" />
-
+   <disable_collisions link1="arm_base_link_inertia" link2="arm_shoulder_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="arm_upper_arm_link" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="arm_wrist_1_link" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="arm_wrist_2_link" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="base_link" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="camera_link" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="column_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="drivewhl_l_joint_link" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="drivewhl_r_joint_link" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="front_sick_scan" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="os_sensor_mount" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="rear_sick_scan" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="arm_base_link_inertia" link2="turret_link" reason="Never"/>
+    <disable_collisions link1="arm_ee_cylinder_link" link2="arm_plate_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_ee_cylinder_link" link2="arm_sensor_A_link" reason="Never"/>
+    <disable_collisions link1="arm_ee_cylinder_link" link2="arm_sensor_B_link" reason="Never"/>
+    <disable_collisions link1="arm_ee_cylinder_link" link2="arm_sensor_C_link" reason="Never"/>
+    <disable_collisions link1="arm_ee_cylinder_link" link2="arm_wrist_1_link" reason="Never"/>
+    <disable_collisions link1="arm_ee_cylinder_link" link2="arm_wrist_2_link" reason="Never"/>
+    <disable_collisions link1="arm_ee_cylinder_link" link2="arm_wrist_3_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_ee_cylinder_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="arm_ee_cylinder_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="arm_forearm_link" link2="arm_upper_arm_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_forearm_link" link2="arm_wrist_1_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_forearm_link" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="arm_forearm_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="arm_forearm_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="arm_forearm_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="arm_plate_link" link2="arm_sensor_A_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_plate_link" link2="arm_sensor_B_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_plate_link" link2="arm_sensor_C_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_plate_link" link2="arm_wrist_1_link" reason="Never"/>
+    <disable_collisions link1="arm_plate_link" link2="arm_wrist_2_link" reason="Never"/>
+    <disable_collisions link1="arm_plate_link" link2="arm_wrist_3_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_A_link" link2="arm_sensor_B_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_A_link" link2="arm_sensor_C_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_A_link" link2="arm_wrist_1_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_A_link" link2="arm_wrist_2_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_A_link" link2="arm_wrist_3_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_A_link" link2="camera_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_A_link" link2="drivewhl_l_joint_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_A_link" link2="front_sick_scan" reason="Never"/>
+    <disable_collisions link1="arm_sensor_A_link" link2="os_sensor_mount" reason="Never"/>
+    <disable_collisions link1="arm_sensor_A_link" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="arm_sensor_A_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="arm_sensor_A_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="arm_sensor_B_link" link2="arm_sensor_C_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_B_link" link2="arm_wrist_1_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_B_link" link2="arm_wrist_2_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_B_link" link2="arm_wrist_3_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_B_link" link2="camera_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_B_link" link2="rear_sick_scan" reason="Never"/>
+    <disable_collisions link1="arm_sensor_B_link" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="arm_sensor_B_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="arm_sensor_B_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="arm_sensor_B_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="arm_sensor_C_link" link2="arm_wrist_1_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_C_link" link2="arm_wrist_2_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_C_link" link2="arm_wrist_3_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_C_link" link2="camera_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_C_link" link2="drivewhl_l_joint_link" reason="Never"/>
+    <disable_collisions link1="arm_sensor_C_link" link2="rear_sick_scan" reason="Never"/>
+    <disable_collisions link1="arm_sensor_C_link" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="arm_sensor_C_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="arm_sensor_C_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="arm_sensor_C_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="arm_upper_arm_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_shoulder_link" link2="arm_wrist_1_link" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="base_link" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="camera_link" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="column_link" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="drivewhl_l_joint_link" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="drivewhl_r_joint_link" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="front_sick_scan" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="os_sensor_mount" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="rear_sick_scan" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="arm_shoulder_link" link2="turret_link" reason="Never"/>
+    <disable_collisions link1="arm_upper_arm_link" link2="base_link" reason="Never"/>
+    <disable_collisions link1="arm_upper_arm_link" link2="column_link" reason="Never"/>
+    <disable_collisions link1="arm_upper_arm_link" link2="drivewhl_l_joint_link" reason="Never"/>
+    <disable_collisions link1="arm_upper_arm_link" link2="drivewhl_r_joint_link" reason="Never"/>
+    <disable_collisions link1="arm_upper_arm_link" link2="rear_sick_scan" reason="Never"/>
+    <disable_collisions link1="arm_upper_arm_link" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="arm_upper_arm_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="arm_upper_arm_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="arm_upper_arm_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="arm_wrist_1_link" link2="arm_wrist_2_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_wrist_1_link" link2="arm_wrist_3_link" reason="Never"/>
+    <disable_collisions link1="arm_wrist_1_link" link2="column_link" reason="Never"/>
+    <disable_collisions link1="arm_wrist_1_link" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="arm_wrist_1_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="arm_wrist_1_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="arm_wrist_1_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="arm_wrist_2_link" link2="arm_wrist_3_link" reason="Adjacent"/>
+    <disable_collisions link1="arm_wrist_2_link" link2="column_link" reason="Never"/>
+    <disable_collisions link1="arm_wrist_2_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="arm_wrist_2_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="arm_wrist_2_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="arm_wrist_3_link" link2="drivewhl_r_joint_link" reason="Never"/>
+    <disable_collisions link1="arm_wrist_3_link" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="arm_wrist_3_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="arm_wrist_3_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="arm_wrist_3_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="base_link" link2="camera_link" reason="Never"/>
+    <disable_collisions link1="base_link" link2="column_link" reason="Never"/>
+    <disable_collisions link1="base_link" link2="drivewhl_l_joint_link" reason="Adjacent"/>
+    <disable_collisions link1="base_link" link2="drivewhl_r_joint_link" reason="Adjacent"/>
+    <disable_collisions link1="base_link" link2="front_sick_scan" reason="Never"/>
+    <disable_collisions link1="base_link" link2="os_sensor_mount" reason="Never"/>
+    <disable_collisions link1="base_link" link2="rear_sick_scan" reason="Never"/>
+    <disable_collisions link1="base_link" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="base_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="base_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="base_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="base_link" link2="turret_link" reason="Adjacent"/>
+    <disable_collisions link1="camera_link" link2="column_link" reason="Never"/>
+    <disable_collisions link1="camera_link" link2="drivewhl_l_joint_link" reason="Never"/>
+    <disable_collisions link1="camera_link" link2="drivewhl_r_joint_link" reason="Never"/>
+    <disable_collisions link1="camera_link" link2="front_sick_scan" reason="Never"/>
+    <disable_collisions link1="camera_link" link2="os_sensor_mount" reason="Adjacent"/>
+    <disable_collisions link1="camera_link" link2="rear_sick_scan" reason="Never"/>
+    <disable_collisions link1="camera_link" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="camera_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="camera_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="camera_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="camera_link" link2="turret_link" reason="Never"/>
+    <disable_collisions link1="column_link" link2="drivewhl_l_joint_link" reason="Never"/>
+    <disable_collisions link1="column_link" link2="drivewhl_r_joint_link" reason="Never"/>
+    <disable_collisions link1="column_link" link2="front_sick_scan" reason="Never"/>
+    <disable_collisions link1="column_link" link2="os_sensor_mount" reason="Never"/>
+    <disable_collisions link1="column_link" link2="rear_sick_scan" reason="Never"/>
+    <disable_collisions link1="column_link" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="column_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="column_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="column_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="column_link" link2="turret_link" reason="Adjacent"/>
+    <disable_collisions link1="drivewhl_l_joint_link" link2="drivewhl_r_joint_link" reason="Never"/>
+    <disable_collisions link1="drivewhl_l_joint_link" link2="front_sick_scan" reason="Never"/>
+    <disable_collisions link1="drivewhl_l_joint_link" link2="os_sensor_mount" reason="Never"/>
+    <disable_collisions link1="drivewhl_l_joint_link" link2="rear_sick_scan" reason="Never"/>
+    <disable_collisions link1="drivewhl_l_joint_link" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="drivewhl_l_joint_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="drivewhl_l_joint_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="drivewhl_l_joint_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="drivewhl_l_joint_link" link2="turret_link" reason="Never"/>
+    <disable_collisions link1="drivewhl_r_joint_link" link2="front_sick_scan" reason="Never"/>
+    <disable_collisions link1="drivewhl_r_joint_link" link2="os_sensor_mount" reason="Never"/>
+    <disable_collisions link1="drivewhl_r_joint_link" link2="rear_sick_scan" reason="Never"/>
+    <disable_collisions link1="drivewhl_r_joint_link" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="drivewhl_r_joint_link" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="drivewhl_r_joint_link" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="drivewhl_r_joint_link" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="drivewhl_r_joint_link" link2="turret_link" reason="Never"/>
+    <disable_collisions link1="front_sick_scan" link2="os_sensor_mount" reason="Adjacent"/>
+    <disable_collisions link1="front_sick_scan" link2="rear_sick_scan" reason="Never"/>
+    <disable_collisions link1="front_sick_scan" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="front_sick_scan" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="front_sick_scan" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="front_sick_scan" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="front_sick_scan" link2="turret_link" reason="Default"/>
+    <disable_collisions link1="os_sensor_mount" link2="rear_sick_scan" reason="Adjacent"/>
+    <disable_collisions link1="os_sensor_mount" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="os_sensor_mount" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="os_sensor_mount" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="os_sensor_mount" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="os_sensor_mount" link2="turret_link" reason="Adjacent"/>
+    <disable_collisions link1="rear_sick_scan" link2="turret_caster_bl" reason="Never"/>
+    <disable_collisions link1="rear_sick_scan" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="rear_sick_scan" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="rear_sick_scan" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="rear_sick_scan" link2="turret_link" reason="Default"/>
+    <disable_collisions link1="turret_caster_bl" link2="turret_caster_br" reason="Never"/>
+    <disable_collisions link1="turret_caster_bl" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="turret_caster_bl" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="turret_caster_bl" link2="turret_link" reason="Adjacent"/>
+    <disable_collisions link1="turret_caster_br" link2="turret_caster_fl" reason="Never"/>
+    <disable_collisions link1="turret_caster_br" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="turret_caster_br" link2="turret_link" reason="Adjacent"/>
+    <disable_collisions link1="turret_caster_fl" link2="turret_caster_fr" reason="Never"/>
+    <disable_collisions link1="turret_caster_fl" link2="turret_link" reason="Adjacent"/>
+    <disable_collisions link1="turret_caster_fr" link2="turret_link" reason="Adjacent"/>
 
 </robot>
