@@ -55,10 +55,14 @@ planner_configs:
   AnytimePathShorteningkConfigDefault:
     type: geometric::AnytimePathShortening
     shortcut: 1
-    hybridize: 1
+    # hybridize off: hybridizing paths adds computation without helping robustness;
+    # shortcutting alone is enough for path quality improvement.
+    hybridize: 0
     max_hybrid_paths: 24
-    num_planners: 4
-    planners: RRTConnect,RRTConnect,RRT,RRTstar
+    # Two RRTConnect instances gives fast bidirectional search; RRTstar removed
+    # because it converges too slowly to help within planning_time budget.
+    num_planners: 2
+    planners: RRTConnect,RRTConnect
 
 arm_manipulator:
   planner_configs:
@@ -75,5 +79,7 @@ arm_manipulator:
     - PRMstarkConfigDefault
     - AnytimePathShorteningkConfigDefault
   projection_evaluator: joints(arm_shoulder_pan_joint,arm_shoulder_lift_joint)
-  longest_valid_segment_fraction: 0.01
+  # 0.005 = finer collision checking along OMPL paths (trades speed for safety).
+  # Restore to 0.01 if planning becomes too slow.
+  longest_valid_segment_fraction: 0.005
   simplify_solutions: true
