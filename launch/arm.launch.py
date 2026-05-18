@@ -81,6 +81,7 @@ def generate_launch_description():
     ur_pkg = FindPackageShare('arm_control')
     ur_sim_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_sim_control.launch.py'])
     ur_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_control.launch.py'])
+    abstract_ur_launch = PathJoinSubstitution([ur_pkg, 'launch', 'abstract_ur.launch.py'])
     publisher_launch = PathJoinSubstitution(
         [ur_pkg, 'launch', 'test_scaled_joint_trajectory_planned.launch.py']
     )
@@ -333,6 +334,15 @@ def generate_launch_description():
         ]
     )
 
+    collision_world_include = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(abstract_ur_launch),
+        launch_arguments={
+            'ur_type': ur_type,
+            'mode': mode,
+            'main_tf_prefix': tf_prefix,
+        }.items(),
+    )
+
     moveit_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(moveit_launch),
         launch_arguments={
@@ -378,6 +388,7 @@ def generate_launch_description():
             planner_backend_arg,
             enable_wall_scene_sync_arg,
             arm_group,
+            collision_world_include,
             moveit_include,
             moveit_planner_node_opaque,
         ]
