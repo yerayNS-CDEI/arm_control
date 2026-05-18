@@ -36,6 +36,7 @@ class PositionSenderNode(Node):
         self.pose_goal_pub = self.create_publisher(PoseStamped, '/arm/goal_pose', 10)
         self.pose_goal_ptp_pub = self.create_publisher(PoseStamped, '/arm/goal_pose_ptp', 10)
         self.pose_goal_ompl_pub = self.create_publisher(PoseStamped, '/arm/goal_pose_ompl', 10)
+        self.pose_goal_aps_pub = self.create_publisher(PoseStamped, '/arm/goal_pose_aps', 10)
         self.joint_goal_pub = self.create_publisher(JointState, '/arm/joint_goal', 10)
         self.joint_goal_ptp_pub = self.create_publisher(JointState, '/arm/joint_goal_ptp', 10)
         self.joint_goal_aps_pub = self.create_publisher(JointState, '/arm/joint_goal_aps', 10)
@@ -150,7 +151,22 @@ class PositionSenderNode(Node):
                 'pose': (-0.36937, 0.38604, 0.00443, 0.6934, 0.6887, 0.1682, -0.1285)  # Raised Z from 0.401 to 0.550
             },
             'unfolded_fsm': {
-                'joints': (),
+                # Joints copied from 'custom' — a known-IK-valid forward-facing
+                # configuration that produces an EE pose at ~(0.561, -0.173, 0.851)
+                # with the same orientation as the target pose below.
+                #
+                # WHY JOINT VALUES: pose-goal planning to this target from a
+                # behind-the-robot start (shoulder_pan ≈ π) requires APS to
+                # find a ~180° shoulder swing through the column + plate +
+                # camera + lidar mount workspace, which random sampling cannot
+                # find in 30s.  Joint-space planning bypasses the seeded-IK
+                # step entirely so APS gets an unambiguous goal and is far more
+                # likely to find a clear corridor.
+                #
+                # SIDE-EFFECT: the final EE position is ~0.15m off the original
+                # (0.411, -0.273, 0.850) target, but ExhaustiveScan re-positions
+                # the arm during pre-approach so this offset is benign.
+                'joints': (0.0, -1.104, -2.034, 0.0, 1.57, 2.8),
                 'pose': (0.411, -0.273, 0.850, 0.406, 0.577, 0.408, 0.580)
             }
         }
@@ -172,8 +188,21 @@ class PositionSenderNode(Node):
             'arm_wrist_2_joint',
             'arm_wrist_3_joint'
         ]
-        self.ompl_pose_positions = {'folded_fsm', 'unfolded_fsm', 'unfolded', 'folded'}
-        self.aps_joint_positions = {'under', 'under1', 'under2'}
+        # OMPL pose goals: positions that have joint data but where a Cartesian pose goal
+        # is preferred (the planner samples IK at the goal during search).
+        self.ompl_pose_positions = {'unfolded', 'folded', 'under', 'under1', 'under2'}
+        # Joint goals routed through APS (collision-aware) instead of Pilz PTP
+        # (joint-space linear interpolation, NOT collision-aware).  unfolded_fsm
+        # is here because PTP would sweep the upper arm through the column /
+        # plate / camera / lidar mounts during the ~180° shoulder_pan rotation.
+        self.aps_joint_positions = {'folded', 'unfolded', 'unfolded_fsm'}
+        # APS pose goals: pose-only positions where (a) random IK sampling at the goal
+        # fails for OMPL (orientation is too constrained — "Unable to sample goal tree")
+        # and (b) PTP's joint-space linear interpolation collides during the sweep
+        # (arm_upper_arm_link vs arm_plate_link / camera / os_sensor_mount).
+        # moveit_planner_node now seeds IK from the current joint state before APS so the
+        # goal joint config is known-valid, and APS plans collision-aware in joint space.
+        self.aps_pose_positions = {'folded_fsm', 'unfolded_fsm'}
         self.joint_indices = None
         
         # Timer for checking status
@@ -248,7 +277,8 @@ class PositionSenderNode(Node):
         joint_data = position_data.get('joints')
         pose_data = position_data.get('pose')
 
-        if self.planner_backend == 'moveit' and joint_data:
+        if self.planner_backend == 'moveit' and joint_data \
+                and position_name not in self.ompl_pose_positions:
             return self.send_joint_goal(position_name, joint_data)
         
         if pose_data is None:
@@ -266,6 +296,10 @@ class PositionSenderNode(Node):
                 pose_goal_pub = self.pose_goal_ompl_pub
                 goal_topic = '/arm/goal_pose_ompl'
                 goal_label = 'OMPL pose goal'
+            elif position_name in self.aps_pose_positions:
+                pose_goal_pub = self.pose_goal_aps_pub
+                goal_topic = '/arm/goal_pose_aps'
+                goal_label = 'APS pose goal (seeded IK + collision-aware joint planning)'
             else:
                 pose_goal_pub = self.pose_goal_ptp_pub
                 goal_topic = '/arm/goal_pose_ptp'
