@@ -85,6 +85,8 @@ class PlannerNode(Node):
         self.hot_loop_info_logging = self.get_parameter('hot_loop_info_logging').get_parameter_value().bool_value
         self.declare_parameter('publish_replanning_visualization', False)
         self.publish_replanning_visualization = self.get_parameter('publish_replanning_visualization').get_parameter_value().bool_value
+        self.declare_parameter('visualize_dilated_grid', True)
+        self.visualize_dilated_grid = self.get_parameter('visualize_dilated_grid').get_parameter_value().bool_value
         self.declare_parameter('validate_post_astar_tool0_path', False)
         self.validate_post_astar_tool0_path = self.get_parameter('validate_post_astar_tool0_path').get_parameter_value().bool_value
 
@@ -238,6 +240,7 @@ class PlannerNode(Node):
         self.goal_marker_pub = self.create_publisher(Marker, 'goal_pose_marker', 10)
         self.ee_path_marker_pub = self.create_publisher(Marker, 'ee_path_markers', 10)
         self.reachability_marker_pub = self.create_publisher(Marker, 'reachability_boundary_marker', qos)
+        self.dilated_grid_marker_pub = self.create_publisher(Marker, 'dilated_grid_marker', qos)
 
         # Create collision checking service clients
         # Note: path_collision_checking node is launched with namespace 'collision'
@@ -787,6 +790,41 @@ class PlannerNode(Node):
         self.get_logger().info(
             f"Published reachability boundary marker with {len(m.points)} points "
             f"on topic 'reachability_boundary_marker'."
+        )
+
+    def publish_dilated_grid_marker(self, occupancy_grid_dilated, frame_id="arm_base"):
+        """Publish the static dilated occupancy grid used as the A* base grid."""
+        marker = Marker()
+        marker.header.frame_id = frame_id
+        marker.header.stamp = rclpy.time.Time().to_msg()
+        marker.ns = "dilated_grid"
+        marker.id = 0
+        marker.type = Marker.CUBE_LIST
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = float(self.cart_step)
+        marker.scale.y = float(self.cart_step)
+        marker.scale.z = float(self.cart_step)
+        marker.color.r = 1.0
+        marker.color.g = 0.2
+        marker.color.b = 0.2
+        marker.color.a = 0.18
+        marker.lifetime.sec = 0
+
+        occupied_indices = np.argwhere(occupancy_grid_dilated == 1)
+        marker.points = [
+            Point(
+                x=float(self.x_vals[i]),
+                y=float(self.y_vals[j]),
+                z=float(self.z_vals[k]),
+            )
+            for i, j, k in occupied_indices
+        ]
+
+        self.dilated_grid_marker_pub.publish(marker)
+        self.get_logger().info(
+            f"Published dilated grid marker with {len(marker.points)} occupied voxels "
+            f"on topic 'dilated_grid_marker'."
         )
     
     def publish_collision_waypoints_markers(self, collision_waypoints_dict):
@@ -2676,6 +2714,8 @@ class PlannerNode(Node):
         self.get_logger().info(f"Applying obstacle dilation to grid shape {occupancy_grid.shape}...")
         occupancy_grid_dilated_base = dilate_obstacles(occupancy_grid, dilation_distance, self.x_vals)
         self.get_logger().info("Obstacle dilation computed once for the static occupancy grid.")
+        if self.visualize_dilated_grid:
+            self.publish_dilated_grid_marker(occupancy_grid_dilated_base)
         # occupancy_grid_dilated = np.zeros(self.grid_shape, dtype=np.uint8)      # Eliminating all obstacles for now
 
         # Initialize collision waypoint tracking for replanning
