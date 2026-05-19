@@ -9,6 +9,9 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    mobile_base_yaml = os.path.join(
+        get_package_share_directory('arm_control'), 'config', 'mobile_base_geometry.yaml'
+    )
     # Declare launch arguments for node parameters
     root_col_arg = DeclareLaunchArgument(
         'root_col',
@@ -75,7 +78,7 @@ def generate_launch_description():
         executable='path_collision_checking',
         name='path_collision_checking',
         namespace='collision',
-        parameters=[path_collision_params],
+        parameters=[path_collision_params, mobile_base_yaml],
         arguments=['--ros-args', '--log-level', 'INFO'],
     )
 

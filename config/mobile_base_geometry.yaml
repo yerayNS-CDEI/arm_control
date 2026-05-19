@@ -1,0 +1,21 @@
+# Mobile base obstacle geometry — shared between planner and collision nodes.
+#
+# These values are the single source of truth for the mobile base obstacle
+# in both mode:=arm and mode:=full. Edit here to change behaviour in both nodes.
+#
+# simplified_mobile_base_box_inflation: extra margin added to EACH face [x, y, z] (metres).
+#   Applied on top of the raw box in arm mode, and on top of the URDF-derived
+#   turret_link bounding box in full mode.
+#
+# arm_mode_base_raw_box_dims:        raw (uninflated) box [x, y, z] (metres), arm_base frame.
+# arm_mode_base_box_center:          box centre [x, y, z] (metres), arm_base frame.
+# arm_mode_base_box_rotation_z_deg:  box rotation around Z in arm_base frame (degrees).
+#   The collision node converts these to base_link frame internally (negate X/Y of centre,
+#   add 180° to rotation).  Do NOT change the sign convention — always specify in arm_base.
+
+/**:
+  ros__parameters:
+    simplified_mobile_base_box_inflation: [1.20, 0.00, 0.10]
+    arm_mode_base_raw_box_dims: [0.8802, 0.6801, 1.0120]
+    arm_mode_base_box_center: [-0.2037, 0.2028, -0.6060]
+    arm_mode_base_box_rotation_z_deg: -45.0

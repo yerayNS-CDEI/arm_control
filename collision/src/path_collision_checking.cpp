@@ -131,6 +131,28 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
                     "simplified_collision_box_inflation must have 3 values. Using default [0.0, 0.0, 0.0].");
         simplified_collision_box_inflation_ = {0.0, 0.0, 0.0};
     }
+
+    // Arm-mode box geometry parameters. Values are given in arm_base frame convention.
+    // The collision node converts them to base_link frame internally:
+    //   centre_base_link = (-x, -y, z),  rotation_base_link = rotation_arm_base + 180°
+    arm_mode_base_raw_box_dims_ = this->declare_parameter<std::vector<double>>(
+        "arm_mode_base_raw_box_dims", std::vector<double>{0.8802, 0.6801, 1.0120});
+    arm_mode_base_box_center_ = this->declare_parameter<std::vector<double>>(
+        "arm_mode_base_box_center", std::vector<double>{-0.2037, 0.2028, -0.6060});
+    arm_mode_base_box_rotation_z_deg_ = this->declare_parameter<double>(
+        "arm_mode_base_box_rotation_z_deg", -45.0);
+    if (arm_mode_base_raw_box_dims_.size() != 3)
+    {
+        RCLCPP_WARN(this->get_logger(),
+                    "arm_mode_base_raw_box_dims must have 3 values. Using default [0.8802, 0.6801, 1.0120].");
+        arm_mode_base_raw_box_dims_ = {0.8802, 0.6801, 1.0120};
+    }
+    if (arm_mode_base_box_center_.size() != 3)
+    {
+        RCLCPP_WARN(this->get_logger(),
+                    "arm_mode_base_box_center must have 3 values. Using default [-0.2037, 0.2028, -0.6060].");
+        arm_mode_base_box_center_ = {-0.2037, 0.2028, -0.6060};
+    }
     
     // Validate mode parameter
     if (mode_ != "arm" && mode_ != "full")
@@ -881,27 +903,11 @@ sensor_msgs::msg::JointState PathCollisionChecking::convertToNamespaceJointState
     visual.velocity = input.velocity;
     visual.effort = input.effort;
     
-    // In mode:=arm, strip 'arm_' prefix to match ur.urdf.xacro joint names (shoulder_pan_joint, not arm_shoulder_pan_joint)
-    // In mode:=full, keep 'arm_' prefix to match mobile_manipulator.urdf.xacro joint names
-    if (mode_ == "arm")
-    {
-        visual.name.reserve(input.name.size());
-        for (const auto& name : input.name)
-        {
-            if (name.find("arm_") == 0)
-            {
-                visual.name.push_back(name.substr(4));  // Remove "arm_" prefix (4 characters)
-            }
-            else
-            {
-                visual.name.push_back(name);  // Keep as-is if no prefix
-            }
-        }
-    }
-    else
-    {
-        visual.name = input.name;  // mode:=full keeps arm_ prefix
-    }
+    // Both arm and full modes use arm_ prefix in their collision URDF:
+    // - arm mode: ur.urdf.xacro is launched with tf_prefix='arm_' → arm_shoulder_pan_joint, etc.
+    // - full mode: mobile_manipulator.urdf.xacro has arm_ prefix built-in
+    // Real robot always publishes arm_* names, so no conversion needed.
+    visual.name = input.name;
     
     return visual;
 }
@@ -933,14 +939,17 @@ void PathCollisionChecking::warmupFromRealJointState(const sensor_msgs::msg::Joi
     joint_state_ = *msg;
     joint_state_mutex_.unlock();
 
-    // Use joint names as-is from real robot - they should match the collision URDF
-    // The namespace separation is handled by publishing to /collision/joint_states
-    sensor_msgs::msg::JointState collision_state;
-    collision_state.header = msg->header;
-    collision_state.position = msg->position;
-    collision_state.velocity = msg->velocity;
-    collision_state.effort   = msg->effort;
-    collision_state.name = msg->name;  // Joint names should match collision URDF exactly
+    // Convert joint names to match the collision URDF:
+    // - arm mode: strip 'arm_' prefix (ur.urdf.xacro uses shoulder_pan_joint, not arm_shoulder_pan_joint)
+    // - full mode: keep names as-is (mobile_manipulator.urdf.xacro keeps arm_ prefix)
+    sensor_msgs::msg::JointState raw_state;
+    raw_state.header = msg->header;
+    raw_state.position = msg->position;
+    raw_state.velocity = msg->velocity;
+    raw_state.effort   = msg->effort;
+    raw_state.name = msg->name;
+
+    sensor_msgs::msg::JointState collision_state = convertToNamespaceJointState(raw_state);
 
     try
     {
@@ -1056,34 +1065,47 @@ void PathCollisionChecking::initializeRobotBaseCollisionObject()
     
     if (mode_ == "arm")
     {
-        // Oriented bounding box matching planner's polygon footprint
-        // Polygon vertices form a rotated rectangle - approximated with oriented box
+        // Build the oriented box from shared parameters (arm_base frame convention).
+        // Convert to base_link frame: negate X and Y of centre, add 180° to rotation.
+        const double base_link_rotation_deg = arm_mode_base_box_rotation_z_deg_ + 180.0;
+        const double angle_rad = base_link_rotation_deg * M_PI / 180.0;
+
         Eigen::Affine3d box_transform = Eigen::Affine3d::Identity();
-        box_transform.translation() = Eigen::Vector3d(0.2037, -0.2028, -0.6060);  // Inverted X and Y signs
-        
-        // Rotate -45 degrees around Z axis (principal axis of polygon)
-        double angle_rad = 45.0 * M_PI / 180.0;  // Positive 45 degrees
+        box_transform.translation() = Eigen::Vector3d(
+            -arm_mode_base_box_center_[0],  // negate X  (arm_base → base_link)
+            -arm_mode_base_box_center_[1],  // negate Y
+             arm_mode_base_box_center_[2]   // keep Z
+        );
         Eigen::Matrix3d rotation;
         rotation = Eigen::AngleAxisd(angle_rad, Eigen::Vector3d::UnitZ());
         box_transform.linear() = rotation;
-        
-        // Create SolidPrimitive box message: oriented bounding box of polygon footprint
+
+        // Apply shared inflation on top of the raw dimensions.
         shape_msgs::msg::SolidPrimitive box_solid;
         box_solid.type = shape_msgs::msg::SolidPrimitive::BOX;
         box_solid.dimensions.resize(3);
-        box_solid.dimensions[shape_msgs::msg::SolidPrimitive::BOX_X] = 0.6801;  // Swapped X/Y
-        box_solid.dimensions[shape_msgs::msg::SolidPrimitive::BOX_Y] = 0.8802;  // Swapped X/Y
-        box_solid.dimensions[shape_msgs::msg::SolidPrimitive::BOX_Z] = 1.0120;
-        
-        robot_collision_checking::FCLObjectPtr box_obj = 
+        box_solid.dimensions[shape_msgs::msg::SolidPrimitive::BOX_X] =
+            arm_mode_base_raw_box_dims_[0] + 2.0 * simplified_mobile_base_box_inflation_[0];
+        box_solid.dimensions[shape_msgs::msg::SolidPrimitive::BOX_Y] =
+            arm_mode_base_raw_box_dims_[1] + 2.0 * simplified_mobile_base_box_inflation_[1];
+        box_solid.dimensions[shape_msgs::msg::SolidPrimitive::BOX_Z] =
+            arm_mode_base_raw_box_dims_[2] + 2.0 * simplified_mobile_base_box_inflation_[2];
+
+        robot_collision_checking::FCLObjectPtr box_obj =
             std::make_shared<robot_collision_checking::FCLObject>(box_solid, box_transform);
-        
+
         addCollisionObject(box_obj, MOBILE_BASE_ID);
-        
-        RCLCPP_INFO(this->get_logger(), 
-            "✅ Added oriented robot base box (ID %d): size=[0.680, 0.880, 1.012]m, "
-            "center=[0.204, -0.203, -0.606]m, rotation=+45° Z (oriented bounding box of polygon)",
-            MOBILE_BASE_ID);
+
+        RCLCPP_INFO(this->get_logger(),
+            "✅ Added oriented robot base box (ID %d): "
+            "raw=[%.3f, %.3f, %.3f]m + inflation=[%.3f, %.3f, %.3f]m = [%.3f, %.3f, %.3f]m, "
+            "centre=[%.3f, %.3f, %.3f]m (base_link), rotation_z=%.1f° (base_link)",
+            MOBILE_BASE_ID,
+            arm_mode_base_raw_box_dims_[0], arm_mode_base_raw_box_dims_[1], arm_mode_base_raw_box_dims_[2],
+            simplified_mobile_base_box_inflation_[0], simplified_mobile_base_box_inflation_[1], simplified_mobile_base_box_inflation_[2],
+            box_solid.dimensions[0], box_solid.dimensions[1], box_solid.dimensions[2],
+            box_transform.translation().x(), box_transform.translation().y(), box_transform.translation().z(),
+            base_link_rotation_deg);
     }
     else if (mode_ == "full")
     {
@@ -1263,6 +1285,15 @@ bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::Joint
     for (int i = 0; i < num_shapes; i++)
     {
         std::vector<int> collision_object_ids;
+
+        // In arm mode the base mount links (e.g. arm_base_link_inertia) physically sit inside
+        // the mobile base box that was added as an environment object.  Their geometry always
+        // touches/overlaps the top face of that box by construction, so checking them produces
+        // permanent false positives.  Skip them – they cannot move away from the base.
+        if (mode_ == "arm" && endsWith(collision_link_names_[i], "base_link_inertia"))
+        {
+            continue;
+        }
 
         fcl::Transform3d world_to_fcl;
         robot_collision_checking::fcl_interface::transform2fcl(

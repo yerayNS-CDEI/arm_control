@@ -391,6 +391,10 @@ class PathCollisionChecking : public rclcpp::Node
         bool simplified_mobile_base_box_cached_ = false;
         Eigen::Vector3d simplified_mobile_base_box_size_ = Eigen::Vector3d::Zero();
         Eigen::Vector3d simplified_mobile_base_box_center_offset_ = Eigen::Vector3d::Zero();
+        // Arm-mode box geometry (stored in arm_base frame convention; converted to base_link at runtime)
+        std::vector<double> arm_mode_base_raw_box_dims_;
+        std::vector<double> arm_mode_base_box_center_;
+        double arm_mode_base_box_rotation_z_deg_;
         std::set<std::string> simplified_collision_skipped_links_;
         std::map<std::string, Eigen::Vector3d> simplified_collision_box_sizes_;
         std::map<std::string, Eigen::Vector3d> simplified_collision_box_center_offsets_;

@@ -24,17 +24,17 @@ def generate_launch_description():
     )
 
     # For collision checking, root and tip depend on mode:
-    # - arm mode: base_link -> tool0 (arm only URDF, no arm_ prefix, 6 DOF)
+    # - arm mode: arm_base_link -> arm_tool0 (arm only URDF, arm_ tf_prefix, 6 DOF)
     # - full mode: base_footprint -> arm_tool0 (mobile manipulator URDF, arm has arm_ prefix, 8 DOF)
     root_col_arg = DeclareLaunchArgument(
         'root_col',
-        default_value=PythonExpression(["'base_footprint' if '", LaunchConfiguration('mode'), "' == 'full' else 'base_link'"]),
+        default_value=PythonExpression(["'base_footprint' if '", LaunchConfiguration('mode'), "' == 'full' else 'arm_base_link'"]),
         description='Base frame for collision checking'
     )
 
     tip_col_arg = DeclareLaunchArgument(
         'tip_col',
-        default_value=PythonExpression(["'arm_tool0' if '", LaunchConfiguration('mode'), "' == 'full' else 'tool0'"]),
+        default_value='arm_tool0',
         description='End-effector frame for collision checking'
     )
 
@@ -57,7 +57,7 @@ def generate_launch_description():
         ]),
         launch_arguments={
             'ur_type': ur_type,
-            'tf_prefix': '',
+            'tf_prefix': 'arm_',
             'mode': mode,
         }.items(),
     )

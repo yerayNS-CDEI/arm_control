@@ -315,7 +315,12 @@ def generate_launch_description():
                 executable='planner_node',
                 name='robotic_arm_planner_node',
                 output='screen',
-                parameters=[{'mode': mode}],
+                parameters=[
+                    {'mode': mode},
+                    PathJoinSubstitution(
+                        [FindPackageShare('arm_control'), 'config', 'mobile_base_geometry.yaml']
+                    ),
+                ],
                 condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'legacy'"])),
             ),
             Node(
