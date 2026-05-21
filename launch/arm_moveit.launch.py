@@ -316,9 +316,13 @@ def generate_launch_description():
             DeclareLaunchArgument("joint_states_topic", default_value=""),
             DeclareLaunchArgument(
                 "default_trajectory_controller",
-                default_value="joint_trajectory_controller",
+                default_value="passthrough_trajectory_controller",
                 description="MoveIt FollowJointTrajectory controller to prefer for execution.",
-                choices=["joint_trajectory_controller", "scaled_joint_trajectory_controller"],
+                choices=[
+                    "passthrough_trajectory_controller",
+                    "scaled_joint_trajectory_controller",
+                    "joint_trajectory_controller",
+                ],
             ),
             DeclareLaunchArgument(
                 "rviz_config_file",

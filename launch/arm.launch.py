@@ -205,13 +205,18 @@ def generate_launch_description():
     )
     moveit_controller_name_arg = DeclareLaunchArgument(
         'moveit_controller_name',
-        default_value='joint_trajectory_controller',
+        default_value='passthrough_trajectory_controller',
         description=(
             'Trajectory controller used by the MoveIt/real-robot path. '
-            'Defaults to joint_trajectory_controller because scaled_joint_trajectory_controller '
+            'Defaults to passthrough_trajectory_controller (streams trajectories to the '
+            'UR onboard executor, respects speed-scaling). scaled_joint_trajectory_controller '
             'is currently crashing in the Humble UR driver on the real robot.'
         ),
-        choices=['joint_trajectory_controller', 'scaled_joint_trajectory_controller'],
+        choices=[
+            'passthrough_trajectory_controller',
+            'joint_trajectory_controller',
+            'scaled_joint_trajectory_controller',
+        ],
     )
     controllers_file_arg = DeclareLaunchArgument(
         'controllers_file',
@@ -268,10 +273,25 @@ def generate_launch_description():
         ["'false' if '", planner_backend, "' == 'moveit' else '", launch_rviz, "'"]
     )
 
+    # In pure Gazebo (sim=true and hybrid_sim=false) the arm runs through
+    # gz_ros2_control, which doesn't provide the UR-specific passthrough
+    # command interfaces — PTC/SJTC can't load there. Force JTC in that path.
+    is_pure_gazebo = PythonExpression(
+        ["'", simulation, "' == 'true' and '", hybrid_sim, "' != 'true'"]
+    )
+    effective_moveit_controller_name = PythonExpression(
+        [
+            "'joint_trajectory_controller' if ",
+            is_pure_gazebo,
+            " else '",
+            moveit_controller_name,
+            "'",
+        ]
+    )
     joint_controller_type = PythonExpression(
         [
             "'",
-            moveit_controller_name,
+            effective_moveit_controller_name,
             "' if '",
             planner_backend,
             "' == 'moveit' else 'joint_trajectory_controller'",
@@ -375,7 +395,7 @@ def generate_launch_description():
             'launch_rviz': launch_rviz,
             'rviz_config_file': rviz_config_file,
             'joint_states_topic': moveit_joint_states_topic,
-            'default_trajectory_controller': moveit_controller_name,
+            'default_trajectory_controller': effective_moveit_controller_name,
             'enable_octomap': enable_octomap,
             'sim': simulation,
         }.items(),
