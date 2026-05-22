@@ -6,7 +6,8 @@ import time
 def build_simple(cmd: str) -> bytes:
     payload = cmd.encode("ascii")
     length = len(payload)
-    return bytes([0x25, 0x05, length]) + payload
+    # Longitud en 2 bytes Big Endian (obligatori per protocol Lenz)
+    return bytes([0x25, 0x05]) + struct.pack(">H", length) + payload
 
 def build_config(cmd: str, value) -> bytes:
     if cmd in ["MTI", "MTR"]:
@@ -15,11 +16,11 @@ def build_config(cmd: str, value) -> bytes:
         value_str = str(value)
     payload = (cmd + value_str).encode("ascii")
     length = len(payload)
-    return bytes([0x25, 0x05, length]) + payload
+    # Longitud en 2 bytes Big Endian (obligatori per protocol Lenz)
+    return bytes([0x25, 0x05]) + struct.pack(">H", length) + payload
 
 class LenzClient:
-    # AQUI ESTÀ EL CANVI: timeout=300.0 (5 minuts)
-    def __init__(self, ip, port=2002, timeout=300.0):
+    def __init__(self, ip, port=2002, timeout=15.0):
         self.ip = str(ip)
         self.port = int(port)
         self.timeout = timeout

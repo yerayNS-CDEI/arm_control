@@ -10,6 +10,8 @@ from ament_index_python.packages import get_package_share_directory
 # ATENCIÓ: Canvia 'arm_control' pel nom del teu paquet si és diferent
 from arm_control.srv import PredictMaterial
 
+REJECTION_THRESHOLD = 0.85  # Confiança mínima per acceptar una predicció
+
 class MLInferenceNode(Node):
     def __init__(self):
         super().__init__('ml_inference_node')
@@ -47,8 +49,8 @@ class MLInferenceNode(Node):
             except Exception as e:
                 self.get_logger().error(f"✗ Error carregant el model: {e}")
         else:
-            self.get_logger().warn(f"⚠ Model '{self.model_path}' no trobat.")
-            self.get_logger().warn("S'utilitzarà un model FALS (Mock) per poder fer proves de xarxa.")
+            self.get_logger().warning(f"⚠ Model '{self.model_path}' no trobat.")
+            self.get_logger().warning("S'utilitzarà un model FALS (Mock) per poder fer proves de xarxa.")
 
     def predict_callback(self, request, response):
         """S'executa cada cop que el Gestor demana predir un material."""
@@ -70,24 +72,31 @@ class MLInferenceNode(Node):
 
         # 3. Mode Real (quan tinguis el .pkl)
         try:
-            # Convertim les dades de ROS a Numpy
-            vis_data = np.array(request.vis_spectrum)
-            nir_data = np.array(request.nir_spectrum)
-            
-            # Les ajuntem en format taula per a Scikit-Learn (1 fila, N columnes)
+            # dtype=float64 obligatori: evita Integer Underflow amb arrays ROS (uint16 → negatiu)
+            vis_data = np.array(request.vis_spectrum, dtype=np.float64)
+            nir_data = np.array(request.nir_spectrum, dtype=np.float64)
+
+            # 512 variables: el Pipeline intern fa Clamping→Trimming→SNV→Scaler
             X_input = np.concatenate((vis_data, nir_data)).reshape(1, -1)
-            
-            # Fem la predicció
+
             prediction = self.model.predict(X_input)
-            
-            # Extreure la confiança (si l'algorisme ho permet)
+
             if hasattr(self.model, "predict_proba"):
                 probabilities = self.model.predict_proba(X_input)
                 confidence = float(np.max(probabilities))
             else:
                 confidence = 1.0
 
-            # Retornem el resultat
+            # Llindar de rebuig estàtic: prediccions amb baixa confiança no es publiquen
+            if confidence < REJECTION_THRESHOLD:
+                response.material = "REBUTJAT_BAIXA_CONFIANCA"
+                response.confidence = confidence
+                self.get_logger().warning(
+                    f"Predicció rebutjada: '{str(prediction[0])}' "
+                    f"conf={confidence:.3f} < {REJECTION_THRESHOLD}"
+                )
+                return response
+
             response.material = str(prediction[0])
             response.confidence = confidence
             self.get_logger().info(f"✓ Resultat: {response.material} (Confiança: {confidence:.2f})")
