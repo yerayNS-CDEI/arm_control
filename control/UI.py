@@ -311,27 +311,13 @@ class RobotControlUI(QMainWindow):
         init_box.setLayout(init_layout)
         self.init_box = init_box
         # Status Commands
-        init_layout.addWidget(QLabel("Status Commands:"))
-        self.status_cmd_combo = QComboBox()
-        self.status_cmd_combo.addItems([
-            'robotmode',
-            'safetystatus',
-            'programState',
-            'running',
-            'get loaded program',
-            'is in remote control'
-        ])
-        init_layout.addWidget(self.status_cmd_combo)
- 
-        btn_send_status = QPushButton("Send Status Command")
-        btn_send_status.clicked.connect(lambda: self.send_status_command())
-        init_layout.addWidget(btn_send_status)
-        
         btn_send_all_status = QPushButton("Send All Status Commands")
         btn_send_all_status.clicked.connect(lambda: self.send_all_status_commands())
         btn_send_all_status.setToolTip("Send all status commands sequentially: robotmode, safetystatus, programState, running, get loaded program, is in remote control")
         init_layout.addWidget(btn_send_all_status)
- 
+
+        self.arm_status_indicators = self._build_status_indicators(init_layout)
+
         # Control Commands
         init_layout.addWidget(QLabel("\nControl Commands:"))
         self.control_cmd_combo = QComboBox()
@@ -812,30 +798,13 @@ class RobotControlUI(QMainWindow):
         full_control_init_layout = QVBoxLayout()
         full_control_init_box.setLayout(full_control_init_layout)
 
-        # Create separate comboboxes for Full Control tab
-        full_control_init_layout.addWidget(QLabel("Status Commands:"))
-        self.full_control_status_cmd_combo = QComboBox()
-        self.full_control_status_cmd_combo.addItems([
-            'robotmode',
-            'safetystatus',
-            'programState',
-            'running',
-            'get loaded program',
-            'is in remote control'
-        ])
-        full_control_init_layout.addWidget(self.full_control_status_cmd_combo)
-        
-        btn_full_control_send_status = QPushButton("Send Status Command")
-        btn_full_control_send_status.clicked.connect(
-            lambda: self.send_full_control_status_command()
-        )
-        full_control_init_layout.addWidget(btn_full_control_send_status)
-
         btn_full_control_send_all_status = QPushButton("Send All Status Commands")
         btn_full_control_send_all_status.clicked.connect(
             lambda: self.send_all_full_control_status_commands()
         )
         full_control_init_layout.addWidget(btn_full_control_send_all_status)
+
+        self.full_status_indicators = self._build_status_indicators(full_control_init_layout)
 
         # Control commands
         full_control_init_layout.addWidget(QLabel("\nControl Commands:"))
@@ -3482,13 +3451,91 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 return False
         return True
  
+    def _build_status_indicators(self, parent_layout):
+        """Add Robot Mode / Safety Status / Program State indicator rows to parent_layout.
+
+        Returns a dict keyed by command name ('robotmode', 'safetystatus',
+        'programState') with (icon_label, value_label) tuples for later updates.
+        """
+        indicators = {}
+        rows = [
+            ('robotmode',    'Robot Mode'),
+            ('safetystatus', 'Safety Status'),
+            ('programState', 'Program State'),
+        ]
+        for key, label_text in rows:
+            row = QHBoxLayout()
+            icon = QLabel("○")
+            icon.setStyleSheet("color: #8b949e; font-size: 16pt; font-weight: bold;")
+            icon.setFixedWidth(24)
+            icon.setAlignment(Qt.AlignCenter)
+            name = QLabel(label_text + ":")
+            name.setStyleSheet("font-weight: bold;")
+            name.setFixedWidth(110)
+            value = QLabel("—")
+            value.setStyleSheet("color: #8b949e;")
+            value.setWordWrap(True)
+            row.addWidget(icon)
+            row.addWidget(name)
+            row.addWidget(value, 1)
+            parent_layout.addLayout(row)
+            indicators[key] = (icon, value)
+        return indicators
+
+    def _update_status_indicator(self, command, response, status_text):
+        """Update icon/value labels based on the dashboard response."""
+        if command not in ('robotmode', 'safetystatus', 'programState'):
+            return
+        if status_text is self.status_text:
+            indicators = getattr(self, 'arm_status_indicators', None)
+        elif status_text is getattr(self, 'full_control_status_text', None):
+            indicators = getattr(self, 'full_status_indicators', None)
+        else:
+            indicators = None
+        if not indicators or command not in indicators:
+            return
+
+        icon_label, value_label = indicators[command]
+        text = (response or "").strip()
+        GREEN = "#2ea043"
+        RED = "#f47067"
+        GREY = "#8b949e"
+
+        if command == 'robotmode':
+            val = text.split(':', 1)[-1].strip() if ':' in text else text
+            ok = val.upper() == 'RUNNING'
+            icon_label.setText("●")
+            icon_label.setStyleSheet(
+                f"color: {GREEN if ok else RED}; font-size: 16pt; font-weight: bold;"
+            )
+            value_label.setText(val or "—")
+            value_label.setStyleSheet(f"color: {GREEN if ok else RED};")
+        elif command == 'safetystatus':
+            val = text.split(':', 1)[-1].strip() if ':' in text else text
+            ok = val.upper() == 'NORMAL'
+            icon_label.setText("☑" if ok else "⛔")
+            icon_label.setStyleSheet(
+                f"color: {GREEN if ok else RED}; font-size: 16pt; font-weight: bold;"
+            )
+            value_label.setText(val or "—")
+            value_label.setStyleSheet(f"color: {GREEN if ok else RED};")
+        elif command == 'programState':
+            first = text.split()[0].upper() if text else ""
+            ok = first == 'PLAYING'
+            icon_label.setText("●")
+            icon_label.setStyleSheet(
+                f"color: {GREEN if ok else RED}; font-size: 16pt; font-weight: bold;"
+            )
+            value_label.setText("PLAYING" if ok else "STOPPED")
+            value_label.setStyleSheet(f"color: {GREEN if ok else RED};")
+
     def _send_robot_command(self, command, status_text=None):
         """Send command to robot dashboard and return response"""
         if status_text is None:
             status_text = self.status_text
         if not self._connect_robot_socket(status_text=status_text):
             return None
- 
+
         try:
             self.robot_socket.send(str.encode(command + '\n'))
             self._log_append(status_text, f"<b style='color: #57ab5a;'>→ SENT: {command}</b>")
@@ -3497,6 +3544,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             data = self.robot_socket.recv(1024)
             response = data.decode('utf-8').strip()
             self._log_append(status_text, f"← RECV: {response}")
+            self._update_status_indicator(command, response, status_text)
             return response
         except Exception as e:
             self._log_append(status_text, f"<span style='color: #f47067;'>✗ Command failed: {e}</span>")
@@ -3506,21 +3554,11 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 self.robot_socket = None
             return None
  
-    def send_status_command(self, status_text=None):
-        """Send selected status command to robot"""
-        command = self.status_cmd_combo.currentText()
-        self._send_robot_command(command, status_text=status_text)
- 
     def send_control_command(self, status_text=None):
         """Send selected control command to robot"""
         command = self.control_cmd_combo.currentText()
         self._send_robot_command(command, status_text=status_text)
- 
-    def send_full_control_status_command(self):
-        """Send selected status command to robot (Full Control tab)"""
-        command = self.full_control_status_cmd_combo.currentText()
-        self._send_robot_command(command, status_text=self.full_control_status_text)
-    
+
     def send_all_full_control_status_commands(self):
         """Send all status commands sequentially (Full Control tab)"""
         status_commands = [
