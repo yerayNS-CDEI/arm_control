@@ -3529,6 +3529,37 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             value_label.setText("PLAYING" if ok else "STOPPED")
             value_label.setStyleSheet(f"color: {GREEN if ok else RED};")
 
+    # Map of control commands to the status query(ies) that should be re-issued
+    # afterwards so the indicators reflect the actual post-command robot state.
+    _CONTROL_STATUS_REFRESH = {
+        'power on':                 ['robotmode'],
+        'power off':                ['robotmode'],
+        'brake release':            ['robotmode'],
+        'shutdown':                 ['robotmode'],
+        'play':                     ['programState', 'robotmode'],
+        'pause':                    ['programState'],
+        'stop':                     ['programState'],
+        'load Test_external_control.urp': ['programState'],
+        'restart safety':           ['safetystatus', 'robotmode'],
+        'close safety popup':       ['safetystatus'],
+        'unlock protective stop':   ['safetystatus', 'robotmode'],
+    }
+
+    def _schedule_status_refresh(self, command, status_text):
+        """If `command` is a control command we know about, query the related
+        status(es) shortly afterwards so the indicators reflect the actual
+        robot state (e.g. 'play' that fails should not leave PLAYING showing)."""
+        refreshes = self._CONTROL_STATUS_REFRESH.get(command)
+        if not refreshes:
+            return
+
+        def _do_refresh():
+            for s in refreshes:
+                self._send_robot_command(s, status_text=status_text)
+
+        # Small delay so the robot has time to transition before we query.
+        QTimer.singleShot(500, _do_refresh)
+
     def _send_robot_command(self, command, status_text=None):
         """Send command to robot dashboard and return response"""
         if status_text is None:
@@ -3545,6 +3576,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             response = data.decode('utf-8').strip()
             self._log_append(status_text, f"← RECV: {response}")
             self._update_status_indicator(command, response, status_text)
+            self._schedule_status_refresh(command, status_text)
             return response
         except Exception as e:
             self._log_append(status_text, f"<span style='color: #f47067;'>✗ Command failed: {e}</span>")
