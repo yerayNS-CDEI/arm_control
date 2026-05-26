@@ -100,6 +100,18 @@ def launch_moveit_planner_node(context, *args, **kwargs):
     
     return [moveit_planner_node]
 
+def _resolve_controller_names(context, *args, **kwargs):
+    cfg = context.launch_configurations
+    sim_v = cfg.get('sim', 'false').strip().lower()
+    hybrid_v = cfg.get('hybrid_sim', 'false').strip().lower()
+    pb = cfg.get('planner_backend', 'legacy').strip()
+    mcn = cfg.get('moveit_controller_name', 'passthrough_trajectory_controller').strip()
+    is_pure_gazebo = (sim_v == 'true' and hybrid_v != 'true')
+    effective = 'joint_trajectory_controller' if is_pure_gazebo else mcn
+    jct = effective if pb == 'moveit' else 'joint_trajectory_controller'
+    cfg['_arm_initial_joint_controller'] = jct
+    cfg['_arm_default_trajectory_controller'] = effective
+    return []
 
 def generate_launch_description():
     ur_pkg = FindPackageShare('arm_control')
@@ -276,27 +288,10 @@ def generate_launch_description():
     # In pure Gazebo (sim=true and hybrid_sim=false) the arm runs through
     # gz_ros2_control, which doesn't provide the UR-specific passthrough
     # command interfaces — PTC/SJTC can't load there. Force JTC in that path.
-    is_pure_gazebo = PythonExpression(
-        ["'", simulation, "' == 'true' and '", hybrid_sim, "' != 'true'"]
-    )
-    effective_moveit_controller_name = PythonExpression(
-        [
-            "'joint_trajectory_controller' if ",
-            is_pure_gazebo,
-            " else '",
-            moveit_controller_name,
-            "'",
-        ]
-    )
-    joint_controller_type = PythonExpression(
-        [
-            "'",
-            effective_moveit_controller_name,
-            "' if '",
-            planner_backend,
-            "' == 'moveit' else 'joint_trajectory_controller'",
-        ]
-    )
+    effective_moveit_controller_name = LaunchConfiguration('_arm_default_trajectory_controller')
+    joint_controller_type = LaunchConfiguration('_arm_initial_joint_controller')
+    
+    
     # Determine the effective mode for MoveIt (used for moveit_include launch args)
     # - If moveit_mode is explicitly set (!= 'auto'), use it
     # - Otherwise, fall back to the general mode parameter
@@ -430,6 +425,7 @@ def generate_launch_description():
             planner_backend_arg,
             enable_wall_scene_sync_arg,
             enable_octomap_arg,
+            OpaqueFunction(function=_resolve_controller_names),
             arm_group,
             moveit_include,
             moveit_planner_node_opaque,
