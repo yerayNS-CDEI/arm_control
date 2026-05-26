@@ -63,95 +63,168 @@ Visualization Manager:
         Expand Link Details: false
         Expand Tree: false
         Link Tree Style: Links in Alphabetic Order
-        collision_base:
+        arm_base:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        collision_base_link:
+        arm_base_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        collision_base_link_inertia:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        collision_ee_cylinder_link:
+        arm_base_link_inertia:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        collision_flange:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        collision_forearm_link:
+        arm_ee_cylinder_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        collision_ft_frame:
+        arm_flange:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        collision_plate_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        collision_sensor_A_link:
+        arm_forearm_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        collision_sensor_B_link:
+        arm_ft_frame:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        arm_plate_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        collision_sensor_C_link:
+        arm_sensor_A_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        collision_shoulder_link:
+        arm_sensor_B_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        collision_tool0:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        collision_upper_arm_link:
+        arm_sensor_C_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        collision_wrist_1_link:
+        arm_shoulder_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        collision_wrist_2_link:
+        arm_tool0:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        arm_upper_arm_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        collision_wrist_3_link:
+        arm_wrist_1_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        world:
+        arm_wrist_2_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
+          Value: true
+        arm_wrist_3_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        base_footprint:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        camera_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        column_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        drivewhl_l_joint_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        drivewhl_r_joint_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        front_sick:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        front_sick_scan:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        os_sensor_mount:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rear_sick:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        rear_sick_scan:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        turret_caster_bl:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        turret_caster_br:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        turret_caster_fl:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        turret_caster_fr:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        turret_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
       Mass Properties:
         Inertia: false
         Mass: false
       Name: RobotModel
-      TF Prefix: ""
+      TF Prefix: /collision
       Update Interval: 0
       Value: true
       Visual Enabled: true
@@ -206,43 +279,111 @@ Visualization Manager:
           Value: true
         arm_wrist_3_link:
           Value: true
-        collision_base:
+        base_footprint:
           Value: true
-        collision_base_link:
+        base_link:
           Value: true
-        collision_base_link_inertia:
+        camera_color_optical_frame:
           Value: true
-        collision_ee_cylinder_link:
+        camera_link:
           Value: true
-        collision_flange:
+        collision/arm_base:
           Value: true
-        collision_forearm_link:
+        collision/arm_base_link:
           Value: true
-        collision_ft_frame:
+        collision/arm_base_link_inertia:
           Value: true
-        collision_plate_link:
+        collision/arm_ee_cylinder_link:
           Value: true
-        collision_sensor_A_link:
+        collision/arm_flange:
           Value: true
-        collision_sensor_B_link:
+        collision/arm_forearm_link:
           Value: true
-        collision_sensor_C_link:
+        collision/arm_ft_frame:
           Value: true
-        collision_shoulder_link:
+        collision/arm_plate_link:
           Value: true
-        collision_tool0:
+        collision/arm_sensor_A_link:
           Value: true
-        collision_upper_arm_link:
+        collision/arm_sensor_B_link:
           Value: true
-        collision_wrist_1_link:
+        collision/arm_sensor_C_link:
           Value: true
-        collision_wrist_2_link:
+        collision/arm_shoulder_link:
           Value: true
-        collision_wrist_3_link:
+        collision/arm_tool0:
           Value: true
-        ground_plane:
+        collision/arm_upper_arm_link:
           Value: true
-        world:
+        collision/arm_wrist_1_link:
+          Value: true
+        collision/arm_wrist_2_link:
+          Value: true
+        collision/arm_wrist_3_link:
+          Value: true
+        collision/base_footprint:
+          Value: true
+        collision/base_link:
+          Value: true
+        collision/camera_link:
+          Value: true
+        collision/column_link:
+          Value: true
+        collision/drivewhl_l_joint_link:
+          Value: true
+        collision/drivewhl_r_joint_link:
+          Value: true
+        collision/front_sick:
+          Value: true
+        collision/front_sick_scan:
+          Value: true
+        collision/os_sensor_mount:
+          Value: true
+        collision/rear_sick:
+          Value: true
+        collision/rear_sick_scan:
+          Value: true
+        collision/turret_caster_bl:
+          Value: true
+        collision/turret_caster_br:
+          Value: true
+        collision/turret_caster_fl:
+          Value: true
+        collision/turret_caster_fr:
+          Value: true
+        collision/turret_link:
+          Value: true
+        column_link:
+          Value: true
+        dome_scan:
+          Value: true
+        drivewhl_l_joint_link:
+          Value: true
+        drivewhl_r_joint_link:
+          Value: true
+        front_sick:
+          Value: true
+        front_sick_scan:
+          Value: true
+        odom:
+          Value: true
+        os_lidar:
+          Value: true
+        os_sensor_mount:
+          Value: true
+        rear_sick:
+          Value: true
+        rear_sick_scan:
+          Value: true
+        turret_caster_bl:
+          Value: true
+        turret_caster_br:
+          Value: true
+        turret_caster_fl:
+          Value: true
+        turret_caster_fr:
+          Value: true
+        turret_link:
           Value: true
       Marker Scale: 1
       Name: TF
@@ -250,55 +391,54 @@ Visualization Manager:
       Show Axes: true
       Show Names: false
       Tree:
-        world:
-          arm_base_link:
-            arm_base:
+        collision/base_footprint:
+          collision/base_link:
+            collision/drivewhl_l_joint_link:
               {}
-            arm_base_link_inertia:
-              arm_shoulder_link:
-                arm_upper_arm_link:
-                  arm_forearm_link:
-                    arm_wrist_1_link:
-                      arm_wrist_2_link:
-                        arm_wrist_3_link:
-                          arm_flange:
-                            arm_ee_cylinder_link:
-                              arm_plate_link:
-                                arm_sensor_A_link:
-                                  {}
-                                arm_sensor_B_link:
-                                  {}
-                                arm_sensor_C_link:
-                                  {}
-                              arm_tool0:
-                                {}
-                          arm_ft_frame:
-                            {}
-          collision_base_link:
-            collision_base:
+            collision/drivewhl_r_joint_link:
               {}
-            collision_base_link_inertia:
-              collision_shoulder_link:
-                collision_upper_arm_link:
-                  collision_forearm_link:
-                    collision_wrist_1_link:
-                      collision_wrist_2_link:
-                        collision_wrist_3_link:
-                          collision_flange:
-                            collision_ee_cylinder_link:
-                              collision_plate_link:
-                                collision_sensor_A_link:
+            collision/turret_link:
+              collision/column_link:
+                collision/arm_base_link:
+                  collision/arm_base:
+                    {}
+                  collision/arm_base_link_inertia:
+                    collision/arm_shoulder_link:
+                      collision/arm_upper_arm_link:
+                        collision/arm_forearm_link:
+                          collision/arm_wrist_1_link:
+                            collision/arm_wrist_2_link:
+                              collision/arm_wrist_3_link:
+                                collision/arm_flange:
+                                  collision/arm_ee_cylinder_link:
+                                    collision/arm_plate_link:
+                                      collision/arm_sensor_A_link:
+                                        {}
+                                      collision/arm_sensor_B_link:
+                                        {}
+                                      collision/arm_sensor_C_link:
+                                        {}
+                                    collision/arm_tool0:
+                                      {}
+                                collision/arm_ft_frame:
                                   {}
-                                collision_sensor_B_link:
-                                  {}
-                                collision_sensor_C_link:
-                                  {}
-                              collision_tool0:
-                                {}
-                          collision_ft_frame:
-                            {}
-          ground_plane:
-            {}
+              collision/os_sensor_mount:
+                collision/camera_link:
+                  {}
+                collision/front_sick_scan:
+                  collision/front_sick:
+                    {}
+                collision/rear_sick_scan:
+                  collision/rear_sick:
+                    {}
+              collision/turret_caster_bl:
+                {}
+              collision/turret_caster_br:
+                {}
+              collision/turret_caster_fl:
+                {}
+              collision/turret_caster_fr:
+                {}
       Update Interval: 0
       Value: true
     - Class: rviz_default_plugins/MarkerArray
@@ -316,7 +456,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: world
+    Fixed Frame: collision/base_footprint
     Frame Rate: 30
   Name: root
   Tools:
@@ -359,25 +499,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 3.1825413703918457
+      Distance: 2.3940916061401367
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -0.1189432218670845
-        Y: -0.022592950612306595
-        Z: 0.585051953792572
+        X: 0.1430840641260147
+        Y: 0.01635461300611496
+        Z: 0.8170030117034912
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.4453981816768646
+      Pitch: 0.19539815187454224
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 0.8953980803489685
+      Yaw: 3.1703977584838867
     Saved: ~
 Window Geometry:
   Displays:

@@ -211,6 +211,12 @@ def generate_launch_description():
         description='Planner backend to use: legacy or moveit',
         choices=['legacy', 'moveit'],
     )
+    astar_collision_mode_arg = DeclareLaunchArgument(
+        'astar_collision_mode',
+        default_value='wrist3',
+        description='Legacy planner A* collision mode: dual, wrist3, or tool0_proxy',
+        choices=['dual', 'wrist3', 'tool0_proxy'],
+    )
     enable_wall_scene_sync_arg = DeclareLaunchArgument(
         'enable_wall_scene_sync',
         default_value='false',
@@ -236,6 +242,7 @@ def generate_launch_description():
     publish_controller_odom_tf = LaunchConfiguration('publish_controller_odom_tf')
     namespace_arm = LaunchConfiguration('namespace_arm')
     planner_backend = LaunchConfiguration('planner_backend')
+    astar_collision_mode = LaunchConfiguration('astar_collision_mode')
     enable_wall_scene_sync = LaunchConfiguration('enable_wall_scene_sync')
     stack_launch_rviz = PythonExpression(
         ["'false' if '", planner_backend, "' == 'moveit' else '", launch_rviz, "'"]
@@ -316,7 +323,10 @@ def generate_launch_description():
                 name='robotic_arm_planner_node',
                 output='screen',
                 parameters=[
-                    {'mode': mode},
+                    {
+                        'mode': mode,
+                        'astar_collision_mode': astar_collision_mode,
+                    },
                     PathJoinSubstitution(
                         [FindPackageShare('arm_control'), 'config', 'mobile_base_geometry.yaml']
                     ),
@@ -391,6 +401,7 @@ def generate_launch_description():
             publish_controller_odom_tf_arg,
             namespace_arm_arg,
             planner_backend_arg,
+            astar_collision_mode_arg,
             enable_wall_scene_sync_arg,
             arm_group,
             collision_world_include,

@@ -8,6 +8,9 @@ from math import sqrt
 
 from scipy.ndimage import binary_dilation
 
+
+VALID_ASTAR_COLLISION_MODES = {'dual', 'wrist3', 'tool0_proxy'}
+
 def dilate_obstacles(occupancy_grid, dilation_distance, x_vals):
     # Create a structuring element for dilation (3D cube of size dilation_distance)
     dilation_size = int(np.ceil(dilation_distance / (x_vals[1] - x_vals[0])))  # Convert distance to grid units
@@ -171,6 +174,7 @@ def check_dual_frame_collision(
     z_vals: np.ndarray,
     T_wrist3_tool0: np.ndarray,
     orientation_matrix: np.ndarray,
+    collision_mode: str = 'dual',
     cylinder_center_xy: Tuple[float, float] = None,
     cylinder_radius: float = None,
     cylinder_z_range: Tuple[float, float] = None
@@ -197,18 +201,31 @@ def check_dual_frame_collision(
         cylinder_radius: Radius of cylinder (optional, currently unused)
         cylinder_z_range: (z_min, z_max) of cylinder (optional, currently unused)
     
+    Args:
+        collision_mode: One of 'dual', 'wrist3', or 'tool0_proxy'.
+
     Returns:
         True if collision-free, False if collision detected or wrist_3 out of bounds
     """
     i, j, k = wrist3_idx
     rows, cols, depth = grid.shape
+
+    if collision_mode not in VALID_ASTAR_COLLISION_MODES:
+        raise ValueError(
+            f"Unsupported A* collision mode '{collision_mode}'. "
+            f"Expected one of {sorted(VALID_ASTAR_COLLISION_MODES)}."
+        )
     
     # CRITICAL: Wrist_3 must be in reachable workspace bounds
     if not (0 <= i < rows and 0 <= j < cols and 0 <= k < depth):
         return False  # Wrist_3 unreachable
+
+    if collision_mode == 'wrist3':
+        return grid[i, j, k] == 0
     
-    # CRITICAL: Wrist_3 must not collide with obstacles
-    if grid[i, j, k] == 1:
+    # Dual mode blocks both wrist_3 and tool0. The tool0 proxy mode intentionally
+    # ignores wrist_3 occupancy and uses only the derived tool0 voxel as the A* gate.
+    if collision_mode == 'dual' and grid[i, j, k] == 1:
         return False  # Wrist_3 in collision
     
     # Convert wrist_3 grid position to world coordinates
@@ -248,6 +265,7 @@ def get_valid_neighbors_dual_frame(
     max_dist_grid: float = None,
     dual_frame_validity_cache: Dict[Tuple[int, int, int], bool] = None,
     dual_frame_cache_stats: Dict[str, int] = None,
+    collision_mode: str = 'dual',
     cylinder_center_xy: Tuple[float, float] = None,
     cylinder_radius: float = None,
     cylinder_z_range: Tuple[float, float] = None
@@ -282,9 +300,14 @@ def get_valid_neighbors_dual_frame(
         (x-1, y+1, z-1), (x-1, y-1, z-1),
     ]
     
-    # If dual-frame checking is disabled, use original logic
-    if (x_vals is None or y_vals is None or z_vals is None or 
-        T_wrist3_tool0 is None or slerp is None or start_idx is None or max_dist_grid is None):
+    orientation_collision_enabled = collision_mode in {'dual', 'tool0_proxy'}
+
+    # If orientation-based checking is disabled, use wrist_3-only grid occupancy.
+    if (
+        collision_mode == 'wrist3'
+        or x_vals is None or y_vals is None or z_vals is None or
+        T_wrist3_tool0 is None or slerp is None or start_idx is None or max_dist_grid is None
+    ):
         return [
             (nx, ny, nz) for nx, ny, nz in possible_moves
             if 0 <= nx < rows and 0 <= ny < cols and 0 <= nz < depth
@@ -322,6 +345,7 @@ def get_valid_neighbors_dual_frame(
         is_valid = check_dual_frame_collision(
             neighbor_pos, grid, x_vals, y_vals, z_vals,
             T_wrist3_tool0, neighbor_orientation,
+            collision_mode,
             cylinder_center_xy, cylinder_radius, cylinder_z_range
         )
         dual_frame_validity_cache[neighbor_pos] = is_valid
@@ -339,6 +363,7 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
               T_wrist3_tool0: np.ndarray = None,
               start_orientation: np.ndarray = None,
               goal_orientation: np.ndarray = None,
+              astar_collision_mode: str = 'dual',
               stats_out: Dict[str, int] = None,
               cylinder_center_xy: Tuple[float, float] = None,
               cylinder_radius: float = None,
@@ -362,12 +387,21 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
         List of grid positions representing the optimal path
         
     Note:
-        If dual-frame params are provided, A* will check collision for BOTH
-        wrist_3 and tool0 at each node. Otherwise, only wrist_3 is checked.
-        All obstacles (including cylinder) block both wrist_3 and tool0.
+        astar_collision_mode controls how node validity is computed:
+        - 'dual': current behavior, block if wrist_3 or tool0 collides.
+        - 'wrist3': use only wrist_3 grid occupancy.
+        - 'tool0_proxy': search in wrist_3 coordinates but block only by the
+          derived tool0 voxel under the interpolated orientation.
     """
-    # Determine if dual-frame checking is enabled
+    if astar_collision_mode not in VALID_ASTAR_COLLISION_MODES:
+        raise ValueError(
+            f"Unsupported A* collision mode '{astar_collision_mode}'. "
+            f"Expected one of {sorted(VALID_ASTAR_COLLISION_MODES)}."
+        )
+
+    # Determine if orientation-based tool0 checking is enabled.
     dual_frame_enabled = (
+        astar_collision_mode in {'dual', 'tool0_proxy'} and
         x_vals is not None and y_vals is not None and z_vals is not None and
         T_wrist3_tool0 is not None and start_orientation is not None and goal_orientation is not None
     )
@@ -411,6 +445,7 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
 
         stats_out.clear()
         stats_out['iterations'] = iterations
+        stats_out['collision_mode'] = astar_collision_mode
         stats_out['dual_frame_cache_enabled'] = int(dual_frame_enabled)
         if dual_frame_enabled:
             stats_out['dual_frame_cache_hits'] = int(dual_frame_cache_stats.get('hits', 0))
@@ -442,6 +477,7 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
             T_wrist3_tool0, slerp, start, max_dist_grid,
             dual_frame_validity_cache,
             dual_frame_cache_stats,
+            astar_collision_mode,
             cylinder_center_xy, cylinder_radius, cylinder_z_range
         ):
             # Skip if already explored
