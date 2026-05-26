@@ -101,7 +101,7 @@ class PlannerNode(Node):
         # 0 = mark only the collision cell itself
         # 1 = mark the 6 axis-aligned neighbors plus the center cell
         # 2+ = mark the full cubic neighborhood with radius = num_layers
-        self.declare_parameter('collision_avoidance_neighbor_layers', 0)
+        self.declare_parameter('collision_avoidance_neighbor_layers', 2)
         self.collision_avoidance_neighbor_layers = self.get_parameter('collision_avoidance_neighbor_layers').get_parameter_value().integer_value
 
         # Mode parameter: 'arm' or 'full' — both use the same static oriented box from mobile_base_geometry.yaml
@@ -2381,7 +2381,8 @@ class PlannerNode(Node):
         # Number of neighbor layers to mark around this collision cell
         # Boundary collisions use 0 layers (cell only), interior collisions use configured value
         collision_waypoints_to_avoid = {}
-        collision_waypoint_repeat_counts = {}
+        last_collision_batch_layers = {}
+        last_collision_batch_center_only_retry_used = False
         MAX_REPLANNING_ATTEMPTS = 350  # Increased to allow multiple boundary narrowings (each gets 15 attempts) + grid resets
         replanning_attempt = 0
         
@@ -2410,12 +2411,13 @@ class PlannerNode(Node):
         
         # Track grid reset attempts for stuck recovery
         grid_reset_attempts = 0
-        MAX_GRID_RESET_ATTEMPTS = 1  # Reduced since we have more iterations per reset
+        MAX_GRID_RESET_ATTEMPTS = 2  # Reduced since we have more iterations per reset
         
         # Track boundary pairs we've already tried with clean grids (to avoid pointless resets)
         # Set of tuples: (start_grid_idx, goal_grid_idx)
         tried_clean_boundaries = set()
         seen_replanning_states = set()
+        allow_repeated_replanning_state_once = False
         
         self._log_hot_loop_info(lambda: f"Starting replanning loop (max {MAX_REPLANNING_ATTEMPTS} attempts)...")
         # Main planning loop with replanning support
@@ -2638,15 +2640,21 @@ class PlannerNode(Node):
                 tuple(sorted((tuple(grid_idx), int(num_layers)) for grid_idx, num_layers in collision_waypoints_to_avoid.items())),
             )
             if replanning_state_signature in seen_replanning_states:
-                repeated_waypoint_samples = [grid_idx for grid_idx, _ in replanning_state_signature[2][:3]]
-                self._fail_current_goal(
-                    f"❌ Path planning repeated an identical replanning state before A* search\n"
-                    f"   Boundaries: {current_planning_start_grid} → {current_planning_goal_grid}\n"
-                    f"   Collision waypoints: {len(replanning_state_signature[2])} (sample: {repeated_waypoint_samples})\n"
-                    f"   The planner is about to rerun A* with the same inputs, so the result would repeat.\n"
-                    f"   Suggestion: Goal likely unreachable through this gap - try a different goal or robot starting pose."
-                )
-                return
+                if allow_repeated_replanning_state_once:
+                    self.get_logger().warn(
+                        "Allowing one repeated replanning state after collapsing the last collision batch to center-only."
+                    )
+                    allow_repeated_replanning_state_once = False
+                else:
+                    repeated_waypoint_samples = [grid_idx for grid_idx, _ in replanning_state_signature[2][:3]]
+                    self._fail_current_goal(
+                        f"❌ Path planning repeated an identical replanning state before A* search\n"
+                        f"   Boundaries: {current_planning_start_grid} → {current_planning_goal_grid}\n"
+                        f"   Collision waypoints: {len(replanning_state_signature[2])} (sample: {repeated_waypoint_samples})\n"
+                        f"   The planner is about to rerun A* with the same inputs, so the result would repeat.\n"
+                        f"   Suggestion: Goal likely unreachable through this gap - try a different goal or robot starting pose."
+                    )
+                    return
             seen_replanning_states.add(replanning_state_signature)
             
             # A* searches between current planning boundaries (initially full path, later narrowed gap)
@@ -2695,6 +2703,31 @@ class PlannerNode(Node):
                     )
             
             if not path:
+                expanded_last_batch_cells = [
+                    grid_idx
+                    for grid_idx, num_layers in last_collision_batch_layers.items()
+                    if num_layers > 0 and collision_waypoints_to_avoid.get(grid_idx, 0) > 0
+                ]
+                if expanded_last_batch_cells and not last_collision_batch_center_only_retry_used:
+                    for grid_idx in expanded_last_batch_cells:
+                        collision_waypoints_to_avoid[grid_idx] = 0
+                    last_collision_batch_center_only_retry_used = True
+                    allow_repeated_replanning_state_once = True
+                    self.get_logger().warn(
+                        f"No A* path after expanded collision marking for gap {current_planning_start_grid} → {current_planning_goal_grid}. "
+                        f"Retrying once with {len(expanded_last_batch_cells)} last-batch waypoint cell(s) forced to center-only."
+                    )
+                    self._maybe_log_wrist3_replanning_state(
+                        'center-only retry',
+                        current_planning_start_grid,
+                        current_planning_goal_grid,
+                        current_planning_start_pose,
+                        current_planning_goal_pose,
+                        retried_waypoint_cells=len(expanded_last_batch_cells),
+                        tracked_waypoint_cells=len(collision_waypoints_to_avoid),
+                    )
+                    continue
+
                 self.get_logger().warn(
                     "No path found by A* algorithm!\n"
                     f"  A* collision mode: {path_stats.get('collision_mode', self.astar_collision_mode)}\n"
@@ -3344,12 +3377,10 @@ class PlannerNode(Node):
                     # Add collision waypoints to avoid set with appropriate marking strategy
                     new_collision_waypoints = []
                     repeated_collision_waypoints = []
-                    escalated_collision_waypoints = []
+                    current_collision_batch_layers = {}
                     for wp_idx, is_free, _, grid_idx in waypoint_collision_status:
                         if not is_free and grid_idx is not None:
                             grid_tuple = tuple(grid_idx)
-                            repeat_count = collision_waypoint_repeat_counts.get(grid_tuple, 0) + 1
-                            collision_waypoint_repeat_counts[grid_tuple] = repeat_count
                             # Track if this is a new or repeated collision
                             if grid_tuple in collision_waypoints_to_avoid:
                                 repeated_collision_waypoints.append(grid_tuple)
@@ -3358,13 +3389,13 @@ class PlannerNode(Node):
                             
                             # Check if this is a boundary or interior collision waypoint
                             is_boundary = wp_idx in boundary_collision_indices
-                            # First-seen boundary collisions stay cell-only to preserve narrow passages.
-                            # If the same cell collides again, escalate it to the configured neighbor layers.
+                            # Boundary collisions always stay cell-only to preserve narrow passages.
                             num_layers = 0 if is_boundary else self.collision_avoidance_neighbor_layers
-                            if is_boundary and repeat_count > 1:
-                                num_layers = self.collision_avoidance_neighbor_layers
-                                escalated_collision_waypoints.append(grid_tuple)
                             collision_waypoints_to_avoid[grid_tuple] = num_layers
+                            current_collision_batch_layers[grid_tuple] = num_layers
+
+                    last_collision_batch_layers = current_collision_batch_layers
+                    last_collision_batch_center_only_retry_used = False
                     
                     self._log_hot_loop_info(lambda: (
                         f"Identified {len(collision_waypoint_indices)} collision waypoints: "
@@ -3378,13 +3409,6 @@ class PlannerNode(Node):
                             f"⚠️  {len(repeated_collision_waypoints)} waypoints are REPEATED collisions from previous iterations: {repeated_collision_waypoints}"
                             f"\n   → A* cannot find alternative paths - gap forces path through these waypoints!"
                         )
-
-                    if escalated_collision_waypoints:
-                        escalated_samples = list(dict.fromkeys(escalated_collision_waypoints))[:3]
-                        self._log_hot_loop_info(lambda: (
-                            f"Escalated {len(escalated_collision_waypoints)} repeated boundary collision waypoints "
-                            f"to {self.collision_avoidance_neighbor_layers} neighbor layer(s): {escalated_samples}"
-                        ))
 
                     self._maybe_log_wrist3_replanning_state(
                         'collision diagnostics',
