@@ -36,7 +36,10 @@ class MoveItPlannerNode(Node):
     BASE_FOOTPRINT_OBJECT_ID = 'mobile_base_footprint'
     PILZ_PIPELINE_ID = 'pilz_industrial_motion_planner'
     OMPL_PIPELINE_ID = 'move_group'
-    OMPL_POSE_PLANNER_ID = 'RRTConnectkConfigDefault'
+    # APS runs 2 parallel RRTConnect planners and continuously shortcutting the best
+    # path within the planning_time budget, producing far shorter trajectories than
+    # a single RRTConnect run while keeping the same collision-aware guarantees.
+    OMPL_POSE_PLANNER_ID = 'AnytimePathShorteningkConfigDefault'
 
     def __init__(self):
         super().__init__('moveit_planner_node')
@@ -65,7 +68,11 @@ class MoveItPlannerNode(Node):
         self.declare_parameter('orientation_tolerance', 0.02)
         self.declare_parameter('max_velocity_scaling', 0.1)
         self.declare_parameter('max_acceleration_scaling', 0.1)
-        self.declare_parameter('workspace_min_corner', [-1.6, -1.6, 0.0])
+        # z_min = -1.5 so OMPL can plan paths that pass below the arm mount.
+        # A UR10e mounted on a mobile base routinely sweeps through negative-z
+        # arm_base territory; clamping to 0.0 prevented the OMPL fallback planner
+        # from finding valid joint-space paths for many scan configurations.
+        self.declare_parameter('workspace_min_corner', [-1.6, -1.6, -1.5])
         self.declare_parameter('workspace_max_corner', [1.6, 1.6, 1.8])
         self.declare_parameter('enable_planning_scene_obstacles', True)
         self.declare_parameter('enable_wall_scene_sync', True)
@@ -158,7 +165,15 @@ class MoveItPlannerNode(Node):
         self.goal_queue = deque()
         self.current_goal_handle = None
         self.execution_complete = True
-        self.prev_status = True
+        # `execution_succeeded` drives the /execution_status topic: it is True only
+        # when the most recent MoveIt goal actually finished with SUCCESS.  This
+        # distinguishes "execution is finished" (which `execution_complete` tracks
+        # internally) from "execution succeeded" (what downstream consumers want).
+        # A failure leaves `execution_succeeded` False so /execution_status never
+        # transitions True for that goal; downstream listens to
+        # /planner/goal_failed for the failure signal.
+        self.execution_succeeded = False
+        self.prev_status = False
         self.emergency_stop = False
         self._wall_panels = []
         self._active_wall_object_ids = set()
@@ -178,6 +193,8 @@ class MoveItPlannerNode(Node):
         self.create_subscription(PoseStamped, '/arm/goal_pose_ompl', self.goal_ompl_callback, 10)
         self.create_subscription(JointState, '/arm/joint_goal', self.joint_goal_callback, 10)
         self.create_subscription(JointState, '/arm/joint_goal_ptp', self.joint_goal_ptp_callback, 10)
+        self.create_subscription(JointState, '/arm/joint_goal_aps', self.joint_goal_aps_callback, 10)
+        self.create_subscription(PoseStamped, '/arm/goal_pose_aps', self.goal_aps_callback, 10)
         self.create_subscription(JointState, 'joint_states', self.current_joint_state_callback, 10)
         self.create_subscription(JointState, '/joint_states', self.current_joint_state_callback, 10)
         self.create_subscription(JointState, '/arm/joint_states', self.current_joint_state_callback, 10)
@@ -246,6 +263,22 @@ class MoveItPlannerNode(Node):
             source_label='PTP joint',
         )
 
+    def joint_goal_aps_callback(self, msg: JointState):
+        self.enqueue_joint_goal(
+            msg,
+            pipeline_id=self.OMPL_PIPELINE_ID,
+            planner_id='AnytimePathShorteningkConfigDefault',
+            source_label='APS joint',
+        )
+
+    def goal_aps_callback(self, msg: PoseStamped):
+        self.enqueue_pose_goal(
+            msg,
+            pipeline_id=self.OMPL_PIPELINE_ID,
+            planner_id='AnytimePathShorteningkConfigDefault',
+            source_label='APS pose',
+        )
+
     def enqueue_pose_goal(
         self,
         msg: PoseStamped,
@@ -308,7 +341,7 @@ class MoveItPlannerNode(Node):
 
     def timer_callback(self):
         status_msg = Bool()
-        status_msg.data = self.execution_complete
+        status_msg.data = self.execution_succeeded
         if status_msg.data != self.prev_status:
             self.status_pub.publish(status_msg)
             self.prev_status = status_msg.data
@@ -370,6 +403,7 @@ class MoveItPlannerNode(Node):
     ):
 
         self.execution_complete = False
+        self.execution_succeeded = False
 
         goal_msg = MoveGroup.Goal()
         self.configure_request_planner(
@@ -379,7 +413,10 @@ class MoveItPlannerNode(Node):
             planner_id=planner_id,
         )
         goal_msg.request.group_name = self.group_name
-        goal_msg.request.num_planning_attempts = self.planning_attempts
+        # Pilz (LIN/PTP) is deterministic: retrying planning produces the same result.
+        # Only OMPL benefits from multiple attempts (different random seeds each time).
+        is_pilz = (goal_msg.request.pipeline_id == self.PILZ_PIPELINE_ID)
+        goal_msg.request.num_planning_attempts = 1 if is_pilz else self.planning_attempts
         goal_msg.request.allowed_planning_time = self.planning_time
         goal_msg.request.max_velocity_scaling_factor = self.max_velocity_scaling
         goal_msg.request.max_acceleration_scaling_factor = self.max_acceleration_scaling
@@ -397,8 +434,10 @@ class MoveItPlannerNode(Node):
 
         goal_msg.planning_options.plan_only = False
         goal_msg.planning_options.look_around = False
-        goal_msg.planning_options.replan = True
-        goal_msg.planning_options.replan_attempts = 3
+        # Pilz failures at planning time are deterministic — replanning won't change the
+        # outcome and only adds latency. OMPL benefits from replanning on execution failure.
+        goal_msg.planning_options.replan = not is_pilz
+        goal_msg.planning_options.replan_attempts = 0 if is_pilz else 3
         goal_msg.planning_options.replan_delay = 0.2
 
         self.goal_failed_pub.publish(Bool(data=False))
@@ -417,7 +456,18 @@ class MoveItPlannerNode(Node):
     ) -> bool:
         planner_name = (planner_id or '').strip().upper()
         pipeline_name = (pipeline_id or '').strip()
-        return planner_name == 'PTP' and pipeline_name == self.PILZ_PIPELINE_ID
+        # PTP needs a joint goal — resolve pose -> IK before sending to Pilz.
+        if planner_name == 'PTP' and pipeline_name == self.PILZ_PIPELINE_ID:
+            return True
+        # APS over OMPL: when the goal pose has tight orientation constraints,
+        # random IK sampling at the goal can find only colliding solutions and the
+        # planner fails with "Unable to sample valid states for goal tree".
+        # Seeded IK (started from the current joint state) picks a known-valid
+        # solution; planning then runs collision-aware in joint space.
+        if planner_name == 'ANYTIMEPATHSHORTENINGKCONFIGDEFAULT' \
+                and pipeline_name == self.OMPL_PIPELINE_ID:
+            return True
+        return False
 
     def try_seed_pose_goal_with_ik(
         self,
@@ -452,9 +502,11 @@ class MoveItPlannerNode(Node):
         request.ik_request.robot_state = robot_state
 
         self.execution_complete = False
+        self.execution_succeeded = False
         self.goal_failed_pub.publish(Bool(data=False))
         self.get_logger().info(
-            f"Resolving {source_label} pose goal to a seeded IK solution before Pilz PTP."
+            f"Resolving {source_label} pose goal to a seeded IK solution "
+            f"before joint-space planning."
         )
         future = self._compute_ik_client.call_async(request)
         future.add_done_callback(
@@ -521,7 +573,8 @@ class MoveItPlannerNode(Node):
             return
 
         self.get_logger().info(
-            f'Using seeded IK solution for {source_label} before Pilz PTP execution.'
+            f'Using seeded IK solution for {source_label}; '
+            f'forwarding as joint-space goal to the selected planner.'
         )
         self.send_move_group_joint_goal(
             joint_goal,
@@ -571,6 +624,7 @@ class MoveItPlannerNode(Node):
         source_label: str = 'default joint',
     ):
         self.execution_complete = False
+        self.execution_succeeded = False
 
         goal_msg = MoveGroup.Goal()
         self.configure_request_planner(
@@ -580,7 +634,8 @@ class MoveItPlannerNode(Node):
             planner_id=planner_id,
         )
         goal_msg.request.group_name = self.group_name
-        goal_msg.request.num_planning_attempts = self.planning_attempts
+        is_pilz = (goal_msg.request.pipeline_id == self.PILZ_PIPELINE_ID)
+        goal_msg.request.num_planning_attempts = 1 if is_pilz else self.planning_attempts
         goal_msg.request.allowed_planning_time = self.planning_time
         goal_msg.request.max_velocity_scaling_factor = self.max_velocity_scaling
         goal_msg.request.max_acceleration_scaling_factor = self.max_acceleration_scaling
@@ -588,8 +643,8 @@ class MoveItPlannerNode(Node):
 
         goal_msg.planning_options.plan_only = False
         goal_msg.planning_options.look_around = False
-        goal_msg.planning_options.replan = True
-        goal_msg.planning_options.replan_attempts = 3
+        goal_msg.planning_options.replan = not is_pilz
+        goal_msg.planning_options.replan_attempts = 0 if is_pilz else 3
         goal_msg.planning_options.replan_delay = 0.2
 
         self.goal_failed_pub.publish(Bool(data=False))
@@ -669,6 +724,7 @@ class MoveItPlannerNode(Node):
             self.get_logger().error('MoveIt goal was rejected.')
             self.current_goal_handle = None
             self.execution_complete = True
+            self.execution_succeeded = False
             self.goal_failed_pub.publish(Bool(data=True))
             return
 
@@ -682,6 +738,7 @@ class MoveItPlannerNode(Node):
             self.get_logger().error('MoveIt result future returned no result.')
             self.goal_failed_pub.publish(Bool(data=True))
             self.execution_complete = True
+            self.execution_succeeded = False
             self.current_goal_handle = None
             return
 
@@ -693,9 +750,28 @@ class MoveItPlannerNode(Node):
                 f'MoveIt execution succeeded in {moveit_result.planning_time:.3f}s planning time.'
             )
             self.goal_failed_pub.publish(Bool(data=False))
+            self.execution_succeeded = True
         else:
-            self.get_logger().error(f'MoveIt execution failed with error code {error_code}.')
+            # Dump the current joint state on failure so we can tell whether the
+            # planner failed because the START state is invalid (planning_time
+            # increase won't help) or because the PATH is just hard to find
+            # (more time would help).
+            current_js_str = "unavailable"
+            if self._current_joint_state is not None:
+                pairs = []
+                for n, p in zip(
+                    self._current_joint_state.name,
+                    self._current_joint_state.position,
+                ):
+                    if n in self.arm_joint_names:
+                        pairs.append(f"{n}={p:.3f}")
+                current_js_str = ", ".join(pairs) if pairs else "no arm joints"
+            self.get_logger().error(
+                f'MoveIt execution failed with error code {error_code}. '
+                f'Current joint state at failure: [{current_js_str}].'
+            )
             self.goal_failed_pub.publish(Bool(data=True))
+            self.execution_succeeded = False
 
         self.execution_complete = True
         self.current_goal_handle = None
@@ -712,6 +788,7 @@ class MoveItPlannerNode(Node):
     def cancel_done_callback(self, future):
         del future
         self.execution_complete = True
+        self.execution_succeeded = False
         self.current_goal_handle = None
         self.goal_failed_pub.publish(Bool(data=True))
         self.get_logger().warn('MoveIt goal cancel request sent.')

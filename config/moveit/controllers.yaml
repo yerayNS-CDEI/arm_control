@@ -1,11 +1,24 @@
 controller_names:
+  - passthrough_trajectory_controller
   - scaled_joint_trajectory_controller
   - joint_trajectory_controller
+
+passthrough_trajectory_controller:
+  action_ns: follow_joint_trajectory
+  type: FollowJointTrajectory
+  default: true
+  joints:
+    - arm_shoulder_pan_joint
+    - arm_shoulder_lift_joint
+    - arm_elbow_joint
+    - arm_wrist_1_joint
+    - arm_wrist_2_joint
+    - arm_wrist_3_joint
 
 scaled_joint_trajectory_controller:
   action_ns: follow_joint_trajectory
   type: FollowJointTrajectory
-  default: true
+  default: false
   joints:
     - arm_shoulder_pan_joint
     - arm_shoulder_lift_joint

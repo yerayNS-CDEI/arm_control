@@ -194,7 +194,8 @@ def launch_setup(context, *args, **kwargs):
             "simulation:=",
             base_simulation,  # Inverted back for base (true when parent was true)
             " ",
-            "use_mock_hardware:=false",
+            "use_mock_hardware:=",
+            use_fake_hardware,
             " ",
             "sim_gazebo:=false",  # Arm never in Gazebo Classic
             " ",
@@ -532,7 +533,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "initial_joint_controller",
-            default_value="joint_trajectory_controller",
+            default_value="passthrough_trajectory_controller",
             choices=[
                 "scaled_joint_trajectory_controller",
                 "joint_trajectory_controller",
@@ -542,7 +543,7 @@ def generate_launch_description():
                 "passthrough_trajectory_controller",
             ],
             description=(
-                "Initially loaded robot controller. Defaults to joint_trajectory_controller "
+                "Initially loaded robot controller. Defaults to passthrough_trajectory_controller "
                 "because scaled_joint_trajectory_controller is currently crashing on the "
                 "real-robot Humble path."
             ),
@@ -637,7 +638,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "reverse_ip",
-            default_value="192.168.1.50",
+            default_value="0.0.0.0",
             description="IP that will be used for the robot controller to communicate back to the driver.",
         )
     )

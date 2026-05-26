@@ -15,6 +15,19 @@ from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
+def launch_ee_jacobian_node(context, *args, **kwargs):
+    simulation = context.launch_configurations.get('sim', 'false')
+    hybrid_sim  = context.launch_configurations.get('hybrid_sim', 'false')
+    # use_sim_time=True only in pure simulation (sim=true, hybrid_sim=false)
+    use_sim_time = not (simulation == 'false' or hybrid_sim == 'true')
+    return [Node(
+        package='arm_control',
+        executable='ee_jacobian_node',
+        output='screen',
+        parameters=[{'use_sim_time': use_sim_time, 'publish_rate': 50.0}],
+    )]
+
+
 def launch_moveit_planner_node(context, *args, **kwargs):
     """Evaluate substitutions at launch time to set moveit_planner_node parameters."""
     moveit_mode = context.launch_configurations.get('moveit_mode', 'auto')
@@ -70,12 +83,35 @@ def launch_moveit_planner_node(context, *args, **kwargs):
                 'joint_planner_id': moveit_joint_planner_id,
                 'enable_wall_scene_sync': wall_scene_sync,
                 'enable_base_collision': enable_base_collision,
+                # Increased from 5.0s: OMPL and APS need more time for
+                # obstacle-dense scenes (folding, under, approach).
+                # Pilz LIN/PTP always completes in <1s so extra time is free.
+                'planning_time': 10.0,
+                # More attempts before giving up; each attempt is a new
+                # random seed so coverage improves with count.
+                'planning_attempts': 10,
+                # Tolerances: 3mm position, 0.05 rad orientation.
+                # Tighter than default is fine since LMA IK is more precise.
+                'position_tolerance': 0.003,
+                'orientation_tolerance': 0.05,
             }
         ],
     )
     
     return [moveit_planner_node]
 
+def _resolve_controller_names(context, *args, **kwargs):
+    cfg = context.launch_configurations
+    sim_v = cfg.get('sim', 'false').strip().lower()
+    hybrid_v = cfg.get('hybrid_sim', 'false').strip().lower()
+    pb = cfg.get('planner_backend', 'legacy').strip()
+    mcn = cfg.get('moveit_controller_name', 'passthrough_trajectory_controller').strip()
+    is_pure_gazebo = (sim_v == 'true' and hybrid_v != 'true')
+    effective = 'joint_trajectory_controller' if is_pure_gazebo else mcn
+    jct = effective if pb == 'moveit' else 'joint_trajectory_controller'
+    cfg['_arm_initial_joint_controller'] = jct
+    cfg['_arm_default_trajectory_controller'] = effective
+    return []
 
 def generate_launch_description():
     ur_pkg = FindPackageShare('arm_control')
@@ -181,13 +217,18 @@ def generate_launch_description():
     )
     moveit_controller_name_arg = DeclareLaunchArgument(
         'moveit_controller_name',
-        default_value='joint_trajectory_controller',
+        default_value='passthrough_trajectory_controller',
         description=(
             'Trajectory controller used by the MoveIt/real-robot path. '
-            'Defaults to joint_trajectory_controller because scaled_joint_trajectory_controller '
+            'Defaults to passthrough_trajectory_controller (streams trajectories to the '
+            'UR onboard executor, respects speed-scaling). scaled_joint_trajectory_controller '
             'is currently crashing in the Humble UR driver on the real robot.'
         ),
-        choices=['joint_trajectory_controller', 'scaled_joint_trajectory_controller'],
+        choices=[
+            'passthrough_trajectory_controller',
+            'joint_trajectory_controller',
+            'scaled_joint_trajectory_controller',
+        ],
     )
     controllers_file_arg = DeclareLaunchArgument(
         'controllers_file',
@@ -215,7 +256,11 @@ def generate_launch_description():
         default_value='false',
         description='Enable wall-marker collision sync into MoveIt PlanningScene',
     )
-
+    enable_octomap_arg = DeclareLaunchArgument(
+        'enable_octomap',
+        default_value='true',
+        description='Enable LiDAR pointcloud OctoMap integration in MoveIt (mode:=full only)',
+    )
     robot_ip = LaunchConfiguration('robot_ip')
     use_fake_hardware = LaunchConfiguration('use_fake_hardware')
     tf_prefix = LaunchConfiguration('tf_prefix')
@@ -240,15 +285,13 @@ def generate_launch_description():
         ["'false' if '", planner_backend, "' == 'moveit' else '", launch_rviz, "'"]
     )
 
-    joint_controller_type = PythonExpression(
-        [
-            "'",
-            moveit_controller_name,
-            "' if '",
-            planner_backend,
-            "' == 'moveit' else 'joint_trajectory_controller'",
-        ]
-    )
+    # In pure Gazebo (sim=true and hybrid_sim=false) the arm runs through
+    # gz_ros2_control, which doesn't provide the UR-specific passthrough
+    # command interfaces — PTC/SJTC can't load there. Force JTC in that path.
+    effective_moveit_controller_name = LaunchConfiguration('_arm_default_trajectory_controller')
+    joint_controller_type = LaunchConfiguration('_arm_initial_joint_controller')
+    
+    
     # Determine the effective mode for MoveIt (used for moveit_include launch args)
     # - If moveit_mode is explicitly set (!= 'auto'), use it
     # - Otherwise, fall back to the general mode parameter
@@ -329,8 +372,11 @@ def generate_launch_description():
                 output='screen',
                 parameters=[{'planner_backend': planner_backend}],
             ),
+            OpaqueFunction(function=launch_ee_jacobian_node)
         ]
     )
+
+    enable_octomap = LaunchConfiguration('enable_octomap')
 
     moveit_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(moveit_launch),
@@ -344,7 +390,9 @@ def generate_launch_description():
             'launch_rviz': launch_rviz,
             'rviz_config_file': rviz_config_file,
             'joint_states_topic': moveit_joint_states_topic,
-            'default_trajectory_controller': moveit_controller_name,
+            'default_trajectory_controller': effective_moveit_controller_name,
+            'enable_octomap': enable_octomap,
+            'sim': simulation,
         }.items(),
         condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'moveit'"])),
     )
@@ -376,6 +424,8 @@ def generate_launch_description():
             namespace_arm_arg,
             planner_backend_arg,
             enable_wall_scene_sync_arg,
+            enable_octomap_arg,
+            OpaqueFunction(function=_resolve_controller_names),
             arm_group,
             moveit_include,
             moveit_planner_node_opaque,
