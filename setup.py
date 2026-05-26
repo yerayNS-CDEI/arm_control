@@ -42,7 +42,7 @@ setup(
             'base_placement_node = planner.base_placement_node:main',
             'planner_node = planner.planner_node:main',
             'moveit_planner_node = planner.moveit_planner_node:main',
-            'visualize_wall_discretization_client = planner.visualize_wall_discretization_client:main',
+'visualize_wall_discretization_client = planner.visualize_wall_discretization_client:main',
             'wall_discretization_node = planner.wall_discretization_node:main',
             'optimal_base_service = planner.optimal_base_service:main',
             

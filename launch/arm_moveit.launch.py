@@ -26,8 +26,11 @@ def launch_setup(context, *args, **kwargs):
     )
     kinematics_params_file = LaunchConfiguration("kinematics_params_file")
     warehouse_sqlite_path = LaunchConfiguration("warehouse_sqlite_path")
+    enable_octomap = LaunchConfiguration("enable_octomap")
+    sim = LaunchConfiguration("sim")
 
     mode_value = context.perform_substitution(mode).strip().lower()
+    sim_value = context.perform_substitution(sim).strip().lower()
     arm_namespace_value = context.perform_substitution(namespace_arm).strip().strip("/")
     controller_namespace = f"/{arm_namespace_value}" if arm_namespace_value else ""
     joint_states_topic = context.perform_substitution(joint_states_topic_override).strip()
@@ -119,7 +122,7 @@ def launch_setup(context, *args, **kwargs):
     if mode_value == "arm":
         robot_description_command.extend(["name:=ur", " "])
     else:
-        robot_description_command.extend(["simulation:=false", " "])
+        robot_description_command.extend(["simulation:=", sim, " "])
 
     robot_description_content = Command(robot_description_command)
     robot_description = {
@@ -222,6 +225,17 @@ def launch_setup(context, *args, **kwargs):
         "trajectory_execution.execution_duration_monitoring": False,
     }
 
+    # OctoMap / LiDAR pointcloud integration (optional, only in full mode)
+    enable_octomap_value = context.perform_substitution(enable_octomap).strip().lower() == 'true'
+    octomap_parameters = {}
+    if mode_value == "full" and enable_octomap_value:
+        sensors_3d_yaml = load_yaml("arm_control", os.path.join("config", "moveit", "sensors_3d.yaml"))
+        octomap_parameters = {
+            "octomap_frame": "odom",
+            "octomap_resolution": 0.05,
+        }
+        octomap_parameters.update(sensors_3d_yaml)
+
     planning_scene_monitor_parameters = {
         "publish_planning_scene": True,
         "publish_geometry_updates": True,
@@ -249,6 +263,7 @@ def launch_setup(context, *args, **kwargs):
         planning_scene_monitor_parameters,
         {"use_sim_time": use_sim_time},
         warehouse_ros_config,
+        octomap_parameters,
     ]
 
     move_group_node = Node(
@@ -301,9 +316,13 @@ def generate_launch_description():
             DeclareLaunchArgument("joint_states_topic", default_value=""),
             DeclareLaunchArgument(
                 "default_trajectory_controller",
-                default_value="joint_trajectory_controller",
+                default_value="passthrough_trajectory_controller",
                 description="MoveIt FollowJointTrajectory controller to prefer for execution.",
-                choices=["joint_trajectory_controller", "scaled_joint_trajectory_controller"],
+                choices=[
+                    "passthrough_trajectory_controller",
+                    "scaled_joint_trajectory_controller",
+                    "joint_trajectory_controller",
+                ],
             ),
             DeclareLaunchArgument(
                 "rviz_config_file",
@@ -324,6 +343,16 @@ def generate_launch_description():
                 default_value=PathJoinSubstitution(
                     [FindPackageShare("arm_control"), "config", "my_robot_calibration.yaml"]
                 ),
+            ),
+            DeclareLaunchArgument(
+                "enable_octomap",
+                default_value="true",
+                description="Enable LiDAR pointcloud OctoMap integration in MoveIt (mode:=full only)",
+            ),
+            DeclareLaunchArgument(
+                "sim",
+                default_value="false",
+                description="Whether the robot is running in Gazebo simulation (controls URDF hardware plugins)",
             ),
             OpaqueFunction(function=launch_setup),
         ]
