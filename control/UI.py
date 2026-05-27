@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+import html
+import json
 import sys
 import os
+import shlex
 import subprocess
 import signal
 import socket
@@ -10,8 +13,8 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from PyQt5.QtWidgets import *
-from PyQt5.QtCore import QTimer, QProcess
-from PyQt5.QtGui import QIcon
+from PyQt5.QtCore import QTimer, QProcess, Qt
+from PyQt5.QtGui import QFontMetrics, QIcon, QPixmap, QPalette, QColor, QIntValidator
 from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
@@ -24,9 +27,44 @@ from ur_msgs.msg import IOStates
 from ur_msgs.srv import SetIO
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
+def _detect_system_dark():
+    """Return True if the GNOME/Ubuntu system colour-scheme is set to dark."""
+    try:
+        out = subprocess.run(
+            ['gsettings', 'get', 'org.gnome.desktop.interface', 'color-scheme'],
+            capture_output=True, text=True, timeout=2
+        ).stdout
+        return 'dark' in out.lower()
+    except Exception:
+        return False
+
+def _make_dark_palette():
+    p = QPalette()
+    c = QColor
+    p.setColor(QPalette.Window,          c('#1c2128'))
+    p.setColor(QPalette.WindowText,      c('#cdd9e5'))
+    p.setColor(QPalette.Base,            c('#2d333b'))
+    p.setColor(QPalette.AlternateBase,   c('#22272e'))
+    p.setColor(QPalette.ToolTipBase,     c('#2d333b'))
+    p.setColor(QPalette.ToolTipText,     c('#cdd9e5'))
+    p.setColor(QPalette.Text,            c('#cdd9e5'))
+    p.setColor(QPalette.Button,          c('#2d333b'))
+    p.setColor(QPalette.ButtonText,      c('#cdd9e5'))
+    p.setColor(QPalette.BrightText,      c('#ffffff'))
+    p.setColor(QPalette.Link,            c('#539bf5'))
+    p.setColor(QPalette.Highlight,       c('#1f6feb'))
+    p.setColor(QPalette.HighlightedText, c('#ffffff'))
+    p.setColor(QPalette.Disabled, QPalette.WindowText, c('#768390'))
+    p.setColor(QPalette.Disabled, QPalette.Text,       c('#768390'))
+    p.setColor(QPalette.Disabled, QPalette.ButtonText, c('#768390'))
+    p.setColor(QPalette.Disabled, QPalette.Base,       c('#22272e'))
+    p.setColor(QPalette.Disabled, QPalette.Button,     c('#22272e'))
+    return p
+
 class RobotControlUI(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._dark_theme = _detect_system_dark()
  
         # Initialize ROS only if not already initialized
         if not rclpy.ok():
@@ -41,9 +79,39 @@ class RobotControlUI(QMainWindow):
  
         self.node = rclpy.create_node('robot_control_ui')
         self.goal_publisher = self.node.create_publisher(Pose, '/arm/goal_pose', 10)
-        self.emergency_stop_publisher = self.node.create_publisher(Bool, '/arm/emergency_stop', qos)
+        self.emergency_stop_publisher = self.node.create_publisher(Bool, '/emergency_stop', qos)
         self.distance_sensor_publisher = self.node.create_publisher(Float32MultiArray, '/arm/distance_sensors', 10)
-        self.emergency_stop_subscriber = self.node.create_subscription(Bool, '/arm/emergency_stop', self._on_emergency_stop_state, qos)
+        self.emergency_stop_subscriber = self.node.create_subscription(Bool, '/emergency_stop', self._on_emergency_stop_state, qos)
+        # Persistent publishers for emergency stop topics (keyed by topic name), created on demand
+        self._emergency_stop_publishers = {}
+        self.arm_joint_names = [
+            'arm_shoulder_pan_joint',
+            'arm_shoulder_lift_joint',
+            'arm_elbow_joint',
+            'arm_wrist_1_joint',
+            'arm_wrist_2_joint',
+            'arm_wrist_3_joint',
+        ]
+        self.arm_joint_limits = {
+            'arm_shoulder_pan_joint': (-6.28, 6.28),
+            'arm_shoulder_lift_joint': (-6.28, 6.28),
+            'arm_elbow_joint': (-6.28, 6.28),
+            'arm_wrist_1_joint': (-6.28, 6.28),
+            'arm_wrist_2_joint': (-6.28, 6.28),
+            'arm_wrist_3_joint': (-6.28, 6.28),
+        }
+        self.joint_state_subscriber = self.node.create_subscription(
+            JointState,
+            '/joint_states',
+            lambda msg: self._on_joint_states(msg, '/joint_states'),
+            10,
+        )
+        self.arm_joint_state_subscriber = self.node.create_subscription(
+            JointState,
+            '/arm/joint_states',
+            lambda msg: self._on_joint_states(msg, '/arm/joint_states'),
+            10,
+        )
  
         # Track processes and their associated buttons
         self.process_map = {}
@@ -52,13 +120,31 @@ class RobotControlUI(QMainWindow):
         # Store cleared status text for restore functionality
         self.cleared_status_backup = None
         self.base_cleared_status_backup = None
+        self.gpr_cleared_status_backup = None
+        self.fsm_cleared_status_backup = None
+
+        # FSM processes
+        self.fsm_launch_process = None
+        self.fsm_node_process = None
+
+        # FSM log buffer (html, plain_text, add_newline) for filter rebuilds
+        self.fsm_log_entries = []
+        self.fsm_log_backup = []
+        
+        # Store process list for kill functionality
+        self.current_process_list = []
+        self.ps_output_accumulator = ""
         
         # Emergency stop UI state
         self.emergency_stop_active = False
+        self.freedrive_active = False
+        self.freedrive_transition_in_progress = False
+        self.freedrive_transition_target_active = False
+        self.freedrive_trajectory_controller = None
  
         # Robot dashboard connection
         self.robot_socket = None
-        self.robot_host = '192.168.1.102'
+        self.robot_host = '192.168.56.101'
         self.robot_port = 29999
  
         # Action client for canceling trajectory goals
@@ -89,11 +175,27 @@ class RobotControlUI(QMainWindow):
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
  
+        # Theme toggle button
+        theme_bar = QHBoxLayout()
+        theme_bar.addStretch()
+        self.btn_theme_toggle = QPushButton("☀ Light Theme")
+        self.btn_theme_toggle.setFixedWidth(120)
+        self.btn_theme_toggle.clicked.connect(self._toggle_theme)
+        theme_bar.addWidget(self.btn_theme_toggle)
+        main_layout.addLayout(theme_bar)
+
         # Create tab widget for Arm Control and Base Control
         tabs = QTabWidget()
         main_layout.addWidget(tabs)
 
         self.tabs = tabs
+        self.gpr_request_groups = self._build_gpr_request_groups()
+        self.gpr_group_combos = {}
+        self.gpr_request_processes = {}
+        # Generic per-widget log buffers and filter inputs
+        self.tab_log_entries: dict = {}   # id(widget) -> list of (html, plain_text, add_newline)
+        self.tab_log_backups: dict = {}   # id(widget) -> backup list for clear/restore
+        self.tab_filter_inputs: dict = {} # id(widget) -> QLineEdit
         # ===== ARM CONTROL TAB =====
         arm_tab = QWidget()
         arm_tab_layout = QVBoxLayout(arm_tab)
@@ -104,7 +206,41 @@ class RobotControlUI(QMainWindow):
         self.arm_sim_mode_combo = QComboBox()
         self.arm_sim_mode_combo.addItems(['false', 'true'])
         self.arm_sim_mode_combo.currentTextChanged.connect(self._update_init_box_state)
+        self.arm_sim_mode_combo.currentTextChanged.connect(self._update_headless_visibility)
+        self.arm_sim_mode_combo.currentTextChanged.connect(self._update_arm_planner_constraints)
         arm_sim_param_layout.addWidget(self.arm_sim_mode_combo)
+        arm_sim_param_layout.addWidget(QLabel("Planner Backend:"))
+        self.arm_planner_backend_combo = QComboBox()
+        self.arm_planner_backend_combo.addItems(['moveit', 'legacy'])
+        self.arm_planner_backend_combo.setCurrentText('legacy')
+        self.arm_planner_backend_combo.currentTextChanged.connect(self._update_arm_planner_constraints)
+        arm_sim_param_layout.addWidget(self.arm_planner_backend_combo)
+        self.arm_moveit_pipeline_label = QLabel("MoveIt Pipeline:")
+        arm_sim_param_layout.addWidget(self.arm_moveit_pipeline_label)
+        self.arm_moveit_pipeline_combo = QComboBox()
+        self.arm_moveit_pipeline_combo.addItems(['pilz_industrial_motion_planner', 'move_group'])
+        self.arm_moveit_pipeline_combo.setCurrentText('pilz_industrial_motion_planner')
+        self.arm_moveit_pipeline_combo.currentTextChanged.connect(
+            self._update_moveit_option_visibility
+        )
+        arm_sim_param_layout.addWidget(self.arm_moveit_pipeline_combo)
+        self.arm_moveit_planner_id_label = QLabel("Planner ID:")
+        arm_sim_param_layout.addWidget(self.arm_moveit_planner_id_label)
+        self.arm_moveit_planner_id_combo = QComboBox()
+        self.arm_moveit_planner_id_combo.addItems(['PTP', 'LIN'])
+        self.arm_moveit_planner_id_combo.setCurrentText('PTP')
+        arm_sim_param_layout.addWidget(self.arm_moveit_planner_id_combo)
+        self.arm_hybrid_sim_label = QLabel("URsim:")
+        arm_sim_param_layout.addWidget(self.arm_hybrid_sim_label)
+        self.arm_hybrid_sim_combo = QComboBox()
+        self.arm_hybrid_sim_combo.addItems(['false', 'true'])
+        self.arm_hybrid_sim_combo.setCurrentText('true')
+        self.arm_hybrid_sim_combo.currentTextChanged.connect(self._update_init_box_state)
+        self.arm_hybrid_sim_combo.currentTextChanged.connect(self._update_arm_planner_constraints)
+        arm_sim_param_layout.addWidget(self.arm_hybrid_sim_combo)
+        self.arm_moveit_status_label = QLabel("")
+        self.arm_moveit_status_label.setStyleSheet("color: #0066cc; font-style: italic;")
+        arm_sim_param_layout.addWidget(self.arm_moveit_status_label)
         arm_sim_param_layout.addStretch()
         arm_tab_layout.addLayout(arm_sim_param_layout)
         
@@ -121,7 +257,7 @@ class RobotControlUI(QMainWindow):
         control_layout.addWidget(QLabel("System Control:"))
         self.btn_general_launch = QPushButton("Start Arm")
         self.btn_general_launch.clicked.connect(self.toggle_arm_launch)
-        self.btn_general_launch.setToolTip("ros2 launch arm_control arm.launch.py sim:=<mode> robot_ip:=192.168.1.102 mode:=arm")
+        self.btn_general_launch.setToolTip("robot_ip=192.168.56.101 when URsim=true, else 192.168.1.102")
         control_layout.addWidget(self.btn_general_launch)
  
         # RQT Joint Controller button
@@ -133,20 +269,31 @@ class RobotControlUI(QMainWindow):
         # Dropdown for position selection
         control_layout.addWidget(QLabel("Select Position:"))
         position_sender_layout = QHBoxLayout()
+        self.position_names = [
+            'custom', 'folded', 'unfolded', 'up', 'down', 'front',
+            'left', 'right', 'one', 'two', 'three', 'four', 'five',
+            'six', 'p1', 'initial', 'under', 'under1', 'under2'
+        ]
         self.position_dropdown = QComboBox()
-        self.position_dropdown.addItems(['custom', 'folded', 'unfolded', 'up', 'down', 'front', 'list'])
+        self.position_dropdown.addItems(self.position_names)
         position_sender_layout.addWidget(self.position_dropdown)
  
         btn_send_position = QPushButton("Send Position")
         btn_send_position.clicked.connect(self.send_position_command)
-        btn_send_position.setToolTip("ros2 run arm_control position_sender_node --ros-args -r __ns:=/arm -- <position>")
+        btn_send_position.setToolTip("Uses /send_position for the Arm Control launch")
         position_sender_layout.addWidget(btn_send_position)
         control_layout.addLayout(position_sender_layout)
+ 
+        # Reset Planner button
+        self.btn_arm_reset_planner = QPushButton("Reset Planner")
+        self.btn_arm_reset_planner.clicked.connect(self.reset_planner_arm)
+        self.btn_arm_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
+        control_layout.addWidget(self.btn_arm_reset_planner)
  
         # List Controllers button
         btn_list_controllers = QPushButton("List Controllers")
         btn_list_controllers.clicked.connect(self.list_controllers)
-        btn_list_controllers.setToolTip("ros2 control list_controllers -c /arm/controller_manager")
+        btn_list_controllers.setToolTip("List controllers for all detected controller_manager nodes")
         control_layout.addWidget(btn_list_controllers)
  
         # Emergency stop button
@@ -155,8 +302,8 @@ class RobotControlUI(QMainWindow):
         self.btn_emergency_stop = QPushButton("EMERGENCY STOP (Click to Activate)")
         self.btn_emergency_stop.setCheckable(True)
         self.btn_emergency_stop.setStyleSheet("background-color: red; color: white; font-weight: bold;")
-        self.btn_emergency_stop.clicked.connect(self.emergency_stop)
-        self.btn_emergency_stop.setToolTip("Toggle emergency stop on /arm/emergency_stop and cancel trajectory goals when activating")
+        self.btn_emergency_stop.clicked.connect(lambda: self.emergency_stop(context='arm'))
+        self.btn_emergency_stop.setToolTip("Toggle emergency stop on /emergency_stop and cancel trajectory goals when activating")
         goal_layout.addWidget(self.btn_emergency_stop)
         control_layout.addLayout(goal_layout)
  
@@ -168,27 +315,13 @@ class RobotControlUI(QMainWindow):
         init_box.setLayout(init_layout)
         self.init_box = init_box
         # Status Commands
-        init_layout.addWidget(QLabel("Status Commands:"))
-        self.status_cmd_combo = QComboBox()
-        self.status_cmd_combo.addItems([
-            'robotmode',
-            'safetystatus',
-            'programState',
-            'running',
-            'get loaded program',
-            'is in remote control'
-        ])
-        init_layout.addWidget(self.status_cmd_combo)
- 
-        btn_send_status = QPushButton("Send Status Command")
-        btn_send_status.clicked.connect(self.send_status_command)
-        init_layout.addWidget(btn_send_status)
-        
         btn_send_all_status = QPushButton("Send All Status Commands")
-        btn_send_all_status.clicked.connect(self.send_all_status_commands)
+        btn_send_all_status.clicked.connect(lambda: self.send_all_status_commands())
         btn_send_all_status.setToolTip("Send all status commands sequentially: robotmode, safetystatus, programState, running, get loaded program, is in remote control")
         init_layout.addWidget(btn_send_all_status)
- 
+
+        self.arm_status_indicators = self._build_status_indicators(init_layout)
+
         # Control Commands
         init_layout.addWidget(QLabel("\nControl Commands:"))
         self.control_cmd_combo = QComboBox()
@@ -207,10 +340,19 @@ class RobotControlUI(QMainWindow):
             'unlock protective stop'
         ])
         init_layout.addWidget(self.control_cmd_combo)
- 
+
         btn_send_control = QPushButton("Send Control Command")
-        btn_send_control.clicked.connect(self.send_control_command)
+        btn_send_control.clicked.connect(lambda: self.send_control_command())
         init_layout.addWidget(btn_send_control)
+
+        init_layout.addWidget(QLabel("Freedrive Mode:"))
+        self.btn_arm_freedrive = QPushButton("Start Freedrive")
+        self.btn_arm_freedrive.clicked.connect(lambda: self.toggle_freedrive(context='arm'))
+        self.btn_arm_freedrive.setToolTip(
+            "Start freedrive with controller switch + keepalive publisher. "
+            "Click again to stop freedrive and restore joint_trajectory_controller."
+        )
+        init_layout.addWidget(self.btn_arm_freedrive)
  
         init_layout.addStretch()
         boxes_layout.addWidget(init_box)
@@ -238,12 +380,42 @@ class RobotControlUI(QMainWindow):
         sensors_layout.addStretch()
         boxes_layout.addWidget(sensors_box)
  
-        # Terminal and Status for Arm Control tab (side by side)
+        # Live Joint Monitor and Status for Arm Control tab (side by side)
         arm_terminal_status_layout = QHBoxLayout()
-        
-        # Left side: Terminal
-        self.arm_terminal = QTermWidget()
-        arm_terminal_status_layout.addWidget(self.arm_terminal)
+
+        # Left side: Live joint position monitor (read-only)
+        arm_joint_monitor = QGroupBox("Live Arm Joint Positions (rad)")
+        arm_joint_monitor_layout = QVBoxLayout()
+        arm_joint_monitor.setLayout(arm_joint_monitor_layout)
+        self.arm_control_joint_sliders = []
+        self.arm_control_joint_value_labels = []
+
+        for joint_name in self.arm_joint_names:
+            joint_row = QHBoxLayout()
+
+            label = QLabel(f"{joint_name}:")
+            label.setMinimumWidth(150)
+            joint_row.addWidget(label)
+
+            min_limit, max_limit = self.arm_joint_limits[joint_name]
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(int(min_limit * 100), int(max_limit * 100))
+            slider.setValue(0)
+            slider.setTickPosition(QSlider.TicksBelow)
+            slider.setTickInterval(100)
+            slider.setEnabled(False)
+            joint_row.addWidget(slider)
+
+            value_label = QLabel("0.000 rad")
+            value_label.setMinimumWidth(95)
+            joint_row.addWidget(value_label)
+
+            self.arm_control_joint_sliders.append(slider)
+            self.arm_control_joint_value_labels.append(value_label)
+            arm_joint_monitor_layout.addLayout(joint_row)
+
+        arm_joint_monitor_layout.addStretch()
+        arm_terminal_status_layout.addWidget(arm_joint_monitor)
         
         # Right side: Status display
         self.status_text = QTextEdit()
@@ -259,28 +431,17 @@ class RobotControlUI(QMainWindow):
         arm_terminal_status_layout.addWidget(self.status_text)
 
         status_header = QHBoxLayout()
-        status_header.addWidget(QLabel("sudo apt install libqtermwidget5-0-dev qtermwidget5-data"))
+        status_header.addWidget(QLabel("Arm Control - Live Joints + Status"))
         status_header.addStretch()
 
-        # Search bar
-        status_header.addWidget(QLabel("Search:"))
+        # Filter bar
+        status_header.addWidget(QLabel("Filter:"))
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Enter search term...")
-        self.search_input.setMaximumWidth(150)
-        self.search_input.returnPressed.connect(lambda: self.search_status(forward=True))
+        self.search_input.setPlaceholderText("Filter output lines...")
+        self.search_input.setMaximumWidth(200)
+        self.search_input.textChanged.connect(lambda: self._log_apply_filter(self.status_text))
         status_header.addWidget(self.search_input)
-
-        btn_search_prev = QPushButton("◀")
-        btn_search_prev.clicked.connect(lambda: self.search_status(forward=False))
-        btn_search_prev.setMaximumWidth(40)
-        btn_search_prev.setToolTip("Find previous")
-        status_header.addWidget(btn_search_prev)
-
-        btn_search_next = QPushButton("▶")
-        btn_search_next.clicked.connect(lambda: self.search_status(forward=True))
-        btn_search_next.setMaximumWidth(40)
-        btn_search_next.setToolTip("Find next")
-        status_header.addWidget(btn_search_next)
+        self.tab_filter_inputs[id(self.status_text)] = self.search_input
 
         self.btn_restore_status = QPushButton("Restore")
         self.btn_restore_status.clicked.connect(self.restore_status)
@@ -309,7 +470,18 @@ class RobotControlUI(QMainWindow):
         sim_param_layout.addWidget(QLabel("Simulation Mode:"))
         self.sim_mode_combo = QComboBox()
         self.sim_mode_combo.addItems(['false', 'true'])
+        self.sim_mode_combo.currentTextChanged.connect(self._update_headless_visibility)
         sim_param_layout.addWidget(self.sim_mode_combo)
+        sim_param_layout.addWidget(QLabel("Controller Type:"))
+        self.controller_type_combo = QComboBox()
+        self.controller_type_combo.addItems(['omni', 'diff'])
+        sim_param_layout.addWidget(self.controller_type_combo)
+        self.base_headless_label = QLabel("Headless:")
+        self.base_headless_combo = QComboBox()
+        self.base_headless_combo.addItems(['false', 'true'])
+        self.base_headless_combo.setCurrentText('true')
+        sim_param_layout.addWidget(self.base_headless_label)
+        sim_param_layout.addWidget(self.base_headless_combo)
         sim_param_layout.addStretch()
         base_tab_layout.insertLayout(0, sim_param_layout)
  
@@ -317,17 +489,27 @@ class RobotControlUI(QMainWindow):
         mapping_loc_box = QGroupBox("Mapping and Localization")
         mapping_loc_layout = QVBoxLayout()
         mapping_loc_box.setLayout(mapping_loc_layout)
+
+        self.btn_launch_base_robot = QPushButton("Launch Base Robot")
+        self.btn_launch_base_robot.clicked.connect(self.toggle_base_control_launch)
+        self.btn_launch_base_robot.setToolTip(
+            "ros2 launch navi_wall platform.launch.py sim:=<mode> mode:=base "
+            "controller_type:=<type> odom_tf_from_controller:=true "
+            "publish_controller_odom_tf:=true launch_rviz:=true "
+            "headless:=<true/false>"
+        )
+        mapping_loc_layout.addWidget(self.btn_launch_base_robot)
  
         # Launch Mapping button
         self.btn_launch_mapping = QPushButton("Start Mapping")
-        self.btn_launch_mapping.clicked.connect(lambda: self.toggle_mapping())
-        self.btn_launch_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:=<mode> lidar:=sick")
+        self.btn_launch_mapping.clicked.connect(lambda: self.toggle_mapping(controller_type_combo=self.controller_type_combo, headless_combo=self.base_headless_combo))
+        self.btn_launch_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:=<mode> mode:=base controller_type:=<type> headless:=<true/false>")
         mapping_loc_layout.addWidget(self.btn_launch_mapping)
- 
+
         # Launch Localization button
         self.btn_launch_localization = QPushButton("Start Localization")
-        self.btn_launch_localization.clicked.connect(lambda: self.toggle_localization())
-        self.btn_launch_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode>")
+        self.btn_launch_localization.clicked.connect(lambda: self.toggle_localization(controller_type_combo=self.controller_type_combo, headless_combo=self.base_headless_combo))
+        self.btn_launch_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=base controller_type:=<type> headless:=<true/false>")
         mapping_loc_layout.addWidget(self.btn_launch_localization)
  
         # View map button
@@ -346,8 +528,8 @@ class RobotControlUI(QMainWindow):
  
         # Launch Nav2 button
         self.btn_launch_nav2 = QPushButton("Launch Nav2")
-        self.btn_launch_nav2.clicked.connect(lambda: self.toggle_nav2())
-        self.btn_launch_nav2.setToolTip("ros2 launch navi_wall navigation_launch.py use_sim_time:=<mode>")
+        self.btn_launch_nav2.clicked.connect(lambda: self.toggle_nav2(controller_type_combo=self.controller_type_combo))
+        self.btn_launch_nav2.setToolTip("ros2 launch navi_wall navigation_launch.py use_sim_time:=<mode> controller_type:=<type>")
         nav_explore_layout.addWidget(self.btn_launch_nav2)
  
         # Launch Exploration button
@@ -373,7 +555,7 @@ class RobotControlUI(QMainWindow):
         # List Controllers button
         btn_list_base_controllers = QPushButton("List Controllers")
         btn_list_base_controllers.clicked.connect(self.run_list_base_controllers)
-        btn_list_base_controllers.setToolTip("ros2 control list_controllers")
+        btn_list_base_controllers.setToolTip("List controllers for all detected controller_manager nodes")
         troubleshooting_layout.addWidget(btn_list_base_controllers)
  
         # Launch RQT button
@@ -409,25 +591,14 @@ class RobotControlUI(QMainWindow):
         base_status_header.addWidget(QLabel("Terminal + Status:"))
         base_status_header.addStretch()
 
-        # Search bar
-        base_status_header.addWidget(QLabel("Search:"))
+        # Filter bar
+        base_status_header.addWidget(QLabel("Filter:"))
         self.base_search_input = QLineEdit()
-        self.base_search_input.setPlaceholderText("Enter search term...")
-        self.base_search_input.setMaximumWidth(150)
-        self.base_search_input.returnPressed.connect(lambda: self.search_base_status(forward=True))
+        self.base_search_input.setPlaceholderText("Filter output lines...")
+        self.base_search_input.setMaximumWidth(200)
+        self.base_search_input.textChanged.connect(lambda: self._log_apply_filter(self.base_status_text))
         base_status_header.addWidget(self.base_search_input)
-
-        btn_base_search_prev = QPushButton("◀")
-        btn_base_search_prev.clicked.connect(lambda: self.search_base_status(forward=False))
-        btn_base_search_prev.setMaximumWidth(40)
-        btn_base_search_prev.setToolTip("Find previous")
-        base_status_header.addWidget(btn_base_search_prev)
-
-        btn_base_search_next = QPushButton("▶")
-        btn_base_search_next.clicked.connect(lambda: self.search_base_status(forward=True))
-        btn_base_search_next.setMaximumWidth(40)
-        btn_base_search_next.setToolTip("Find next")
-        base_status_header.addWidget(btn_base_search_next)
+        self.tab_filter_inputs[id(self.base_status_text)] = self.base_search_input
 
         self.btn_restore_base_status = QPushButton("Restore")
         self.btn_restore_base_status.clicked.connect(self.restore_base_status)
@@ -457,24 +628,9 @@ class RobotControlUI(QMainWindow):
         
         joint_control_layout.addWidget(QLabel("<b>Joint Positions (radians):</b>"))
         
-        # Joint names in the correct order for publishing
-        joint_names = [
-            'arm_shoulder_pan_joint', 
-            'arm_shoulder_lift_joint', 
-            'arm_elbow_joint', 
-            'arm_wrist_1_joint', 
-            'arm_wrist_2_joint', 
-            'arm_wrist_3_joint'
-        ]
-        # Define joint limits (min, max) in radians
-        joint_limits = {
-            'arm_shoulder_pan_joint': (-6.28, 6.28),
-            'arm_shoulder_lift_joint': (-3.14, 0.0),  # Custom limit
-            'arm_elbow_joint': (-6.28, 6.28),
-            'arm_wrist_1_joint': (-6.28, 6.28),
-            'arm_wrist_2_joint': (-6.28, 6.28),
-            'arm_wrist_3_joint': (-6.28, 6.28)
-        }
+        # Joint names and limits in the correct order for publishing
+        joint_names = self.arm_joint_names
+        joint_limits = self.arm_joint_limits
 
         # Create sliders and input fields for each joint
         self.joint_inputs = []
@@ -539,14 +695,20 @@ class RobotControlUI(QMainWindow):
         
         btn_read_joints = QPushButton("Read Current Joint Positions")
         btn_read_joints.clicked.connect(self.read_joint_positions)
-        btn_read_joints.setToolTip("Read current joint positions from /arm/joint_states and populate fields")
+        btn_read_joints.setToolTip("Reads /arm/joint_states only for the Full Control hybrid launch, otherwise /joint_states")
         button_layout.addWidget(btn_read_joints)
         
         self.btn_publish_joints = QPushButton("Publish Joint Trajectory")
         self.btn_publish_joints.clicked.connect(self.publish_joint_trajectory)
-        self.btn_publish_joints.setToolTip("Publish joint trajectory to /arm/planned_trajectory topic")
+        self.btn_publish_joints.setToolTip("Publishes to /arm/planned_trajectory only for the Full Control hybrid launch, otherwise /planned_trajectory")
         self.btn_publish_joints.setEnabled(False)  # Disabled until positions are read
         button_layout.addWidget(self.btn_publish_joints)
+
+        # Reset Planner button for Joint Control tab
+        self.btn_joint_reset_planner = QPushButton("Reset Planner")
+        self.btn_joint_reset_planner.clicked.connect(self.reset_planner_joint)
+        self.btn_joint_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
+        button_layout.addWidget(self.btn_joint_reset_planner)
         
         joint_control_layout.addLayout(button_layout)
         
@@ -596,6 +758,47 @@ class RobotControlUI(QMainWindow):
         self.full_control_sim_mode_combo.addItems(['false', 'true'])
         self.full_control_sim_mode_combo.currentTextChanged.connect(self._update_full_control_sim_mode)
         full_control_sim_param_layout.addWidget(self.full_control_sim_mode_combo)
+        full_control_sim_param_layout.addWidget(QLabel("Controller Type:"))
+        self.full_control_controller_type_combo = QComboBox()
+        self.full_control_controller_type_combo.addItems(['omni', 'diff'])
+        full_control_sim_param_layout.addWidget(self.full_control_controller_type_combo)
+        full_control_sim_param_layout.addWidget(QLabel("Planner Backend:"))
+        self.full_control_planner_backend_combo = QComboBox()
+        self.full_control_planner_backend_combo.addItems(['moveit', 'legacy'])
+        self.full_control_planner_backend_combo.setCurrentText('legacy')
+        self.full_control_planner_backend_combo.currentTextChanged.connect(self._update_full_control_planner_constraints)
+        full_control_sim_param_layout.addWidget(self.full_control_planner_backend_combo)
+        self.full_control_moveit_pipeline_label = QLabel("MoveIt Pipeline:")
+        full_control_sim_param_layout.addWidget(self.full_control_moveit_pipeline_label)
+        self.full_control_moveit_pipeline_combo = QComboBox()
+        self.full_control_moveit_pipeline_combo.addItems(['pilz_industrial_motion_planner', 'move_group'])
+        self.full_control_moveit_pipeline_combo.setCurrentText('pilz_industrial_motion_planner')
+        self.full_control_moveit_pipeline_combo.currentTextChanged.connect(
+            self._update_moveit_option_visibility
+        )
+        full_control_sim_param_layout.addWidget(self.full_control_moveit_pipeline_combo)
+        self.full_control_moveit_planner_id_label = QLabel("Planner ID:")
+        full_control_sim_param_layout.addWidget(self.full_control_moveit_planner_id_label)
+        self.full_control_moveit_planner_id_combo = QComboBox()
+        self.full_control_moveit_planner_id_combo.addItems(['PTP', 'LIN'])
+        self.full_control_moveit_planner_id_combo.setCurrentText('PTP')
+        full_control_sim_param_layout.addWidget(self.full_control_moveit_planner_id_combo)
+        self.full_control_hybrid_sim_label = QLabel("Hybrid Sim:")
+        self.full_control_hybrid_sim_combo = QComboBox()
+        self.full_control_hybrid_sim_combo.addItems(['false', 'true'])
+        self.full_control_hybrid_sim_combo.setCurrentText('false')
+        self.full_control_hybrid_sim_combo.currentTextChanged.connect(self._on_full_control_hybrid_changed)
+        full_control_sim_param_layout.addWidget(self.full_control_hybrid_sim_label)
+        full_control_sim_param_layout.addWidget(self.full_control_hybrid_sim_combo)
+        self.full_control_headless_label = QLabel("Headless:")
+        self.full_control_headless_combo = QComboBox()
+        self.full_control_headless_combo.addItems(['false', 'true'])
+        self.full_control_headless_combo.setCurrentText('true')
+        self.full_control_headless_combo.currentTextChanged.connect(
+            self._update_full_control_launch_tooltip
+        )
+        full_control_sim_param_layout.addWidget(self.full_control_headless_label)
+        full_control_sim_param_layout.addWidget(self.full_control_headless_combo)
         full_control_sim_param_layout.addStretch()
         full_control_tab_layout.addLayout(full_control_sim_param_layout)
 
@@ -608,30 +811,13 @@ class RobotControlUI(QMainWindow):
         full_control_init_layout = QVBoxLayout()
         full_control_init_box.setLayout(full_control_init_layout)
 
-        # Create separate comboboxes for Full Control tab
-        full_control_init_layout.addWidget(QLabel("Status Commands:"))
-        self.full_control_status_cmd_combo = QComboBox()
-        self.full_control_status_cmd_combo.addItems([
-            'robotmode',
-            'safetystatus',
-            'programState',
-            'running',
-            'get loaded program',
-            'is in remote control'
-        ])
-        full_control_init_layout.addWidget(self.full_control_status_cmd_combo)
-        
-        btn_full_control_send_status = QPushButton("Send Status Command")
-        btn_full_control_send_status.clicked.connect(
-            lambda: self.send_full_control_status_command()
-        )
-        full_control_init_layout.addWidget(btn_full_control_send_status)
-
         btn_full_control_send_all_status = QPushButton("Send All Status Commands")
         btn_full_control_send_all_status.clicked.connect(
             lambda: self.send_all_full_control_status_commands()
         )
         full_control_init_layout.addWidget(btn_full_control_send_all_status)
+
+        self.full_status_indicators = self._build_status_indicators(full_control_init_layout)
 
         # Control commands
         full_control_init_layout.addWidget(QLabel("\nControl Commands:"))
@@ -651,12 +837,23 @@ class RobotControlUI(QMainWindow):
             'unlock protective stop'
         ])
         full_control_init_layout.addWidget(self.full_control_control_cmd_combo)
-        
+
         btn_full_control_send_control = QPushButton("Send Control Command")
         btn_full_control_send_control.clicked.connect(
             lambda: self.send_full_control_control_command()
         )
         full_control_init_layout.addWidget(btn_full_control_send_control)
+
+        full_control_init_layout.addWidget(QLabel("Freedrive Mode:"))
+        self.btn_full_control_freedrive = QPushButton("Start Freedrive")
+        self.btn_full_control_freedrive.clicked.connect(
+            lambda: self.toggle_freedrive(context='full')
+        )
+        self.btn_full_control_freedrive.setToolTip(
+            "Start freedrive with controller switch + keepalive publisher. "
+            "Click again to stop freedrive and restore joint_trajectory_controller."
+        )
+        full_control_init_layout.addWidget(self.btn_full_control_freedrive)
 
         full_control_init_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_init_box)
@@ -667,25 +864,84 @@ class RobotControlUI(QMainWindow):
         full_control_mapping_layout = QVBoxLayout()
         full_control_mapping_box.setLayout(full_control_mapping_layout)
 
+        self.btn_full_control_launch = QPushButton("Launch Full Robot")
+        self.btn_full_control_launch.clicked.connect(self.toggle_full_control_launch)
+        self.btn_full_control_launch.setToolTip(
+            "Uses `ros2 launch navi_wall hybrid_simulation.launch.py` when "
+            "`hybrid_sim=true`, otherwise `ros2 launch navi_wall "
+            "oliwall_mobile_manipulator.launch.py`."
+        )
+        full_control_mapping_layout.addWidget(self.btn_full_control_launch)
+
         self.btn_full_control_mapping = QPushButton("Start Mapping")
-        self.btn_full_control_mapping.clicked.connect(lambda: self.toggle_mapping(mode='full', button=self.btn_full_control_mapping, sim_combo=self.full_control_sim_mode_combo))
-        self.btn_full_control_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:= <mode> lidar:=sick mode:=full")
+        self.btn_full_control_mapping.clicked.connect(
+            lambda: self.toggle_mapping(
+                mode='full',
+                button=self.btn_full_control_mapping,
+                sim_combo=self.full_control_sim_mode_combo,
+                controller_type_combo=self.full_control_controller_type_combo,
+                headless_combo=self.full_control_headless_combo,
+                hybrid_sim_combo=self.full_control_hybrid_sim_combo,
+            )
+        )
+        self.btn_full_control_mapping.setToolTip("ros2 launch navi_wall mapping_3d.launch.py sim:=<mode> mode:=full controller_type:=<type> hybrid_sim:=<true/false> headless:=<true/false>")
         full_control_mapping_layout.addWidget(self.btn_full_control_mapping)
 
         self.btn_full_control_localization = QPushButton("Start Localization")
-        self.btn_full_control_localization.clicked.connect(lambda: self.toggle_localization(mode='full', button=self.btn_full_control_localization, sim_combo=self.full_control_sim_mode_combo))
-        self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:= mode:=full")
+        self.btn_full_control_localization.clicked.connect(
+            lambda: self.toggle_localization(
+                mode='full',
+                button=self.btn_full_control_localization,
+                sim_combo=self.full_control_sim_mode_combo,
+                controller_type_combo=self.full_control_controller_type_combo,
+                headless_combo=self.full_control_headless_combo,
+                hybrid_sim_combo=self.full_control_hybrid_sim_combo,
+            )
+        )
+        self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=full controller_type:=<type> hybrid_sim:=<true/false> planner_backend:=<moveit|legacy> [moveit_planning_pipeline:=<...> moveit_pose_planner_id:=<...>] headless:=<true/false>")
         full_control_mapping_layout.addWidget(self.btn_full_control_localization)
 
         self.btn_full_control_nav2 = QPushButton("Launch Nav2")
-        self.btn_full_control_nav2.clicked.connect(lambda: self.toggle_nav2(mode='full', button=self.btn_full_control_nav2, sim_combo=self.full_control_sim_mode_combo))
-        self.btn_full_control_nav2.setToolTip("ros2 launch navi_wall navigation_launch.py use_sim_time:=")
+        self.btn_full_control_nav2.clicked.connect(lambda: self.toggle_nav2(mode='full', button=self.btn_full_control_nav2, sim_combo=self.full_control_sim_mode_combo, controller_type_combo=self.full_control_controller_type_combo))
+        self.btn_full_control_nav2.setToolTip("ros2 launch navi_wall navigation_launch.py use_sim_time:= controller_type:=<type>")
         full_control_mapping_layout.addWidget(self.btn_full_control_nav2)
 
         self.btn_full_control_exploration = QPushButton("Launch Exploration (explore_lite)")
         self.btn_full_control_exploration.clicked.connect(lambda: self.toggle_exploration(mode='full', button=self.btn_full_control_exploration, sim_combo=self.full_control_sim_mode_combo))
         self.btn_full_control_exploration.setToolTip("ros2 run navi_wall explore --ros-args --params-file config/explore_params.yaml")
         full_control_mapping_layout.addWidget(self.btn_full_control_exploration)
+
+        full_control_position_separator = QFrame()
+        full_control_position_separator.setFrameShape(QFrame.HLine)
+        full_control_position_separator.setFrameShadow(QFrame.Sunken)
+        full_control_mapping_layout.addWidget(full_control_position_separator)
+
+        full_control_mapping_layout.addWidget(QLabel("Select Position:"))
+        full_control_position_layout = QHBoxLayout()
+        self.full_control_position_dropdown = QComboBox()
+        self.full_control_position_dropdown.addItems(self.position_names)
+        full_control_position_layout.addWidget(self.full_control_position_dropdown)
+
+        btn_full_control_send_position = QPushButton("Send Position")
+        btn_full_control_send_position.clicked.connect(self.send_full_control_position_command)
+        btn_full_control_send_position.setToolTip("Uses /arm/send_position when hybrid_sim=true, otherwise /send_position")
+        full_control_position_layout.addWidget(btn_full_control_send_position)
+        full_control_mapping_layout.addLayout(full_control_position_layout)
+
+        # Reset Planner button
+        self.btn_full_control_reset_planner = QPushButton("Reset Planner")
+        self.btn_full_control_reset_planner.clicked.connect(self.reset_planner)
+        self.btn_full_control_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
+        full_control_mapping_layout.addWidget(self.btn_full_control_reset_planner)
+
+        # Emergency stop button for Full Control tab
+        full_control_mapping_layout.addWidget(QLabel(""))  # Spacer
+        self.btn_full_control_emergency_stop = QPushButton("EMERGENCY STOP (Click to Activate)")
+        self.btn_full_control_emergency_stop.setCheckable(True)
+        self.btn_full_control_emergency_stop.setStyleSheet("background-color: red; color: white; font-weight: bold;")
+        self.btn_full_control_emergency_stop.clicked.connect(lambda: self.emergency_stop(context='full'))
+        self.btn_full_control_emergency_stop.setToolTip("Toggle emergency stop and cancel trajectory goals when activating\nUses /arm/emergency_stop when simulation=true AND hybrid_sim=true, otherwise /emergency_stop")
+        full_control_mapping_layout.addWidget(self.btn_full_control_emergency_stop)
 
         full_control_mapping_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_mapping_box)
@@ -694,6 +950,25 @@ class RobotControlUI(QMainWindow):
         full_control_sensors_box = QGroupBox("Sensors")
         full_control_sensors_layout = QVBoxLayout()
         full_control_sensors_box.setLayout(full_control_sensors_layout)
+
+        # Set background image for sensors box using a label
+        try:
+            pkg_share = get_package_share_directory('arm_control')
+            bg_image_path = os.path.join(pkg_share, 'resource', 'oliwall.png')
+        except Exception:
+            # Fallback to source directory if package not found
+            bg_image_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'resource', 'oliwall.png')
+        
+        if os.path.exists(bg_image_path):
+            # Create a label to hold the background image
+            self.full_control_sensors_bg_label = QLabel(full_control_sensors_box)
+            pixmap = QPixmap(bg_image_path)
+            # Scale pixmap to fit within a reasonable size while maintaining aspect ratio
+            scaled_pixmap = pixmap.scaled(250, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.full_control_sensors_bg_label.setPixmap(scaled_pixmap)
+            self.full_control_sensors_bg_label.setAlignment(Qt.AlignCenter)
+            self.full_control_sensors_bg_label.setScaledContents(False)
+            full_control_sensors_layout.addWidget(self.full_control_sensors_bg_label)
 
         self.btn_full_control_align_ee = QPushButton("Start Align EE to Wall")
         self.btn_full_control_align_ee.clicked.connect(
@@ -719,7 +994,7 @@ class RobotControlUI(QMainWindow):
 
         self.btn_full_control_list_controllers = QPushButton("List Controllers")
         self.btn_full_control_list_controllers.clicked.connect(self.run_list_full_controllers)
-        self.btn_full_control_list_controllers.setToolTip("ros2 control list_controllers")
+        self.btn_full_control_list_controllers.setToolTip("List controllers for all detected controller_manager nodes")
         full_control_troubleshooting_layout.addWidget(self.btn_full_control_list_controllers)
 
         self.btn_full_control_rqt = QPushButton("Start RQT")
@@ -780,15 +1055,73 @@ class RobotControlUI(QMainWindow):
         self.topic_info_display.setStyleSheet("background-color: #f6f8fa; color: #1f2328; border: 1px solid #d0d7de; font-family: 'Courier New', monospace; padding: 4px;")
         full_control_troubleshooting_layout.addWidget(self.topic_info_display)
 
+        # Process Kill Section
+        full_control_troubleshooting_layout.addWidget(QLabel("\nProcess Management:"))
+        
+        # Process selector with kill button
+        process_selector_layout = QHBoxLayout()
+        self.process_combo = QComboBox()
+        self.process_combo.setEditable(False)
+        self.process_combo.setMinimumWidth(150)
+        self.process_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.process_combo.setPlaceholderText("Select process to kill...")
+        process_selector_layout.addWidget(self.process_combo, 1)  # Stretch factor of 1
+        
+        btn_kill_process = QPushButton("Kill Process")
+        btn_kill_process.clicked.connect(self.kill_selected_process)
+        btn_kill_process.setToolTip("Kill the selected process using kill -9")
+        btn_kill_process.setMaximumWidth(120)
+        btn_kill_process.setStyleSheet("background-color: #d73a49; color: white; font-weight: bold;")
+        process_selector_layout.addWidget(btn_kill_process, 0)  # No stretch
+        
+        btn_kill_all = QPushButton("Kill All")
+        btn_kill_all.clicked.connect(self.kill_all_processes)
+        btn_kill_all.setToolTip("Kill all detected processes except UI and ros2 daemon")
+        btn_kill_all.setMaximumWidth(120)
+        btn_kill_all.setStyleSheet("background-color: #8B0000; color: white; font-weight: bold;")
+        process_selector_layout.addWidget(btn_kill_all, 0)  # No stretch
+        
+        full_control_troubleshooting_layout.addLayout(process_selector_layout)
+
         full_control_troubleshooting_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_troubleshooting_box)
 
-        # Terminal and Status for Full Control tab (create NEW widgets)
+        # Live Joint Monitor and Status for Full Control tab (side by side)
         full_control_terminal_status_layout = QHBoxLayout()
 
-        # Left side: NEW Terminal for Full Control
-        self.full_control_terminal = QTermWidget()
-        full_control_terminal_status_layout.addWidget(self.full_control_terminal)
+        # Left side: Live joint position monitor (read-only)
+        full_control_joint_monitor = QGroupBox("Live Arm Joint Positions (rad)")
+        full_control_joint_monitor_layout = QVBoxLayout()
+        full_control_joint_monitor.setLayout(full_control_joint_monitor_layout)
+        self.full_control_joint_sliders = []
+        self.full_control_joint_value_labels = []
+
+        for joint_name in self.arm_joint_names:
+            joint_row = QHBoxLayout()
+
+            label = QLabel(f"{joint_name}:")
+            label.setMinimumWidth(150)
+            joint_row.addWidget(label)
+
+            min_limit, max_limit = self.arm_joint_limits[joint_name]
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(int(min_limit * 100), int(max_limit * 100))
+            slider.setValue(0)
+            slider.setTickPosition(QSlider.TicksBelow)
+            slider.setTickInterval(100)
+            slider.setEnabled(False)
+            joint_row.addWidget(slider)
+
+            value_label = QLabel("0.000 rad")
+            value_label.setMinimumWidth(95)
+            joint_row.addWidget(value_label)
+
+            self.full_control_joint_sliders.append(slider)
+            self.full_control_joint_value_labels.append(value_label)
+            full_control_joint_monitor_layout.addLayout(joint_row)
+
+        full_control_joint_monitor_layout.addStretch()
+        full_control_terminal_status_layout.addWidget(full_control_joint_monitor)
 
         # Right side: NEW Status display for Full Control
         self.full_control_status_text = QTextEdit()
@@ -805,28 +1138,17 @@ class RobotControlUI(QMainWindow):
 
         # Status header with search functionality
         full_control_status_header = QHBoxLayout()
-        full_control_status_header.addWidget(QLabel("Full Control - Terminal + Status"))
+        full_control_status_header.addWidget(QLabel("Full Control - Live Joints + Status"))
         full_control_status_header.addStretch()
 
-        # Search bar for Full Control
-        full_control_status_header.addWidget(QLabel("Search:"))
+        # Filter bar for Full Control
+        full_control_status_header.addWidget(QLabel("Filter:"))
         self.full_control_search_input = QLineEdit()
-        self.full_control_search_input.setPlaceholderText("Enter search term...")
-        self.full_control_search_input.setMaximumWidth(150)
-        self.full_control_search_input.returnPressed.connect(lambda: self.search_full_control_status(forward=True))
+        self.full_control_search_input.setPlaceholderText("Filter output lines...")
+        self.full_control_search_input.setMaximumWidth(200)
+        self.full_control_search_input.textChanged.connect(lambda: self._log_apply_filter(self.full_control_status_text))
         full_control_status_header.addWidget(self.full_control_search_input)
-
-        btn_full_control_search_prev = QPushButton("◀")
-        btn_full_control_search_prev.clicked.connect(lambda: self.search_full_control_status(forward=False))
-        btn_full_control_search_prev.setMaximumWidth(40)
-        btn_full_control_search_prev.setToolTip("Find previous")
-        full_control_status_header.addWidget(btn_full_control_search_prev)
-
-        btn_full_control_search_next = QPushButton("▶")
-        btn_full_control_search_next.clicked.connect(lambda: self.search_full_control_status(forward=True))
-        btn_full_control_search_next.setMaximumWidth(40)
-        btn_full_control_search_next.setToolTip("Find next")
-        full_control_status_header.addWidget(btn_full_control_search_next)
+        self.tab_filter_inputs[id(self.full_control_status_text)] = self.full_control_search_input
 
         self.btn_restore_full_control_status = QPushButton("Restore")
         self.btn_restore_full_control_status.clicked.connect(self.restore_full_control_status)
@@ -843,6 +1165,8 @@ class RobotControlUI(QMainWindow):
         full_control_tab_layout.addLayout(full_control_terminal_status_layout)
         # Add Full Control tab after Joint Control
         tabs.addTab(full_control_tab, "Full Control")
+        tabs.addTab(self._create_gpr_api_test_tab(), "Sensors")
+        tabs.addTab(self._create_fsm_tab(), "FSM")
 
         # Connect tab change signal to check joint states when Joint Control tab is activated
         tabs.currentChanged.connect(lambda index: self._on_tab_changed(index, tabs))
@@ -854,34 +1178,323 @@ class RobotControlUI(QMainWindow):
         
         # Initial UI update for consistent visuals
         self._update_emergency_stop_button_ui()
+        self._update_freedrive_button_ui()
         self.BASE_TAB_INDEX = 0
         self.ARM_TAB_INDEX = 1
         self.JOINT_TAB_INDEX = 2
         self.FULL_CONTROL_TAB_INDEX = 3
+        self._active_planner_context = 'arm'
         self._update_init_box_state()
+        self._update_full_control_init_box_state()
+        self._update_headless_visibility()
+        self._update_arm_planner_constraints()
+        self._update_full_control_planner_constraints()
         
         # Initial topics list refresh
         QTimer.singleShot(1000, self.refresh_topics_list)  # Delay 1s to ensure ROS is ready
-        
-    def _update_full_control_sim_mode(self):
-        """Sync full control sim mode with arm and base sim modes"""
-        sim_mode = self.full_control_sim_mode_combo.currentText()
-        
-        # Block signals to prevent cascading updates
-        self.arm_sim_mode_combo.blockSignals(True)
-        self.sim_mode_combo.blockSignals(True)
-        
-        self.arm_sim_mode_combo.setCurrentText(sim_mode)
-        self.sim_mode_combo.setCurrentText(sim_mode)
-        
-        self.arm_sim_mode_combo.blockSignals(False)
-        self.sim_mode_combo.blockSignals(False)
-        
-        # Update init box state based on simulation mode
-        if sim_mode == 'true':
-            self.full_control_init_box.setEnabled(False)
+
+        self._apply_theme()
+
+    def _toggle_theme(self):
+        self._dark_theme = not self._dark_theme
+        self._apply_theme()
+
+    def _apply_theme(self):
+        dark = self._dark_theme
+        app = QApplication.instance()
+        if dark:
+            app.setPalette(_make_dark_palette())
+            log_style = (
+                "background-color: #22272e; color: #adbac7; border: 1px solid #444c56; "
+                "font-family: 'Courier New', monospace;"
+            )
+            info_style = (
+                "background-color: #22272e; color: #adbac7; border: 1px solid #444c56; "
+                "font-family: 'Courier New', monospace; padding: 4px;"
+            )
         else:
-            self.full_control_init_box.setEnabled(True)
+            app.setPalette(app.style().standardPalette())
+            log_style = (
+                "background-color: #f0f0f0; color: #1f2328; border: 1px solid #d0d7de; "
+                "font-family: 'Courier New', monospace;"
+            )
+            info_style = (
+                "background-color: #f0f0f0; color: #1f2328; border: 1px solid #d0d7de; "
+                "font-family: 'Courier New', monospace; padding: 4px;"
+            )
+
+        for attr in ('status_text', 'base_status_text', 'joint_status_text',
+                     'full_control_status_text', 'gpr_status_text'):
+            if hasattr(self, attr):
+                getattr(self, attr).setStyleSheet(log_style)
+
+        if hasattr(self, 'topic_info_display'):
+            self.topic_info_display.setStyleSheet(info_style)
+
+        if hasattr(self, 'btn_theme_toggle'):
+            self.btn_theme_toggle.setText("☀ Light Theme" if dark else "☾ Dark Theme")
+
+    def _update_full_control_sim_mode(self):
+        """Refresh Full Control state when its simulation mode changes."""
+        self._update_full_control_planner_constraints()
+
+    def _on_full_control_hybrid_changed(self):
+        """Refresh dependent UI elements when Full Control hybrid_sim changes."""
+        self._update_full_control_init_box_state()
+        self._update_headless_visibility()
+        self._update_full_control_launch_tooltip()
+
+    def _is_robot_bringup_process(self, process_key):
+        """Return whether a process key belongs to a robot bringup launch."""
+        return process_key in {'mobile_platform', 'full_mobile_manipulator'}
+
+    def _is_base_tab_state_process(self, process_key):
+        """Return whether a process should lock the Base Control tab context."""
+        return process_key in {'mobile_platform', 'mapping', 'localization', 'nav2', 'exploration'}
+
+    def _get_base_process_start_text(self, process_key, name):
+        """Return the idle button label for base/full-control launch buttons."""
+        if process_key == 'full_mobile_manipulator':
+            return 'Launch Full Robot'
+        if process_key == 'mobile_platform':
+            return 'Launch Base Robot'
+        return f"Start {name}"
+
+    def _get_base_process_stop_text(self, process_key, name):
+        """Return the running button label for base/full-control launch buttons."""
+        if process_key == 'full_mobile_manipulator':
+            return 'Stop Full Robot'
+        if process_key == 'mobile_platform':
+            return 'Stop Base Robot'
+        return f"Stop {name}"
+
+    def _sync_full_control_hybrid_sim_state(self):
+        """Apply Full Control hybrid_sim constraints and return the effective value."""
+        sim_mode = (
+            self.full_control_sim_mode_combo.currentText()
+            if hasattr(self, 'full_control_sim_mode_combo')
+            else 'false'
+        )
+        planner_backend = self._get_planner_backend(context='full')
+
+        if sim_mode != 'true':
+            desired_hybrid_sim = 'false'
+            should_lock_hybrid_sim = True
+        elif hasattr(self, 'full_control_hybrid_sim_combo'):
+            # When sim=true: user is free to choose regardless of planner backend
+            desired_hybrid_sim = self.full_control_hybrid_sim_combo.currentText()
+            should_lock_hybrid_sim = False
+        else:
+            desired_hybrid_sim = 'false'
+            should_lock_hybrid_sim = False
+
+        if hasattr(self, 'full_control_hybrid_sim_combo'):
+            previous_signal_state = self.full_control_hybrid_sim_combo.blockSignals(True)
+            if should_lock_hybrid_sim:
+                self.full_control_hybrid_sim_combo.setCurrentText(desired_hybrid_sim)
+            self.full_control_hybrid_sim_combo.setEnabled(not should_lock_hybrid_sim)
+            self.full_control_hybrid_sim_combo.blockSignals(previous_signal_state)
+
+        return desired_hybrid_sim
+
+    def _get_full_control_launch_file(self, hybrid_sim=None):
+        """Pick the Full Control launch file from the effective hybrid_sim value."""
+        if hybrid_sim is None:
+            hybrid_sim = self._sync_full_control_hybrid_sim_state()
+        if hybrid_sim == 'true':
+            return 'hybrid_simulation.launch.py'
+        return 'oliwall_mobile_manipulator.launch.py'
+
+    def _update_full_control_launch_tooltip(self):
+        """Keep the Full Control launch tooltip aligned with the selected launch file."""
+        if not hasattr(self, 'btn_full_control_launch'):
+            return
+
+        hybrid_sim = self._sync_full_control_hybrid_sim_state()
+        launch_file = self._get_full_control_launch_file(hybrid_sim=hybrid_sim)
+        headless = (
+            self.full_control_headless_combo.currentText()
+            if hasattr(self, 'full_control_headless_combo')
+            else 'false'
+        )
+
+        if launch_file == 'hybrid_simulation.launch.py':
+            tooltip = (
+                "ros2 launch navi_wall hybrid_simulation.launch.py "
+                "mode:=full robot_ip:=<auto> controller_type:=<type> "
+                f"planner_backend:=<moveit|legacy> headless:={headless} "
+                "[moveit_planning_pipeline:=<...> moveit_pose_planner_id:=<...>]"
+            )
+        else:
+            tooltip = (
+                "ros2 launch navi_wall oliwall_mobile_manipulator.launch.py "
+                "mode:=full sim:=<mode> hybrid_sim:=<true/false> robot_ip:=<auto> "
+                f"controller_type:=<type> planner_backend:=<moveit|legacy> headless:={headless} "
+                "[moveit_planning_pipeline:=<...> moveit_pose_planner_id:=<...>]"
+            )
+
+        self.btn_full_control_launch.setToolTip(tooltip)
+
+    def _update_arm_planner_constraints(self):
+        """Lock/unlock URSim selector based on Arm tab planner backend selection and simulation mode."""
+        planner = self._get_planner_backend(context='arm')
+        if hasattr(self, 'arm_hybrid_sim_combo'):
+            if planner == 'moveit':
+                # Get current simulation mode
+                sim_mode = self.arm_sim_mode_combo.currentText()
+                if sim_mode == 'true':
+                    # Allow user to freely choose URsim or Gazebo when simulating with MoveIt
+                    self.arm_hybrid_sim_combo.setEnabled(True)
+                    if hasattr(self, 'arm_moveit_status_label'):
+                        self.arm_moveit_status_label.setVisible(False)
+                else:
+                    # Real robot: lock URsim to false
+                    self.arm_hybrid_sim_combo.setCurrentText('false')
+                    self.arm_hybrid_sim_combo.setEnabled(False)
+                    if hasattr(self, 'arm_moveit_status_label'):
+                        self.arm_moveit_status_label.setText("Running moveit in Real Robot")
+                        self.arm_moveit_status_label.setVisible(True)
+            else:
+                self.arm_hybrid_sim_combo.setEnabled(True)
+                # Hide status label when not using MoveIt
+                if hasattr(self, 'arm_moveit_status_label'):
+                    self.arm_moveit_status_label.setVisible(False)
+
+        # Disable Reset Planner button when backend is moveit
+        if hasattr(self, 'btn_arm_reset_planner'):
+            self.btn_arm_reset_planner.setEnabled(planner != 'moveit')
+
+        # Update Joint Control tab state based on the active planner tab
+        self._update_joint_control_tab_state()
+
+        self._update_moveit_option_visibility()
+        self._update_headless_visibility()
+        self._update_init_box_state()
+
+    def _update_full_control_planner_constraints(self):
+        """Keep Full Control hybrid_sim aligned with simulation and refresh planner UI."""
+        planner = self._get_planner_backend(context='full')
+        self._sync_full_control_hybrid_sim_state()
+
+        # Disable Reset Planner button when backend is moveit
+        if hasattr(self, 'btn_full_control_reset_planner'):
+            self.btn_full_control_reset_planner.setEnabled(planner != 'moveit')
+
+        # Update Joint Control tab state based on the active planner tab
+        self._update_joint_control_tab_state()
+
+        self._update_moveit_option_visibility()
+        self._update_full_control_init_box_state()
+        self._update_headless_visibility()
+        self._update_full_control_launch_tooltip()
+
+    def _update_moveit_option_visibility(self):
+        """Show MoveIt pipeline/planner selectors only when they are relevant."""
+        arm_backend_is_moveit = self._get_planner_backend(context='arm') == 'moveit'
+        arm_pipeline_is_pilz = (
+            hasattr(self, 'arm_moveit_pipeline_combo')
+            and self.arm_moveit_pipeline_combo.currentText() == 'pilz_industrial_motion_planner'
+        )
+        if hasattr(self, 'arm_moveit_pipeline_label'):
+            self.arm_moveit_pipeline_label.setVisible(arm_backend_is_moveit)
+        if hasattr(self, 'arm_moveit_pipeline_combo'):
+            self.arm_moveit_pipeline_combo.setVisible(arm_backend_is_moveit)
+        if hasattr(self, 'arm_moveit_planner_id_label'):
+            self.arm_moveit_planner_id_label.setVisible(
+                arm_backend_is_moveit and arm_pipeline_is_pilz
+            )
+        if hasattr(self, 'arm_moveit_planner_id_combo'):
+            self.arm_moveit_planner_id_combo.setVisible(
+                arm_backend_is_moveit and arm_pipeline_is_pilz
+            )
+
+        full_backend_is_moveit = self._get_planner_backend(context='full') == 'moveit'
+        full_pipeline_is_pilz = (
+            hasattr(self, 'full_control_moveit_pipeline_combo')
+            and self.full_control_moveit_pipeline_combo.currentText()
+            == 'pilz_industrial_motion_planner'
+        )
+        if hasattr(self, 'full_control_moveit_pipeline_label'):
+            self.full_control_moveit_pipeline_label.setVisible(full_backend_is_moveit)
+        if hasattr(self, 'full_control_moveit_pipeline_combo'):
+            self.full_control_moveit_pipeline_combo.setVisible(full_backend_is_moveit)
+        if hasattr(self, 'full_control_moveit_planner_id_label'):
+            self.full_control_moveit_planner_id_label.setVisible(
+                full_backend_is_moveit and full_pipeline_is_pilz
+            )
+        if hasattr(self, 'full_control_moveit_planner_id_combo'):
+            self.full_control_moveit_planner_id_combo.setVisible(
+                full_backend_is_moveit and full_pipeline_is_pilz
+            )
+
+    def _get_active_planner_context(self):
+        """Use the currently open planner tab, falling back to the last Arm/Full tab visited."""
+        if hasattr(self, 'tabs'):
+            current_index = self.tabs.currentIndex()
+            if hasattr(self, 'ARM_TAB_INDEX') and current_index == self.ARM_TAB_INDEX:
+                self._active_planner_context = 'arm'
+            elif hasattr(self, 'FULL_CONTROL_TAB_INDEX') and current_index == self.FULL_CONTROL_TAB_INDEX:
+                self._active_planner_context = 'full'
+
+        return getattr(self, '_active_planner_context', 'arm')
+
+    def _update_joint_control_tab_state(self):
+        """Disable Joint Control only when moveit is selected in the active planner tab."""
+        planner_context = self._get_active_planner_context()
+        planner_backend = self._get_planner_backend(context=planner_context)
+        is_moveit_active = (planner_backend == 'moveit')
+
+        if hasattr(self, 'tabs') and hasattr(self, 'JOINT_TAB_INDEX'):
+            self.tabs.setTabEnabled(self.JOINT_TAB_INDEX, not is_moveit_active)
+
+    def _update_full_control_init_box_state(self):
+        """Disable Full Control initialization only when sim=true and hybrid_sim=false."""
+        full_sim_mode = self.full_control_sim_mode_combo.currentText() if hasattr(self, "full_control_sim_mode_combo") else 'false'
+        full_hybrid_mode = self._sync_full_control_hybrid_sim_state()
+        should_disable = (full_sim_mode == 'true' and full_hybrid_mode == 'false')
+        if hasattr(self, "full_control_init_box"):
+            self.full_control_init_box.setEnabled(not should_disable)
+
+    def _update_headless_visibility(self):
+        """Show simulation-only selectors only when simulation mode is true."""
+        arm_sim_mode = self.arm_sim_mode_combo.currentText() if hasattr(self, "arm_sim_mode_combo") else 'false'
+        arm_planner = self._get_planner_backend(context='arm')
+        # URSim selector is always visible when planner_backend is moveit (must be locked true)
+        arm_ursim_visible = (arm_sim_mode == 'true') or (arm_planner == 'moveit')
+        if hasattr(self, "arm_hybrid_sim_combo") and not arm_ursim_visible:
+            self.arm_hybrid_sim_combo.setCurrentText('false')
+        if hasattr(self, "arm_hybrid_sim_label"):
+            self.arm_hybrid_sim_label.setVisible(arm_ursim_visible)
+        if hasattr(self, "arm_hybrid_sim_combo"):
+            self.arm_hybrid_sim_combo.setVisible(arm_ursim_visible)
+
+        base_sim_mode = self.sim_mode_combo.currentText() if hasattr(self, "sim_mode_combo") else 'false'
+        base_visible = (base_sim_mode == 'true')
+        if hasattr(self, "base_headless_label"):
+            self.base_headless_label.setVisible(base_visible)
+        if hasattr(self, "base_headless_combo"):
+            self.base_headless_combo.setVisible(base_visible)
+
+        full_sim_mode = self.full_control_sim_mode_combo.currentText() if hasattr(self, "full_control_sim_mode_combo") else 'false'
+        full_visible = (full_sim_mode == 'true')
+        full_hybrid_mode = self._sync_full_control_hybrid_sim_state()
+        if hasattr(self, "full_control_headless_label"):
+            self.full_control_headless_label.setVisible(full_visible)
+        if hasattr(self, "full_control_headless_combo"):
+            self.full_control_headless_combo.setVisible(full_visible)
+
+        # Full Control hybrid selector is only meaningful in sim mode.
+        if hasattr(self, "full_control_hybrid_sim_label"):
+            self.full_control_hybrid_sim_label.setVisible(full_visible)
+        if hasattr(self, "full_control_hybrid_sim_combo"):
+            self.full_control_hybrid_sim_combo.setVisible(full_visible)
+
+        # In Full Control, headless is only meaningful when hybrid_sim is false.
+        full_headless_visible = full_visible and (full_hybrid_mode == 'false')
+        if hasattr(self, "full_control_headless_label"):
+            self.full_control_headless_label.setVisible(full_headless_visible)
+        if hasattr(self, "full_control_headless_combo"):
+            self.full_control_headless_combo.setVisible(full_headless_visible)
 
     def _set_tab_enabled(self, tab_index, enabled):
         """Enable or disable a tab (make it clickable or unclickable)"""
@@ -890,10 +1503,7 @@ class RobotControlUI(QMainWindow):
     def _update_tab_states_for_base(self):
         """Update tab states based on base control processes"""
         # Any base (non-full) process running?
-        base_running = any(
-            key in self.process_map
-            for key in ['mapping', 'localization', 'nav2', 'exploration']
-        )
+        base_running = any(self._is_base_tab_state_process(key) for key in self.process_map)
 
         if base_running:
             # Disable Arm and Full Control tabs (Base stays enabled, Joint stays enabled)
@@ -908,7 +1518,13 @@ class RobotControlUI(QMainWindow):
         """Update tab states based on full control processes"""
         full_running = any(
             key in self.process_map
-            for key in ['full_mapping', 'full_localization', 'full_nav2', 'full_exploration']
+            for key in [
+                'full_mobile_manipulator',
+                'full_mapping',
+                'full_localization',
+                'full_nav2',
+                'full_exploration',
+            ]
         )
 
         if full_running:
@@ -924,15 +1540,11 @@ class RobotControlUI(QMainWindow):
 
 
     def _update_init_box_state(self):
-        """Enable/disable Initialization box based on simulation mode"""
+        """Disable Arm initialization only when sim=true and URsim=false."""
         sim_mode = self.arm_sim_mode_combo.currentText()
-        
-        if sim_mode == 'true':
-            # Disable in simulation mode (robot dashboard commands don't work in sim)
-            self.init_box.setEnabled(False)
-        else:
-            # Enable in real robot mode
-            self.init_box.setEnabled(True)
+        hybrid_mode = self.arm_hybrid_sim_combo.currentText() if hasattr(self, "arm_hybrid_sim_combo") else 'false'
+        should_disable = (sim_mode == 'true' and hybrid_mode == 'false')
+        self.init_box.setEnabled(not should_disable)
 
     def _update_tab_states_for_arm(self):
         """Update tab states based on arm control processes"""
@@ -954,9 +1566,54 @@ class RobotControlUI(QMainWindow):
                 rclpy.spin_once(self.node, timeout_sec=0)
         except Exception:
             pass  # Ignore errors if context is shutting down
+
+    def _on_joint_states(self, msg, source_topic=None):
+        """Update live joint sliders in Arm and Full Control tabs from joint states topics."""
+        if source_topic is not None:
+            arm_topic = self._get_joint_states_topic_for_ui(context='arm')
+            full_topic = self._get_joint_states_topic_for_ui(context='full')
+            if source_topic not in (arm_topic, full_topic):
+                return
+
+        if not msg.name or not msg.position:
+            return
+
+        joint_position_map = dict(zip(msg.name, msg.position))
+        updated_positions = {}
+
+        monitor_sets = [
+            ('arm_control_joint_sliders', 'arm_control_joint_value_labels'),
+            ('full_control_joint_sliders', 'full_control_joint_value_labels'),
+        ]
+
+        for slider_attr, label_attr in monitor_sets:
+            if not hasattr(self, slider_attr) or not hasattr(self, label_attr):
+                continue
+
+            sliders = getattr(self, slider_attr)
+            labels = getattr(self, label_attr)
+
+            for i, joint_name in enumerate(self.arm_joint_names):
+                if joint_name not in joint_position_map:
+                    continue
+                if i >= len(sliders) or i >= len(labels):
+                    continue
+
+                position = joint_position_map[joint_name]
+                slider = sliders[i]
+                slider_value = int(position * 100)
+                slider_value = max(slider.minimum(), min(slider.maximum(), slider_value))
+                slider.setValue(slider_value)
+                labels[i].setText(f"{position:.3f} rad")
+                updated_positions[joint_name] = position
+
+        if len(updated_positions) == len(self.arm_joint_names):
+            self.current_joint_positions = updated_positions
     
     def _on_tab_changed(self, index, tabs):
         """Handle tab change - check joint states when Joint Control tab is activated"""
+        self._update_joint_control_tab_state()
+
         # Check if the Joint Control tab (index 2) is now active
         if index == 2 and tabs.tabText(index) == "Joint Control":
             # Disable controls first for safety
@@ -970,6 +1627,34 @@ class RobotControlUI(QMainWindow):
             self.joint_status_text.insertHtml("<b style='color: #539bf5;'> Checking for current joint positions...</b>")
             self.read_joint_positions()
  
+    @staticmethod
+    def _strip_html(text):
+        """Strip HTML tags to get plain text for filter matching."""
+        import re as _re
+        return _re.sub(r'<[^>]+>', '', text)
+
+    def _log_append(self, widget, content, add_newline=True):
+        """Store entry in the per-widget log buffer and render it if it passes the current filter."""
+        plain = self._strip_html(content)
+        self.tab_log_entries.setdefault(id(widget), []).append((content, plain, add_newline))
+        filt = self.tab_filter_inputs.get(id(widget))
+        term = filt.text().strip().lower() if filt else ''
+        if not term or term in plain.lower():
+            self._append_to_text_widget(widget, content, add_newline)
+
+    def _log_apply_filter(self, widget):
+        """Rebuild the widget showing only entries whose plain text matches the current filter."""
+        filt = self.tab_filter_inputs.get(id(widget))
+        term = filt.text().strip().lower() if filt else ''
+        scrollbar = widget.verticalScrollBar()
+        was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 10
+        widget.clear()
+        for h, plain, nl in self.tab_log_entries.get(id(widget), []):
+            if not term or term in plain.lower():
+                self._append_to_text_widget(widget, h, nl)
+        if was_at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+
     def _ansi_to_html(self, text):
         """Convert ANSI color codes to HTML"""
         # ANSI color code mapping
@@ -1038,17 +1723,1712 @@ class RobotControlUI(QMainWindow):
  
         return ''.join(result)
     
+    def _append_to_text_widget(self, text_widget, html_content, add_newline=True):
+        """
+        Append content to a text widget with smart scrolling.
+        Only auto-scrolls if the user is already viewing the bottom.
+        
+        Args:
+            text_widget: QTextEdit widget to append to
+            html_content: HTML content to append
+            add_newline: Whether to add a newline after the content
+        """
+        # Check if scrollbar is at the bottom before appending
+        scrollbar = text_widget.verticalScrollBar()
+        was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 10  # Small tolerance for rounding
+        
+        # Save the current scroll position
+        old_scroll_value = scrollbar.value()
+        
+        # Append the content
+        cursor = text_widget.textCursor()
+        cursor.movePosition(cursor.End)
+        cursor.insertHtml(html_content)
+        if add_newline:
+            cursor.insertText('\n')
+        
+        # Restore scroll position or scroll to bottom as appropriate
+        if was_at_bottom:
+            # User was at bottom, scroll to new bottom
+            scrollbar.setValue(scrollbar.maximum())
+        else:
+            # User was scrolled up, maintain their position
+            scrollbar.setValue(old_scroll_value)
+
+    def _handle_freedrive_output(self, process, status_text):
+        """Stream freedrive command output while suppressing repetitive keepalive spam."""
+        output = process.readAllStandardOutput().data().decode()
+        if not output:
+            return
+
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped == 'publisher: beginning loop' or stripped.startswith('publishing #'):
+                continue
+
+            self._append_to_text_widget(status_text, self._ansi_to_html(line))
+
+    def _build_freedrive_command_text(self, ros2_args):
+        """Format a ros2 command for status display."""
+        return 'ros2 ' + ' '.join(shlex.quote(arg) for arg in ros2_args)
+
+    def _run_freedrive_command(self, process_key, ros2_args, status_text, finished_callback):
+        """Run a one-shot freedrive-related ros2 command."""
+        if process_key in self.process_map:
+            existing_process = self.process_map[process_key]
+            if existing_process.state() == QProcess.Running:
+                existing_process.kill()
+                existing_process.waitForFinished(1000)
+            del self.process_map[process_key]
+
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(
+            lambda: self._handle_freedrive_output(process, status_text)
+        )
+        process.finished.connect(
+            lambda exit_code, _exit_status: self._on_freedrive_command_finished(
+                process_key, exit_code, status_text, finished_callback
+            )
+        )
+
+        cmd_str = self._build_freedrive_command_text(ros2_args)
+        self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
+        process.start('ros2', ros2_args)
+        self.process_map[process_key] = process
+
+    def _on_freedrive_command_finished(self, process_key, exit_code, status_text, finished_callback):
+        """Clean up a one-shot freedrive command and continue the sequence."""
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+        finished_callback(exit_code, status_text)
+
+    def _interrupt_freedrive_process(self, process_key, status_text, label):
+        """Best-effort Ctrl+C style stop for a freedrive-related process."""
+        if process_key not in self.process_map:
+            return False
+
+        process = self.process_map[process_key]
+        try:
+            process.finished.disconnect()
+        except Exception:
+            pass
+
+        pid = process.processId()
+        if pid:
+            try:
+                os.kill(pid, signal.SIGINT)
+                status_text.append(f"⏹ Sent Ctrl+C to {label}")
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                status_text.append(
+                    f"<span style='color: #c69026;'>⚠ Could not send Ctrl+C to {label}: {exc}</span>"
+                )
+
+        if process.state() == QProcess.Running:
+            process.waitForFinished(1500)
+        if process.state() == QProcess.Running:
+            process.terminate()
+            process.waitForFinished(1000)
+        if process.state() == QProcess.Running:
+            process.kill()
+            process.waitForFinished(1000)
+
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+        return True
+
+    def _stop_freedrive_start_processes(self, status_text):
+        """Interrupt the freedrive start-side processes if they are still running."""
+        self._interrupt_freedrive_process(
+            'freedrive_start_switch',
+            status_text,
+            'freedrive controller switch',
+        )
+        self._interrupt_freedrive_process(
+            'freedrive_enable_publisher',
+            status_text,
+            'freedrive keepalive publisher',
+        )
+
+    def _stop_freedrive_stop_processes(self, status_text):
+        """Interrupt any lingering freedrive stop-side commands before restarting."""
+        self._interrupt_freedrive_process(
+            'freedrive_stop_disable',
+            status_text,
+            'freedrive disable publisher',
+        )
+        self._interrupt_freedrive_process(
+            'freedrive_stop_switch',
+            status_text,
+            'trajectory controller restore switch',
+        )
+
+    def _start_freedrive_publisher(self, status_text):
+        """Start the persistent freedrive keepalive publisher."""
+        process_key = 'freedrive_enable_publisher'
+        ros2_args = [
+            'topic',
+            'pub',
+            '--rate',
+            '2',
+            '/freedrive_mode_controller/enable_freedrive_mode',
+            'std_msgs/msg/Bool',
+            '{data: true}',
+        ]
+
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(
+            lambda: self._handle_freedrive_output(process, status_text)
+        )
+        process.finished.connect(
+            lambda exit_code, _exit_status: self._on_freedrive_publisher_finished(
+                exit_code, status_text
+            )
+        )
+
+        cmd_str = self._build_freedrive_command_text(ros2_args)
+        self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
+        process.start('ros2', ros2_args)
+        self.process_map[process_key] = process
+
+    def _on_freedrive_publisher_finished(self, exit_code, status_text):
+        """Handle the persistent freedrive publisher exiting unexpectedly."""
+        process_key = 'freedrive_enable_publisher'
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+
+        self.freedrive_active = False
+        self._update_freedrive_button_ui()
+
+        if exit_code == 0:
+            status_text.append("⏹ Freedrive keepalive publisher stopped")
+        else:
+            status_text.append(
+                f"<span style='color: #f47067;'>✗ Freedrive keepalive publisher exited unexpectedly (exit code {exit_code})</span>"
+            )
+
+    def _update_freedrive_button_ui(self):
+        """Keep freedrive buttons in sync across Arm Control and Full Control tabs."""
+        if self.freedrive_active:
+            text = "Stop Freedrive"
+            style = "background-color: #4CAF50; color: white; font-weight: bold;"
+        else:
+            text = "Start Freedrive"
+            style = ""
+
+        if hasattr(self, "btn_arm_freedrive"):
+            self.btn_arm_freedrive.setText(text)
+            self.btn_arm_freedrive.setStyleSheet(style)
+            self.btn_arm_freedrive.setEnabled(True)
+
+        if hasattr(self, "btn_full_control_freedrive"):
+            self.btn_full_control_freedrive.setText(text)
+            self.btn_full_control_freedrive.setStyleSheet(style)
+            self.btn_full_control_freedrive.setEnabled(True)
+
+    def _get_freedrive_controller_check_command(self):
+        """Return the shell command used to detect freedrive-related controllers."""
+        return "ros2 control list_controllers -c /controller_manager | grep -E 'freedrive|joint_traj'"
+
+    def _get_controller_states(self, status_text=None):
+        """Return freedrive-related controller states parsed from the direct shell command output."""
+        try:
+            result = subprocess.run(
+                ['bash', '-lc', self._get_freedrive_controller_check_command()],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            if status_text is not None:
+                self._append_to_text_widget(
+                    status_text,
+                    "<span style='color: #c69026;'>Freedrive controller check timed out</span>",
+                )
+            return {}
+        except Exception as exc:
+            if status_text is not None:
+                self._append_to_text_widget(
+                    status_text,
+                    f"<span style='color: #c69026;'>Freedrive controller check failed: {html.escape(str(exc))}</span>",
+                )
+            return {}
+
+        controller_output = f"{result.stdout}\n{result.stderr or ''}"
+        controller_states = {}
+
+        if status_text is not None:
+            cmd_str = self._get_freedrive_controller_check_command()
+            self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {html.escape(cmd_str)}</b>")
+            stripped_output = controller_output.strip()
+            if stripped_output:
+                self._append_to_text_widget(
+                    status_text,
+                    (
+                        "<pre style=\"margin: 0; font-family: 'Courier New', monospace;\">"
+                        f"{html.escape(stripped_output)}"
+                        "</pre>"
+                    ),
+                    add_newline=False,
+                )
+
+        for raw_line in controller_output.splitlines():
+            line = re.sub(r'\x1b\[[0-9;]*m', '', raw_line).strip()
+            if not line:
+                continue
+            if line.startswith('[INFO]') or line.startswith('[WARN]') or line.startswith('[ERROR]'):
+                continue
+
+            match = re.match(
+                r'^([A-Za-z0-9_./-]+)\s+([A-Za-z0-9_./:-]+)\s+(active|inactive|unconfigured|finalized)\b',
+                line,
+            )
+            if not match:
+                continue
+
+            controller_states[match.group(1)] = match.group(3)
+
+        return controller_states
+
+    def _get_available_trajectory_controller(self, controller_states=None):
+        """Return the preferred trajectory controller if one is loaded."""
+        if controller_states is None:
+            controller_states = self._get_controller_states()
+        trajectory_controller_candidates = (
+            'joint_trajectory_controller',
+            'scaled_joint_trajectory_controller',
+        )
+
+        for controller_name in trajectory_controller_candidates:
+            if controller_states.get(controller_name) == 'active':
+                return controller_name
+
+        for controller_name in trajectory_controller_candidates:
+            if controller_name in controller_states:
+                return controller_name
+
+        return None
+
+    def _freedrive_controllers_are_loaded(self, status_text=None):
+        """Return True when freedrive and a compatible trajectory controller are available."""
+        controller_states = self._get_controller_states(status_text=status_text)
+        trajectory_controller = self._get_available_trajectory_controller(controller_states)
+        self.freedrive_trajectory_controller = trajectory_controller
+        return bool(trajectory_controller and 'freedrive_mode_controller' in controller_states)
+
+    def _show_no_controllers_running_message(self, status_text):
+        """Notify the user that freedrive cannot start because controllers are unavailable."""
+        message = (
+            "Freedrive requires freedrive_mode_controller and either "
+            "joint_trajectory_controller or scaled_joint_trajectory_controller."
+        )
+        QMessageBox.warning(self, 'Freedrive Mode', message)
+        status_text.append(f"<span style='color: #c69026;'>{message}</span>")
+
+    def _confirm_freedrive_start(self):
+        """Ask the user to confirm the freedrive start sequence."""
+        reply = QMessageBox.question(
+            self,
+            'Confirm Freedrive',
+            "Are you sure you want to start freedrive?\n\n"
+            "Make sure you have calibrated the PAYLOAD in the teach pendant. "
+            "If not hold the arm by hand before it falls or moves up.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        return reply == QMessageBox.Yes
+
+    def toggle_freedrive(self, context='arm'):
+        """Toggle freedrive mode with confirmation before activation."""
+        status_text = self._get_status_text_for_context(context)
+
+        if self.freedrive_active:
+            self._stop_freedrive(status_text)
+            return
+
+        if not self._freedrive_controllers_are_loaded(status_text=status_text):
+            self._show_no_controllers_running_message(status_text)
+            return
+
+        if not self._confirm_freedrive_start():
+            return
+
+        self._start_freedrive(status_text)
+
+    def _start_freedrive(self, status_text):
+        """Activate the freedrive controller and start the enable publisher."""
+        trajectory_controller = self.freedrive_trajectory_controller or self._get_available_trajectory_controller()
+        if not trajectory_controller:
+            self.freedrive_active = False
+            self._update_freedrive_button_ui()
+            self._show_no_controllers_running_message(status_text)
+            return
+
+        self.freedrive_trajectory_controller = trajectory_controller
+        self._stop_freedrive_stop_processes(status_text)
+        self._stop_freedrive_start_processes(status_text)
+        self.freedrive_active = True
+        self.freedrive_transition_in_progress = False
+        self.freedrive_transition_target_active = False
+        self._update_freedrive_button_ui()
+        status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ Freedrive mode requested</span>")
+        self._run_freedrive_command(
+            'freedrive_start_switch',
+            [
+                'control',
+                'switch_controllers',
+                '--deactivate',
+                trajectory_controller,
+                '--activate',
+                'freedrive_mode_controller',
+            ],
+            status_text,
+            self._on_freedrive_start_switch_finished,
+        )
+
+    def _on_freedrive_start_switch_finished(self, exit_code, status_text):
+        """Start the keepalive publisher after the controller switch succeeds."""
+        if exit_code == 0:
+            status_text.append("✓ Freedrive controller activated")
+            self._start_freedrive_publisher(status_text)
+        else:
+            self.freedrive_active = False
+            self._update_freedrive_button_ui()
+            status_text.append(
+                f"<span style='color: #f47067;'>✗ Freedrive controller switch failed (exit code {exit_code})</span>"
+            )
+
+    def _stop_freedrive(self, status_text):
+        """Stop the freedrive publisher, disable freedrive, and restore trajectory control."""
+        trajectory_controller = self.freedrive_trajectory_controller or self._get_available_trajectory_controller()
+        self.freedrive_active = False
+        self.freedrive_transition_in_progress = False
+        self.freedrive_transition_target_active = False
+        self._update_freedrive_button_ui()
+        self._stop_freedrive_start_processes(status_text)
+        self._stop_freedrive_stop_processes(status_text)
+        self._run_freedrive_command(
+            'freedrive_stop_disable',
+            [
+                'topic',
+                'pub',
+                '--once',
+                '/freedrive_mode_controller/enable_freedrive_mode',
+                'std_msgs/msg/Bool',
+                '{data: false}',
+            ],
+            status_text,
+            self._on_freedrive_disable_finished,
+        )
+
+    def _on_freedrive_disable_finished(self, exit_code, status_text):
+        """Switch controllers back after sending the freedrive disable message."""
+        trajectory_controller = self.freedrive_trajectory_controller or self._get_available_trajectory_controller()
+        if exit_code == 0:
+            status_text.append("✓ Freedrive disable message sent")
+        else:
+            status_text.append(
+                f"<span style='color: #c69026;'>⚠ Freedrive disable message failed (exit code {exit_code}); switching controllers back anyway</span>"
+            )
+
+        if not trajectory_controller:
+            status_text.append(
+                "<span style='color: #f47067;'>✗ Could not determine which trajectory controller to restore</span>"
+            )
+            return
+
+        self._run_freedrive_command(
+            'freedrive_stop_switch',
+            [
+                'control',
+                'switch_controllers',
+                '--deactivate',
+                'freedrive_mode_controller',
+                '--activate',
+                trajectory_controller,
+            ],
+            status_text,
+            self._on_freedrive_stop_switch_finished,
+        )
+
+    def _on_freedrive_stop_switch_finished(self, exit_code, status_text):
+        """Finalize freedrive shutdown and restore the button state."""
+        if exit_code == 0:
+            status_text.append(
+                "<span style='color: #57ab5a; font-weight: bold;'>✓ Freedrive mode disabled</span>"
+            )
+        else:
+            status_text.append(
+                f"<span style='color: #f47067;'>✗ Failed to restore joint_trajectory_controller (exit code {exit_code})</span>"
+            )
+
+    def _build_gpr_request_groups(self):
+        """Return the supported GPR API requests grouped for the UI."""
+        probe_status_tooltip = """Get information about Probe. The response **must** include:
+
+- If GP App is connected to a Probe. If that’s the case:
+    
+    - Serial Number of the Probe
+        
+    - Probe model (GP8000, GP8100, GP8800)
+        
+    - Battery status of the Probe
+        
+
+If no probe is connected, the probe field should be absent""".strip()
+
+        probe_connect_tooltip = """Connect to Probe at a given IP address (optional) and serial number.
+
+This endpoint should wait until connection is successful or fails before
+returning. The app should not show any alert in case of failure.
+
+If no contract is found, or if contract does not have API access feature
+flag, the app should disconnect from the probe immediately and return a
+403 error.
+
+If an IP was specified, and connection was successful, but serial number
+does not match the one that was provided, app should disconnect and
+throw an error.""".strip()
+
+        line_get_tooltip = """Gets the current line being measured.
+
+If the measurement has not been started, return index: 0 and started:
+false.""".strip()
+
+        presets_tooltip = """Set measurement parameters:
+
+- Resolution (max depth / max speed)
+    
+- Repetition rate (number, time triggered, or “rising edge” (GP8800
+only))
+    
+
+This endpoint can only be called before any data has been added to a
+measurement.
+
+#### Fixed step size
+
+``` json
+{
+    "mode": "FIXED_STEP",
+    "stepSize": 0.5, // For metric, value in [scans/cm]. For imperial value in [scans/in],
+    "unit": "METRIC" | "IMPERIAL",
+    "resolution": "MAX_SPEED" | "MAX_DEPTH" // only available with GP8000
+}
+```
+
+#### Time-triggered
+
+``` json
+{
+    "mode": "TIMED",
+    "scanFrequency": 0.5 // Value in scans / second
+    "unit": "METRIC" | "IMPERIAL",
+    "resolution": "MAX_SPEED" | "MAX_DEPTH" // only available with GP8000
+}
+```
+
+#### External trigger (GP8800 only)
+
+``` json
+{
+    "mode": "EXTERNAL"
+}
+```""".strip()
+
+        measurement_start_tooltip = """Start a new measurement. The endpoint **must** allow to create one of
+those measurement types:
+
+- Line scan
+    
+- Superline scan (GP8100 only)
+    
+- Area scan
+    
+
+The endpoint will return when the the measurement is ready to start and
+a line can be started. The app will navigate to the measurements screen.
+
+If a new measurement has already been started, but no data has been
+added to it, it should be discarded. If data has been added, an error
+should be thrown (see below) until the measurement has been stopped.
+This is similar to the current behavior in the app when pressing the “+”
+button or going back to explorer screen.""".strip()
+
+        display_tooltip = """Set display parameters:
+
+- View to apply to
+    
+- Color map
+    
+    - Scheme name
+        
+    - Brightness
+        
+- Slice start and end (C-Scan and superline view only)
+    
+
+Setting the parameters for a given view must switch the app to that view
+and apply the settings. The applied display parameters are then to be
+used for image generation.""".strip()
+
+        processing_tooltip = """Set image processing parameters:
+
+- View to apply to
+    
+- Gain
+    
+    - Auto gain (on/off)
+        
+    - Adjust gain (press “ok” button)
+        
+    - Linear gain (dB)
+        
+    - Time gain compensation (dB/ns)
+        
+- Noise cancellation (on/off)
+    
+- Background removal depth (ns)
+    
+- Depth / time window (ns)
+    
+- Dielectric constant
+    
+
+This endpoint can only be called at any time. If the gain object is
+present, the view must change to reflect that which is specified in the
+view property.""".strip()
+
+        export_bscan_tooltip = """Get a B-Scan as a PNG image.
+
+Grid lines, marker lines and tags, must not be visible. This should be a
+raw image of the migrated B-Scan data.
+
+- For a superline scan (GP8100 only), given a channel (A-F).
+    
+- For an area scan, given a line / column ID
+    
+    - For GP8100, an additional channel (A-F) is required
+        
+
+The endpoint **must** use the post-processing and display parameters for
+the MIGRATED_B_SCAN view:
+
+- Color map (scheme + brightness)
+    
+- Gain
+    
+- Noise cancellation
+    
+- Background removal
+    
+- Depth / time window (GP8000 only)
+    
+
+The image returned will be of the native resolution for the device,
+meaning:
+
+- **Width:** amount of a-scans for the line
+    
+- **Height:** amount of samples for an a-scan
+    
+
+This endpoint can be called at any time if data is available for the
+specified channel / line combination.""".strip()
+
+        export_cscan_tooltip = """Get a C-Scan as a PNG image.
+
+This is only available in Area Scan.
+
+Grid lines, marker lines and tags, must not be visible. This should be a
+raw image of C-Scan
+
+The endpoint **must** use the post-processing and display parameters for
+the C_SCAN view:
+
+- Color map (scheme + brightness)
+    
+- Gain
+    
+- Noise cancellation
+    
+- Background removal
+    
+- Depth / time window (GP8000 only)
+    
+
+The image returned will be of the resolution provided by the user
+
+This endpoint can be called at any time if data is available.""".strip()
+
+        export_ascan_tooltip = """Get an A-Scan as a CSV.
+
+- For a line scan, given a distance from the start.
+    
+- For a superline scan (GP8100 only), given a distance from the start
+and a channel (A-F)
+    
+- For an area scan, given a line / column ID and a distance from the
+start of the line / column (= X and Y coordinate)
+    
+    - For GP8100, an additional channel (A-F) is required
+        
+- The returned CSV contains the full raw data of a-scan.""".strip()
+
+        return {
+            'probe': [
+                {
+                    'label': 'Connect to probe',
+                    'method': 'POST',
+                    'path': '/probe/connect',
+                    'body': {'serialNumber': 'GP88-007-0081'},
+                    'description': 'Connect to the GPR probe using the provided serial number.',
+                    'tooltip': probe_connect_tooltip,
+                },
+                {
+                    'label': 'Disconnect probe',
+                    'method': 'POST',
+                    'path': '/probe/disconnect',
+                    'body': None,
+                    'description': 'Disconnect from the currently connected probe.',
+                    'tooltip': "Disconnects from the currently connected probe.",
+                },
+                {
+                    'label': 'Get probe status',
+                    'method': 'GET',
+                    'path': '/probe',
+                    'body': None,
+                    'description': 'Get the current probe connection status and probe details when connected.',
+                    'tooltip': probe_status_tooltip,
+                },
+            ],
+            'line': [
+                {
+                    'label': 'Start line',
+                    'method': 'POST',
+                    'path': '/measurement/line/start',
+                    'body': None,
+                    'description': 'Start the current line. The probe should wake up if needed.',
+                    'tooltip': """Start line.
+
+This works for any measurement type. If the device is in sleep mode, it
+should wake it up and return only when the device is ready and a-scans
+can be fed to the app.""".strip(),
+                },
+                {
+                    'label': 'Stop line',
+                    'method': 'POST',
+                    'path': '/measurement/line/stop',
+                    'body': None,
+                    'description': 'Stop the current line. In Area Scan it does not advance until the next line is started.',
+                    'tooltip': """Stop line. In area scan, this should **not** move to the next line until
+it has been started.
+
+This works for any measurement type. If the device is in sleep mode, it
+should wake it up and return only when the device is ready and a-scans
+can be fed to the app.""".strip(),
+                },
+                {
+                    'label': 'Pause line',
+                    'method': 'POST',
+                    'path': '/measurement/line/pause',
+                    'body': None,
+                    'description': 'Pause the current measurement line.',
+                    'tooltip': """Pauses current line.
+
+This works for any measurement type. If the device is in sleep mode, it
+should wake it up and return only when the device is ready and a-scans
+can be fed to the app.""".strip(),
+                },
+                {
+                    'label': 'Unpause line',
+                    'method': 'POST',
+                    'path': '/measurement/line/unpause',
+                    'body': None,
+                    'description': 'Resume a paused measurement line.',
+                    'tooltip': """Unpauses current line.
+
+Only works if the current line has been paused""".strip(),
+                },
+                {
+                    'label': 'Get current line',
+                    'method': 'GET',
+                    'path': '/measurement/line',
+                    'body': None,
+                    'description': 'Get the current line status, scan count, length, and line index.',
+                    'tooltip': line_get_tooltip,
+                },
+                {
+                    'label': 'Delete current line',
+                    'method': 'DELETE',
+                    'path': '/measurement/line',
+                    'body': None,
+                    'description': 'Delete the current line and move back to the previous line. Area Scan only.',
+                    'tooltip': """Deletes the current line being measured. Sets the current line to the
+previous line.
+
+Only available for Area Scan.""".strip(),
+                },
+            ],
+            'presets': [
+                {
+                    'label': 'Set Fixed Step',
+                    'method': 'POST',
+                    'path': '/measurement/presets',
+                    'body': {'mode': 'FIXED_STEP', 'repetitionRate': 0.5, 'unit': 'METRIC'},
+                    'description': 'Set measurement presets for fixed-step acquisition before data is added.',
+                    'tooltip': presets_tooltip,
+                },
+                {
+                    'label': 'Set Time Trigger',
+                    'method': 'POST',
+                    'path': '/measurement/presets',
+                    'body': {'mode': 'TIMED', 'scanFrequency': 0.5, 'unit': 'METRIC'},
+                    'description': 'Set measurement presets for time-triggered acquisition. Swagger examples use scanFrequency for this mode.',
+                    'tooltip': presets_tooltip,
+                },
+                {
+                    'label': 'Set External Trigger',
+                    'method': 'POST',
+                    'path': '/measurement/presets',
+                    'body': {'mode': 'EXTERNAL'},
+                    'description': 'Set measurement presets for external triggering. Available for GP8800 according to the Swagger examples.',
+                    'tooltip': presets_tooltip,
+                },
+            ],
+            'measurements': [
+                {
+                    'label': 'Start measurement',
+                    'method': 'POST',
+                    'path': '/measurement/start',
+                    'body': {'type': 'LINE_SCAN', 'name': 'GPR API Test'},
+                    'description': 'Create and start a new measurement session.',
+                    'tooltip': measurement_start_tooltip,
+                },
+                {
+                    'label': 'Stop measurement',
+                    'method': 'POST',
+                    'path': '/measurement/stop',
+                    'body': None,
+                    'description': 'Stop the current measurement and leave the measurement screen.',
+                    'tooltip': """Stop the measurement. This will exit from the measurement screen and
+return to the home screen.""".strip(),
+                },
+                {
+                    'label': 'Delete measurement',
+                    'method': 'DELETE',
+                    'path': '/measurement',
+                    'body': None,
+                    'description': 'Delete the current measurement. The API description says a new measurement is created afterward.',
+                    'tooltip': "Deletes the current measurement and creates a new one.",
+                },
+                {
+                    'label': 'Trigger sync',
+                    'method': 'POST',
+                    'path': '/measurement/sync',
+                    'body': None,
+                    'description': 'Sync the current measurement to Workspace after the line has been stopped.',
+                    'tooltip': """Triggers a sync of the current measurement to Workspace.
+
+This endpoint can only be called when line has been stopped.
+
+This endpoint locks the UI of the GP App during syncing. Requires GP App
+to have access to the internet.""".strip(),
+                },
+                {
+                    'label': 'Get measurement info',
+                    'method': 'GET',
+                    'path': '/measurement/info',
+                    'body': None,
+                    'description': 'Get current measurement metadata and settings.',
+                    'tooltip': "Gets the current measurement information",
+                },
+                {
+                    'label': 'Set display params',
+                    'method': 'POST',
+                    'path': '/measurement/display',
+                    'body': {'view': 'B_SCAN', 'colorMap': {'scheme': 'COOL', 'brightness': 0}},
+                    'description': 'Set display parameters for a measurement view, such as the active colormap.',
+                    'tooltip': display_tooltip,
+                },
+                {
+                    'label': 'Set processing params',
+                    'method': 'POST',
+                    'path': '/measurement/processing',
+                    'body': {
+                        'gain': {'view': 'B_SCAN', 'autoGain': True},
+                        'noiseCancellation': True,
+                        'backgroundRemovalDepth': 0,
+                        'dielectricConstant': 6,
+                    },
+                    'description': 'Set image processing parameters such as gain, noise cancellation, and dielectric constant.',
+                    'tooltip': processing_tooltip,
+                },
+            ],
+            'export': [
+                {
+                    'label': 'Export raw data',
+                    'method': 'POST',
+                    'path': '/measurement/export/raw',
+                    'body': None,
+                    'description': 'Export raw measurement data as an offline SEG-Y zip package.',
+                    'download_extension': 'zip',
+                    'tooltip': """Exports raw data of the measurement.
+
+Generates a local (offline) SEG-Y export of the entire measurement. The
+result is a zip file containing all b-scans, along with a CSV.""".strip(),
+                },
+                {
+                    'label': 'Get B-Scan',
+                    'method': 'POST',
+                    'path': '/measurement/export/bscan',
+                    'body': {'migrated': True},
+                    'description': 'Export a B-Scan PNG. Additional channel or line fields may be needed for some measurement types.',
+                    'download_extension': 'png',
+                    'tooltip': export_bscan_tooltip,
+                },
+                {
+                    'label': 'Get C-Scan',
+                    'method': 'POST',
+                    'path': '/measurement/export/cscan',
+                    'body': {'width': 300, 'height': 300},
+                    'description': 'Export a C-Scan PNG. This is only available for Area Scan measurements.',
+                    'download_extension': 'png',
+                    'tooltip': export_cscan_tooltip,
+                },
+                {
+                    'label': 'Get A-Scan',
+                    'method': 'POST',
+                    'path': '/measurement/export/ascan',
+                    'body': {'index': 0},
+                    'description': 'Export an A-Scan CSV. Additional channel or line fields may be needed for some measurement types.',
+                    'download_extension': 'csv',
+                    'tooltip': export_ascan_tooltip,
+                },
+            ],
+        }
+
+    def _create_gpr_api_test_tab(self):
+        """Create the GPR API test tab UI."""
+        gpr_tab = QWidget()
+        gpr_tab_layout = QVBoxLayout(gpr_tab)
+
+        sensors_layout = QHBoxLayout()
+        gpr_tab_layout.addLayout(sensors_layout)
+
+        gpr_panel = QGroupBox("GPR API Test")
+        gpr_panel_layout = QVBoxLayout()
+        gpr_panel.setLayout(gpr_panel_layout)
+        sensors_layout.addWidget(gpr_panel, 1)
+
+        hyperspectral_panel = QGroupBox("Hyperspectral")
+        hyperspectral_panel_layout = QVBoxLayout()
+        hyperspectral_panel.setLayout(hyperspectral_panel_layout)
+
+        hyperspectral_buttons_layout = QHBoxLayout()
+
+        self.btn_hyperspectral_camera = QPushButton("Camera and Calibration")
+        self.btn_hyperspectral_camera.setToolTip("ros2 run arm_control hyperspectral_node")
+        self.btn_hyperspectral_camera.clicked.connect(
+            lambda: self._toggle_sensors_process(
+                'hyperspectral_camera',
+                self.btn_hyperspectral_camera,
+                'Camera & Calibration',
+                'ros2',
+                ['run', 'arm_control', 'hyperspectral_node'],
+            )
+        )
+        hyperspectral_buttons_layout.addWidget(self.btn_hyperspectral_camera)
+
+        self.btn_hyperspectral_inference = QPushButton("AI Inference")
+        self.btn_hyperspectral_inference.setToolTip("ros2 run arm_control ml_inference_node")
+        self.btn_hyperspectral_inference.clicked.connect(
+            lambda: self._toggle_sensors_process(
+                'hyperspectral_inference',
+                self.btn_hyperspectral_inference,
+                'AI Inference',
+                'ros2',
+                ['run', 'arm_control', 'ml_inference_node'],
+            )
+        )
+        hyperspectral_buttons_layout.addWidget(self.btn_hyperspectral_inference)
+        hyperspectral_panel_layout.addLayout(hyperspectral_buttons_layout)
+
+        inspection_manager_box = QGroupBox("Inspection Manager")
+        inspection_manager_layout = QVBoxLayout()
+        inspection_manager_box.setLayout(inspection_manager_layout)
+
+        focus_speed_layout = QHBoxLayout()
+        focus_speed_layout.addWidget(QLabel("Focus Speed:"))
+        self.focus_speed_combo = QComboBox()
+        self.focus_speed_combo.addItem("140000 (Default)", 140000)
+        self.focus_speed_combo.addItem("80000", 80000)
+        self.focus_speed_combo.addItem("210000", 210000)
+        self.focus_speed_combo.addItem("Custom", None)
+        self.focus_speed_combo.currentIndexChanged.connect(self._update_focus_speed_controls)
+        focus_speed_layout.addWidget(self.focus_speed_combo)
+
+        self.focus_speed_input = QLineEdit("140000")
+        self.focus_speed_input.setValidator(QIntValidator(1, 10000000, self))
+        self.focus_speed_input.setPlaceholderText("Enter focus speed")
+        self.focus_speed_input.setMaximumWidth(140)
+        self.focus_speed_input.setVisible(False)
+        self.focus_speed_input.textChanged.connect(self._update_focus_speed_controls)
+        focus_speed_layout.addWidget(self.focus_speed_input)
+
+        self.btn_focus_optical_calibration = QPushButton("Focusing and Optical Calibration Test")
+        self.btn_focus_optical_calibration.clicked.connect(self.toggle_focus_optical_calibration_test)
+        focus_speed_layout.addWidget(self.btn_focus_optical_calibration)
+        inspection_manager_layout.addLayout(focus_speed_layout)
+
+        collect_separator = QFrame()
+        collect_separator.setFrameShape(QFrame.HLine)
+        collect_separator.setFrameShadow(QFrame.Sunken)
+        inspection_manager_layout.addWidget(collect_separator)
+
+        collect_row_one = QHBoxLayout()
+        self.collect_training_label_input = QLineEdit()
+        self.collect_training_label_input.setPlaceholderText("Fusta")
+        self.collect_training_label_input.textChanged.connect(self._update_collect_training_controls)
+        collect_row_one.addWidget(QLabel("Label:"))
+        collect_row_one.addWidget(self.collect_training_label_input)
+
+        self.collect_training_zone_input = QLineEdit()
+        self.collect_training_zone_input.setPlaceholderText("wall1")
+        self.collect_training_zone_input.textChanged.connect(self._update_collect_training_controls)
+        collect_row_one.addWidget(QLabel("Zone:"))
+        collect_row_one.addWidget(self.collect_training_zone_input)
+        inspection_manager_layout.addLayout(collect_row_one)
+
+        collect_row_two = QHBoxLayout()
+        self.collect_training_captures_input = QSpinBox()
+        self.collect_training_captures_input.setRange(1, 999)
+        self.collect_training_captures_input.setValue(5)
+        self.collect_training_captures_input.valueChanged.connect(self._update_collect_training_controls)
+        collect_row_two.addWidget(QLabel("Captures:"))
+        collect_row_two.addWidget(self.collect_training_captures_input)
+
+        self.collect_training_delay_input = QDoubleSpinBox()
+        self.collect_training_delay_input.setRange(0.0, 60.0)
+        self.collect_training_delay_input.setDecimals(2)
+        self.collect_training_delay_input.setSingleStep(0.1)
+        self.collect_training_delay_input.setValue(0.7)
+        self.collect_training_delay_input.setSuffix(" s")
+        self.collect_training_delay_input.valueChanged.connect(self._update_collect_training_controls)
+        collect_row_two.addWidget(QLabel("Capture Delay:"))
+        collect_row_two.addWidget(self.collect_training_delay_input)
+        inspection_manager_layout.addLayout(collect_row_two)
+
+        collect_row_three = QHBoxLayout()
+        self.collect_training_plot_combo = QComboBox()
+        self.collect_training_plot_combo.addItem("False", False)
+        self.collect_training_plot_combo.addItem("True", True)
+        self.collect_training_plot_combo.currentIndexChanged.connect(self._update_collect_training_controls)
+        collect_row_three.addWidget(QLabel("Plot:"))
+        collect_row_three.addWidget(self.collect_training_plot_combo)
+
+        self.collect_training_bracket_combo = QComboBox()
+        self.collect_training_bracket_combo.addItem("False", False)
+        self.collect_training_bracket_combo.addItem("True", True)
+        self.collect_training_bracket_combo.currentIndexChanged.connect(self._update_collect_training_controls)
+        collect_row_three.addWidget(QLabel("Bracket:"))
+        collect_row_three.addWidget(self.collect_training_bracket_combo)
+        inspection_manager_layout.addLayout(collect_row_three)
+
+        self.btn_capture_training_data = QPushButton("Capture data for training")
+        self.btn_capture_training_data.clicked.connect(self.toggle_capture_training_data)
+        inspection_manager_layout.addWidget(self.btn_capture_training_data)
+
+        predict_separator = QFrame()
+        predict_separator.setFrameShape(QFrame.HLine)
+        predict_separator.setFrameShadow(QFrame.Sunken)
+        inspection_manager_layout.addWidget(predict_separator)
+
+        predict_row_one = QHBoxLayout()
+        self.daily_inspection_x_input = QDoubleSpinBox()
+        self.daily_inspection_x_input.setRange(-1000.0, 1000.0)
+        self.daily_inspection_x_input.setDecimals(3)
+        self.daily_inspection_x_input.setSingleStep(0.1)
+        self.daily_inspection_x_input.setValue(0.0)
+        self.daily_inspection_x_input.valueChanged.connect(self._update_daily_inspection_controls)
+        predict_row_one.addWidget(QLabel("X:"))
+        predict_row_one.addWidget(self.daily_inspection_x_input)
+
+        self.daily_inspection_y_input = QDoubleSpinBox()
+        self.daily_inspection_y_input.setRange(-1000.0, 1000.0)
+        self.daily_inspection_y_input.setDecimals(3)
+        self.daily_inspection_y_input.setSingleStep(0.1)
+        self.daily_inspection_y_input.setValue(0.0)
+        self.daily_inspection_y_input.valueChanged.connect(self._update_daily_inspection_controls)
+        predict_row_one.addWidget(QLabel("Y:"))
+        predict_row_one.addWidget(self.daily_inspection_y_input)
+
+        self.daily_inspection_z_input = QDoubleSpinBox()
+        self.daily_inspection_z_input.setRange(-1000.0, 1000.0)
+        self.daily_inspection_z_input.setDecimals(3)
+        self.daily_inspection_z_input.setSingleStep(0.1)
+        self.daily_inspection_z_input.setValue(0.0)
+        self.daily_inspection_z_input.valueChanged.connect(self._update_daily_inspection_controls)
+        predict_row_one.addWidget(QLabel("Z:"))
+        predict_row_one.addWidget(self.daily_inspection_z_input)
+        inspection_manager_layout.addLayout(predict_row_one)
+
+        predict_row_two = QHBoxLayout()
+        self.daily_inspection_zone_input = QLineEdit()
+        self.daily_inspection_zone_input.setPlaceholderText("wall1")
+        self.daily_inspection_zone_input.textChanged.connect(self._update_daily_inspection_controls)
+        predict_row_two.addWidget(QLabel("Zone:"))
+        predict_row_two.addWidget(self.daily_inspection_zone_input)
+
+        self.daily_inspection_captures_input = QSpinBox()
+        self.daily_inspection_captures_input.setRange(1, 999)
+        self.daily_inspection_captures_input.setValue(5)
+        self.daily_inspection_captures_input.valueChanged.connect(self._update_daily_inspection_controls)
+        predict_row_two.addWidget(QLabel("Captures:"))
+        predict_row_two.addWidget(self.daily_inspection_captures_input)
+        inspection_manager_layout.addLayout(predict_row_two)
+
+        predict_row_three = QHBoxLayout()
+        self.daily_inspection_plot_combo = QComboBox()
+        self.daily_inspection_plot_combo.addItem("False", False)
+        self.daily_inspection_plot_combo.addItem("True", True)
+        self.daily_inspection_plot_combo.currentIndexChanged.connect(self._update_daily_inspection_controls)
+        predict_row_three.addWidget(QLabel("Plot:"))
+        predict_row_three.addWidget(self.daily_inspection_plot_combo)
+        predict_row_three.addStretch()
+        inspection_manager_layout.addLayout(predict_row_three)
+
+        self.btn_daily_inspection = QPushButton("Daily Inspection")
+        self.btn_daily_inspection.clicked.connect(self.toggle_daily_inspection)
+        inspection_manager_layout.addWidget(self.btn_daily_inspection)
+
+        hyperspectral_panel_layout.addWidget(inspection_manager_box)
+        self._update_focus_speed_controls()
+        self._update_collect_training_controls()
+        self._update_daily_inspection_controls()
+
+        hyperspectral_panel_layout.addStretch()
+        sensors_layout.addWidget(hyperspectral_panel, 1)
+
+        gpr_base_url_layout = QHBoxLayout()
+        gpr_base_url_layout.addWidget(QLabel("Base URL:"))
+        self.gpr_base_url_input = QLineEdit("http://192.168.42.53:9000")
+        self.gpr_base_url_input.setPlaceholderText("http://192.168.42.53:9000")
+        self.gpr_base_url_input.setToolTip("Base URL for the GPR HTTP server.")
+        gpr_base_url_layout.addWidget(self.gpr_base_url_input)
+        gpr_base_url_layout.addStretch()
+        gpr_panel_layout.addLayout(gpr_base_url_layout)
+
+        gpr_groups_layout = QGridLayout()
+        gpr_groups_layout.setHorizontalSpacing(12)
+        gpr_groups_layout.setVerticalSpacing(12)
+        group_positions = [
+            ('probe', 'Probe', 0, 0),
+            ('line', 'Line', 0, 1),
+            ('measurements', 'Measurements', 1, 0),
+            ('presets', 'Presets', 2, 0),
+            ('export', 'Export', 1, 1),
+        ]
+        for group_key, title, row, col in group_positions:
+            gpr_groups_layout.addWidget(self._create_gpr_group_box(group_key, title), row, col)
+        gpr_groups_layout.setColumnStretch(0, 1)
+        gpr_groups_layout.setColumnStretch(1, 1)
+        gpr_groups_layout.setColumnStretch(2, 1)
+        gpr_panel_layout.addLayout(gpr_groups_layout)
+
+        self.gpr_status_text = QTextEdit()
+        self.gpr_status_text.setReadOnly(True)
+        self.gpr_status_text.setAcceptRichText(True)
+        self.gpr_status_text.setStyleSheet(
+            "background-color: #22272e; color: #adbac7; border: 1px solid #444c56; "
+            "font-family: 'Courier New', monospace; white-space: pre;"
+        )
+        font_metrics = QFontMetrics(self.gpr_status_text.font())
+        tab_width = font_metrics.horizontalAdvance(' ') * 8
+        self.gpr_status_text.setTabStopDistance(tab_width)
+
+        gpr_status_header = QHBoxLayout()
+        gpr_status_header.addWidget(QLabel("Sensors - Command Output"))
+        gpr_status_header.addStretch()
+        gpr_status_header.addWidget(QLabel("Filter:"))
+        self.gpr_search_input = QLineEdit()
+        self.gpr_search_input.setPlaceholderText("Filter output lines...")
+        self.gpr_search_input.setMaximumWidth(200)
+        self.gpr_search_input.textChanged.connect(lambda: self._log_apply_filter(self.gpr_status_text))
+        gpr_status_header.addWidget(self.gpr_search_input)
+        self.tab_filter_inputs[id(self.gpr_status_text)] = self.gpr_search_input
+
+        self.btn_restore_gpr_status = QPushButton("Restore")
+        self.btn_restore_gpr_status.clicked.connect(self.restore_gpr_status)
+        self.btn_restore_gpr_status.setMaximumWidth(80)
+        self.btn_restore_gpr_status.setVisible(False)
+        gpr_status_header.addWidget(self.btn_restore_gpr_status)
+
+        btn_clear_gpr_status = QPushButton("Clear")
+        btn_clear_gpr_status.clicked.connect(self.clear_gpr_status)
+        btn_clear_gpr_status.setMaximumWidth(80)
+        gpr_status_header.addWidget(btn_clear_gpr_status)
+
+        gpr_tab_layout.addLayout(gpr_status_header)
+        gpr_tab_layout.addWidget(self.gpr_status_text, 1)
+        return gpr_tab
+
+    def _create_gpr_group_box(self, group_key, title):
+        """Create a labeled group box with a request combobox and send button."""
+        group_box = QGroupBox(title)
+        group_layout = QVBoxLayout()
+        group_box.setLayout(group_layout)
+
+        request_combo = QComboBox()
+        request_combo.setMinimumWidth(220)
+        self._populate_gpr_request_combo(request_combo, self.gpr_request_groups[group_key])
+        group_layout.addWidget(request_combo)
+
+        send_button = QPushButton("Send")
+        send_button.clicked.connect(
+            lambda _, combo=request_combo, button=send_button: self.send_gpr_request(combo, button)
+        )
+        group_layout.addWidget(send_button)
+        group_layout.addStretch()
+
+        self.gpr_group_combos[group_key] = request_combo
+        return group_box
+
+    def _toggle_sensors_process(self, process_key, button, name, program, args):
+        """Toggle a Sensors-tab process and stream output to the shared status pane."""
+        if process_key in self.process_map:
+            process = self.process_map[process_key]
+            try:
+                process.finished.disconnect()
+            except Exception:
+                pass
+
+            process.terminate()
+            process.waitForFinished(3000)
+            if process.state() == QProcess.Running:
+                process.kill()
+                process.waitForFinished(2000)
+
+            if process_key in self.process_map:
+                del self.process_map[process_key]
+
+            button.setStyleSheet("")
+            self._log_append(self.gpr_status_text, f"⏹ Stopped {name}")
+            return
+
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(lambda: self._handle_sensors_output(process))
+        process.finished.connect(
+            lambda: self._on_sensors_process_finished(process_key, button, name)
+        )
+
+        cmd_str = program + ' ' + ' '.join(args)
+        self._log_append(self.gpr_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
+        process.start(program, args)
+        self.process_map[process_key] = process
+        button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+
+    def _handle_sensors_output(self, process):
+        """Append Sensors-tab process output to the shared status pane."""
+        output = process.readAllStandardOutput().data().decode()
+        if output:
+            for line in output.split('\n'):
+                if 'process has died' in line and 'exit code -9' in line:
+                    continue
+                self._log_append(self.gpr_status_text, self._ansi_to_html(line))
+
+    def _on_sensors_process_finished(self, process_key, button, name):
+        """Reset Sensors-tab process button state when a process exits."""
+        if process_key in self.process_map:
+            del self.process_map[process_key]
+            button.setStyleSheet("")
+            self._log_append(self.gpr_status_text, f"⚠ {name} exited")
+
+    def _get_focus_speed_value(self):
+        """Return the currently selected focus speed for the inspection manager focus test."""
+        selected_value = self.focus_speed_combo.currentData() if hasattr(self, 'focus_speed_combo') else 140000
+        if selected_value is not None:
+            return selected_value
+
+        custom_text = self.focus_speed_input.text().strip() if hasattr(self, 'focus_speed_input') else ''
+        if custom_text.isdigit():
+            return int(custom_text)
+        return 140000
+
+    def _update_focus_speed_controls(self):
+        """Keep the focus-speed controls and tooltip in sync with the selected value."""
+        if not hasattr(self, 'focus_speed_combo'):
+            return
+
+        is_custom = self.focus_speed_combo.currentData() is None
+        if hasattr(self, 'focus_speed_input'):
+            self.focus_speed_input.setVisible(is_custom)
+
+        focus_speed = self._get_focus_speed_value()
+        command = (
+            'ros2 run arm_control inspection_manager '
+            f'--mode focus --focus-speed {focus_speed}'
+        )
+        if hasattr(self, 'btn_focus_optical_calibration'):
+            self.btn_focus_optical_calibration.setToolTip(command)
+
+    def toggle_focus_optical_calibration_test(self):
+        """Toggle the inspection manager focus-mode test using the selected focus speed."""
+        focus_speed = self._get_focus_speed_value()
+        self._toggle_sensors_process(
+            'inspection_manager_focus_test',
+            self.btn_focus_optical_calibration,
+            'Focusing and Optical Calibration Test',
+            'ros2',
+            ['run', 'arm_control', 'inspection_manager', '--mode', 'focus', '--focus-speed', str(focus_speed)],
+        )
+
+    def _format_collect_training_delay(self):
+        """Return the capture-delay value without unnecessary trailing zeroes."""
+        delay_value = self.collect_training_delay_input.value() if hasattr(self, 'collect_training_delay_input') else 0.7
+        return f"{delay_value:.2f}".rstrip('0').rstrip('.')
+
+    @staticmethod
+    def _format_float_argument(value):
+        """Return a compact string representation for a float CLI argument."""
+        return f"{value:.3f}".rstrip('0').rstrip('.')
+
+    def _build_collect_training_args(self, include_placeholder_values=False):
+        """Build the inspection_manager collect-mode arguments from the UI state."""
+        label = ''
+        zone = ''
+        if hasattr(self, 'collect_training_label_input'):
+            label = self.collect_training_label_input.text().strip()
+        if hasattr(self, 'collect_training_zone_input'):
+            zone = self.collect_training_zone_input.text().strip()
+
+        if include_placeholder_values:
+            if not label and hasattr(self, 'collect_training_label_input'):
+                label = self.collect_training_label_input.placeholderText().strip()
+            if not zone and hasattr(self, 'collect_training_zone_input'):
+                zone = self.collect_training_zone_input.placeholderText().strip()
+
+        args = ['run', 'arm_control', 'inspection_manager', '--mode', 'collect']
+        if label:
+            args.extend(['--label', label])
+        if zone:
+            args.extend(['--zone', zone])
+
+        if hasattr(self, 'collect_training_captures_input'):
+            captures = self.collect_training_captures_input.value()
+            if captures != 5:
+                args.extend(['--captures', str(captures)])
+
+        if hasattr(self, 'collect_training_delay_input'):
+            delay_value = self.collect_training_delay_input.value()
+            if abs(delay_value - 0.7) > 1e-9:
+                args.extend(['--capture-delay', self._format_collect_training_delay()])
+
+        if hasattr(self, 'collect_training_plot_combo') and self.collect_training_plot_combo.currentData():
+            args.append('--plot')
+        if hasattr(self, 'collect_training_bracket_combo') and self.collect_training_bracket_combo.currentData():
+            args.append('--bracket')
+
+        return args
+
+    def _update_collect_training_controls(self):
+        """Keep the collect-mode button tooltip aligned with the current form values."""
+        if not hasattr(self, 'btn_capture_training_data'):
+            return
+
+        args = self._build_collect_training_args(include_placeholder_values=True)
+        command = 'ros2 ' + ' '.join(shlex.quote(arg) for arg in args)
+        self.btn_capture_training_data.setToolTip(command)
+
+    def toggle_capture_training_data(self):
+        """Toggle inspection_manager collect mode using the current training-capture form values."""
+        label = self.collect_training_label_input.text().strip() if hasattr(self, 'collect_training_label_input') else ''
+        zone = self.collect_training_zone_input.text().strip() if hasattr(self, 'collect_training_zone_input') else ''
+
+        if not label or not zone:
+            QMessageBox.warning(
+                self,
+                'Capture data for training',
+                'Label and Zone are required before starting the training capture.',
+            )
+            return
+
+        self._toggle_sensors_process(
+            'inspection_manager_collect_training',
+            self.btn_capture_training_data,
+            'Capture data for training',
+            'ros2',
+            self._build_collect_training_args(),
+        )
+
+    def _build_daily_inspection_args(self, include_placeholder_values=False):
+        """Build the inspection_manager predict-mode arguments from the UI state."""
+        x_value = self.daily_inspection_x_input.value() if hasattr(self, 'daily_inspection_x_input') else 0.0
+        y_value = self.daily_inspection_y_input.value() if hasattr(self, 'daily_inspection_y_input') else 0.0
+        z_value = self.daily_inspection_z_input.value() if hasattr(self, 'daily_inspection_z_input') else 0.0
+
+        zone = ''
+        if hasattr(self, 'daily_inspection_zone_input'):
+            zone = self.daily_inspection_zone_input.text().strip()
+        if include_placeholder_values and not zone and hasattr(self, 'daily_inspection_zone_input'):
+            zone = self.daily_inspection_zone_input.placeholderText().strip()
+
+        args = [
+            'run',
+            'arm_control',
+            'inspection_manager',
+            self._format_float_argument(x_value),
+            self._format_float_argument(y_value),
+            self._format_float_argument(z_value),
+            '--mode',
+            'predict',
+        ]
+
+        if zone:
+            args.extend(['--zone', zone])
+
+        if hasattr(self, 'daily_inspection_captures_input'):
+            captures = self.daily_inspection_captures_input.value()
+            if captures != 5:
+                args.extend(['--captures', str(captures)])
+
+        if hasattr(self, 'daily_inspection_plot_combo') and self.daily_inspection_plot_combo.currentData():
+            args.append('--plot')
+
+        return args
+
+    def _update_daily_inspection_controls(self):
+        """Keep the predict-mode button tooltip aligned with the current form values."""
+        if not hasattr(self, 'btn_daily_inspection'):
+            return
+
+        args = self._build_daily_inspection_args(include_placeholder_values=True)
+        command = 'ros2 ' + ' '.join(shlex.quote(arg) for arg in args)
+        self.btn_daily_inspection.setToolTip(command)
+
+    def toggle_daily_inspection(self):
+        """Toggle inspection_manager predict mode using the current daily inspection form values."""
+        zone = self.daily_inspection_zone_input.text().strip() if hasattr(self, 'daily_inspection_zone_input') else ''
+        if not zone:
+            QMessageBox.warning(
+                self,
+                'Daily Inspection',
+                'Zone is required before starting the daily inspection.',
+            )
+            return
+
+        self._toggle_sensors_process(
+            'inspection_manager_daily_inspection',
+            self.btn_daily_inspection,
+            'Daily Inspection',
+            'ros2',
+            self._build_daily_inspection_args(),
+        )
+
+    def _populate_gpr_request_combo(self, combo, requests):
+        """Populate a GPR request combobox with tooltip metadata."""
+        for request in requests:
+            combo.addItem(request['label'], request)
+            item_index = combo.count() - 1
+            combo.setItemData(item_index, request.get('tooltip', request['description']), Qt.ToolTipRole)
+
+        combo.currentIndexChanged.connect(lambda _, c=combo: self._update_gpr_combo_tooltip(c))
+        self._update_gpr_combo_tooltip(combo)
+
+    def _update_gpr_combo_tooltip(self, combo):
+        """Keep the combobox tooltip aligned with the selected request."""
+        request = combo.currentData()
+        combo.setToolTip(request.get('tooltip', request['description']) if request else "")
+
+    def _get_gpr_download_dir(self):
+        """Return the directory used for downloaded GPR API artifacts."""
+        return os.path.expanduser('~/Downloads/GP_API_Test')
+
+    def _build_gpr_download_path(self, request):
+        """Build a timestamped download path for file-based GPR API responses."""
+        download_dir = self._get_gpr_download_dir()
+        safe_stem = request['path'].strip('/').replace('/', '_') or 'gpr_download'
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        extension = request['download_extension']
+        return os.path.join(download_dir, f'{safe_stem}_{timestamp}.{extension}')
+
+    def _extract_gpr_http_status(self, output_text):
+        """Extract the curl write-out HTTP status code from buffered output."""
+        match = re.search(r'HTTP_STATUS:(\d{3})', output_text or '')
+        return int(match.group(1)) if match else None
+
+    def send_gpr_request(self, combo, button):
+        """Send the selected GPR HTTP request using curl."""
+        request = combo.currentData()
+        if not request:
+            self._log_append(
+                self.gpr_status_text,
+                "<span style='color: #c69026;'>⚠ No GPR request selected</span>",
+            )
+            return
+
+        base_url = self.gpr_base_url_input.text().strip().rstrip('/')
+        if not base_url:
+            self._log_append(
+                self.gpr_status_text,
+                "<span style='color: #c69026;'>⚠ Base URL is empty</span>",
+            )
+            return
+
+        url = f"{base_url}{request['path']}"
+        output_path = None
+        if request.get('download_extension'):
+            download_dir = self._get_gpr_download_dir()
+            try:
+                os.makedirs(download_dir, exist_ok=True)
+            except OSError as exc:
+                self._log_append(
+                    self.gpr_status_text,
+                    f"<span style='color: #f47067;'>✗ Could not create download directory {html.escape(download_dir)}: {html.escape(str(exc))}</span>",
+                )
+                return
+            output_path = self._build_gpr_download_path(request)
+
+        args = [
+            '--silent',
+            '--show-error',
+            '--location',
+            '--max-time',
+            '30',
+            '--request',
+            request['method'],
+            url,
+            '--write-out',
+            '\nHTTP_STATUS:%{http_code}\n',
+        ]
+
+        if request['body'] is not None:
+            payload = json.dumps(request['body'], separators=(',', ':'))
+            args.extend([
+                '--header',
+                'Content-Type: application/json',
+                '--data',
+                payload,
+            ])
+
+        if output_path:
+            args.extend(['--output', output_path])
+
+        cmd_str = 'curl ' + ' '.join(shlex.quote(arg) for arg in args)
+        self._log_append(
+            self.gpr_status_text,
+            f"<b style='color: #57ab5a;'>▶ {html.escape(cmd_str)}</b>",
+        )
+        self._log_append(
+            self.gpr_status_text,
+            f"<span style='color: #76e3ea;'>Request: {html.escape(request['description'])}</span>",
+        )
+        if output_path:
+            self._log_append(
+                self.gpr_status_text,
+                f"<span style='color: #76e3ea;'>Saving response to: {html.escape(output_path)}</span>",
+            )
+
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.setProperty('had_output', False)
+        process.setProperty('gpr_output_buffer', '')
+        process.setProperty('gpr_output_path', output_path or '')
+        process.readyReadStandardOutput.connect(lambda p=process: self.handle_gpr_output(p))
+        process.finished.connect(
+            lambda exit_code, exit_status, p=process, b=button: self._on_gpr_request_finished(
+                p, exit_code, exit_status, b
+            )
+        )
+
+        button.setEnabled(False)
+        button.setText("Sending...")
+        process.start('curl', args)
+        self.gpr_request_processes[id(process)] = process
+
+    def handle_gpr_output(self, process):
+        """Append curl output for GPR requests to the GPR status pane."""
+        output = process.readAllStandardOutput().data().decode(errors='replace')
+        if not output:
+            return
+
+        process.setProperty('had_output', True)
+        previous_output = process.property('gpr_output_buffer') or ''
+        process.setProperty('gpr_output_buffer', previous_output + output)
+        self._log_append(
+            self.gpr_status_text,
+            (
+                "<pre style=\"margin: 0; font-family: 'Courier New', monospace;\">"
+                f"{html.escape(output)}</pre>"
+            ),
+            add_newline=False,
+        )
+
+    def _on_gpr_request_finished(self, process, exit_code, exit_status, button):
+        """Restore the button state and log the curl completion status."""
+        self.gpr_request_processes.pop(id(process), None)
+        button.setEnabled(True)
+        button.setText("Send")
+        output_path = process.property('gpr_output_path') or ''
+        output_text = process.property('gpr_output_buffer') or ''
+        http_status = self._extract_gpr_http_status(output_text)
+
+        if exit_code == 0:
+            if http_status is not None and http_status >= 400:
+                if output_path and os.path.exists(output_path):
+                    try:
+                        os.remove(output_path)
+                    except OSError:
+                        pass
+                self._log_append(
+                    self.gpr_status_text,
+                    f"<span style='color: #f47067;'>✗ Request completed with HTTP status {http_status}</span>",
+                )
+            elif output_path:
+                self._log_append(
+                    self.gpr_status_text,
+                    f"<span style='color: #57ab5a;'>✓ Saved response to {html.escape(output_path)}</span>",
+                )
+            elif not bool(process.property('had_output')):
+                self._log_append(
+                    self.gpr_status_text,
+                    "<span style='color: #57ab5a;'>✓ Request completed (no response body)</span>",
+                )
+            else:
+                self._log_append(
+                    self.gpr_status_text,
+                    "<span style='color: #57ab5a;'>✓ Request completed</span>",
+                )
+        else:
+            if output_path and os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+            self._log_append(
+                self.gpr_status_text,
+                (
+                    "<span style='color: #f47067;'>"
+                    f"✗ curl exited with code {exit_code}</span>"
+                ),
+            )
+
+        self._log_append(self.gpr_status_text, "")
+        process.deleteLater()
+
+    def clear_gpr_status(self):
+        widget = self.gpr_status_text
+        self.tab_log_backups[id(widget)] = list(self.tab_log_entries.get(id(widget), []))
+        self.tab_log_entries[id(widget)] = []
+        widget.clear()
+        self.btn_restore_gpr_status.setVisible(True)
+
+    def restore_gpr_status(self):
+        widget = self.gpr_status_text
+        backup = self.tab_log_backups.get(id(widget))
+        if backup:
+            current = self.tab_log_entries.get(id(widget), [])
+            self.tab_log_entries[id(widget)] = backup + current
+            self.tab_log_backups[id(widget)] = []
+            self._log_apply_filter(widget)
+            self.btn_restore_gpr_status.setVisible(False)
+
     def toggle_arm_launch(self):
         sim_mode = self.arm_sim_mode_combo.currentText()
+        hybrid_sim = 'true' if self._is_hybrid_sim_enabled(context='arm') else 'false'
+        robot_ip = self._get_robot_ip_for_launch(context='arm')
+        planner_backend = self._get_planner_backend(context='arm')
+        namespace_arm = self._get_namespace_for_arm_launch(planner_backend)
+        launch_args = [
+            'launch', 'arm_control', 'arm.launch.py',
+            f'robot_ip:={robot_ip}',
+            f'sim:={sim_mode}',
+            f'hybrid_sim:={hybrid_sim}',
+            f'planner_backend:={planner_backend}',
+            'mode:=arm',
+        ]
+        launch_args.extend(self._get_moveit_launch_args(context='arm'))
+        if namespace_arm:
+            launch_args.append(f'namespace_arm:={namespace_arm}')
         self._toggle_process('arm_launch', self.btn_general_launch, 'Arm',
-                            'ros2', ['launch', 'arm_control', 'arm.launch.py',
-                                    'robot_ip:=192.168.1.102',
-                                    f'sim:={sim_mode}',
-                                    'mode:=arm',
-                                ])
+                            'ros2', launch_args)
         
         # Update tab states
         self._update_tab_states_for_arm()
+
+    def toggle_base_control_launch(self):
+        """Toggle the base-only bringup from the Base Control tab."""
+        sim_mode = self.sim_mode_combo.currentText()
+        controller_type = self.controller_type_combo.currentText()
+        headless = self.base_headless_combo.currentText()
+
+        launch_args = [
+            'launch', 'navi_wall', 'platform.launch.py',
+            f'sim:={sim_mode}',
+            'mode:=base',
+            f'controller_type:={controller_type}',
+            'odom_tf_from_controller:=true',
+            'publish_controller_odom_tf:=true',
+            'launch_rviz:=true',
+            f'headless:={headless}',
+        ]
+        if 'mobile_platform' not in self.process_map:
+            self.btn_launch_base_robot.setProperty('uses_gazebo', sim_mode == 'true')
+
+        self._toggle_base_process(
+            'mobile_platform',
+            self.btn_launch_base_robot,
+            'Base Robot',
+            'ros2',
+            launch_args,
+        )
+        self._update_tab_states_for_base()
+
+    def toggle_full_control_launch(self):
+        """Toggle the full mobile manipulator bringup from the Full Control tab."""
+        sim_mode = self.full_control_sim_mode_combo.currentText()
+        hybrid_sim = self._sync_full_control_hybrid_sim_state()
+        launch_file = self._get_full_control_launch_file(hybrid_sim=hybrid_sim)
+        controller_type = self.full_control_controller_type_combo.currentText()
+        publish_controller_odom_tf = 'true'
+        headless = self.full_control_headless_combo.currentText()
+        robot_ip = self._get_robot_ip_for_launch(context='full')
+
+        launch_args = [
+            'launch', 'navi_wall', launch_file,
+            'mode:=full',
+            f'robot_ip:={robot_ip}',
+            f'controller_type:={controller_type}',
+            f'publish_controller_odom_tf:={publish_controller_odom_tf}',
+            f'planner_backend:={self._get_planner_backend(context="full")}',
+            f'headless:={headless}',
+        ]
+        if launch_file == 'oliwall_mobile_manipulator.launch.py':
+            launch_args.extend([
+                f'sim:={sim_mode}',
+                f'hybrid_sim:={hybrid_sim}',
+            ])
+        launch_args.extend(self._get_moveit_launch_args(context='full'))
+        if 'full_mobile_manipulator' not in self.process_map:
+            self.btn_full_control_launch.setProperty('uses_gazebo', sim_mode == 'true')
+
+        self._toggle_base_process(
+            'full_mobile_manipulator',
+            self.btn_full_control_launch,
+            'Full Robot',
+            'ros2',
+            launch_args,
+        )
+        self._update_tab_states_for_full_control()
 
     def send_all_status_commands(self, status_text=None):
         """Send all status commands sequentially"""
@@ -1063,27 +3443,27 @@ class RobotControlUI(QMainWindow):
             'is in remote control'
         ]
         
-        status_text.append("=" * 50)
-        status_text.append("📋 Sending all status commands...")
-        status_text.append("=" * 50)
-        
+        self._log_append(status_text, "=" * 50)
+        self._log_append(status_text, "📋 Sending all status commands...")
+        self._log_append(status_text, "=" * 50)
+
         success_count = 0
         for command in status_commands:
             response = self._send_robot_command(command, status_text=status_text)
             if response is not None:
                 success_count += 1
             # Add a small visual separator between commands
-            status_text.append("-" * 50)
+            self._log_append(status_text, "-" * 50)
 
         if success_count == len(status_commands):
-            status_text.append("✓ All status commands sent")
+            self._log_append(status_text, "✓ All status commands sent")
         elif success_count == 0:
-            status_text.append("✗ All status commands failed")
+            self._log_append(status_text, "✗ All status commands failed")
         else:
-            status_text.append(
+            self._log_append(status_text,
                 f"⚠ {success_count}/{len(status_commands)} status commands succeeded"
             )
-        status_text.append("")
+        self._log_append(status_text, "")
 
     def toggle_rqt_controller(self):
         self._toggle_process('rqt_controller', self.btn_rqt_controller, 'RQT Joint Controller',
@@ -1103,20 +3483,38 @@ class RobotControlUI(QMainWindow):
         self._toggle_process('align_ee_to_wall', self.btn_align_ee_to_wall, 'Align EE to Wall',
                             'ros2', ['run', 'arm_control', 'align_ee_to_wall'])
         
-    def toggle_mapping(self, mode='base', button=None, sim_combo=None):
+    def toggle_mapping(self, mode='base', button=None, sim_combo=None, controller_type_combo=None, headless_combo=None, hybrid_sim_combo=None):
         """Toggle mapping with configurable mode parameter"""
         if button is None:
             button = self.btn_launch_mapping
         if sim_combo is None:
             sim_combo = self.sim_mode_combo
+        if controller_type_combo is None:
+            controller_type_combo = self.controller_type_combo
+        if headless_combo is None:
+            headless_combo = self.base_headless_combo if mode == 'base' else self.full_control_headless_combo
+        if hybrid_sim_combo is None and mode == 'full' and hasattr(self, "full_control_hybrid_sim_combo"):
+            hybrid_sim_combo = self.full_control_hybrid_sim_combo
         
         sim_mode = sim_combo.currentText()
-        
-        # Build args based on sim mode
-        if sim_mode == 'true':
-            args = ['launch', 'navi_wall', 'mapping_3d.launch.py', 'sim:=true', 'lidar:=sick', f'mode:={mode}']
+        controller_type = controller_type_combo.currentText()
+        headless = headless_combo.currentText() if headless_combo else 'false'
+        if mode == 'full':
+            hybrid_sim = self._sync_full_control_hybrid_sim_state()
         else:
-            args = ['launch', 'navi_wall', 'mapping_3d.launch.py', 'lidar:=dome', f'mode:={mode}']
+            hybrid_sim = hybrid_sim_combo.currentText() if hybrid_sim_combo else 'false'
+        
+        args = [
+            'launch',
+            'navi_wall',
+            'mapping_3d.launch.py',
+            f'sim:={sim_mode}',
+            f'mode:={mode}',
+            f'controller_type:={controller_type}',
+        ]
+        if mode == 'full':
+            args.append(f'hybrid_sim:={hybrid_sim}')
+        args.append(f'headless:={headless}')
         
         process_key = f'{mode}_mapping' if mode != 'base' else 'mapping'
         display_name = 'Mapping'
@@ -1139,22 +3537,41 @@ class RobotControlUI(QMainWindow):
             self._update_tab_states_for_base()
 
     
-    def toggle_localization(self, mode='base', button=None, sim_combo=None):
+    def toggle_localization(self, mode='base', button=None, sim_combo=None, controller_type_combo=None, headless_combo=None, hybrid_sim_combo=None):
         """Toggle localization with configurable mode parameter"""
         if button is None:
             button = self.btn_launch_localization
         if sim_combo is None:
             sim_combo = self.sim_mode_combo
+        if controller_type_combo is None:
+            controller_type_combo = self.controller_type_combo
+        if headless_combo is None:
+            headless_combo = self.base_headless_combo if mode == 'base' else self.full_control_headless_combo
+        if hybrid_sim_combo is None and mode == 'full' and hasattr(self, "full_control_hybrid_sim_combo"):
+            hybrid_sim_combo = self.full_control_hybrid_sim_combo
         
         sim_mode = sim_combo.currentText()
-        lidar = 'dome' if sim_mode != 'true' else 'sick'
+        controller_type = controller_type_combo.currentText()
+        headless = headless_combo.currentText() if headless_combo else 'false'
+        if mode == 'full':
+            hybrid_sim = self._sync_full_control_hybrid_sim_state()
+        else:
+            hybrid_sim = hybrid_sim_combo.currentText() if hybrid_sim_combo else 'false'
         
         process_key = f'{mode}_localization' if mode != 'base' else 'localization'
         display_name = 'Localization'
         
-        self._toggle_base_process(process_key, button, display_name,
-                                'ros2', ['launch', 'navi_wall', 'move_robot.launch.py',
-                                        f'sim:={sim_mode}', f'mode:={mode}', f'lidar:={lidar}'])
+        localization_args = [
+            'launch', 'navi_wall', 'move_robot.launch.py',
+            f'sim:={sim_mode}', f'mode:={mode}', f'controller_type:={controller_type}',
+        ]
+        if mode == 'full':
+            localization_args.append(f'hybrid_sim:={hybrid_sim}')
+            localization_args.append(f'planner_backend:={self._get_planner_backend(context="full")}')
+            localization_args.extend(self._get_moveit_launch_args(context='full'))
+        localization_args.append(f'headless:={headless}')
+
+        self._toggle_base_process(process_key, button, display_name, 'ros2', localization_args)
         if mode == 'full':
             self._update_tab_states_for_full_control()
         
@@ -1188,29 +3605,34 @@ class RobotControlUI(QMainWindow):
             db_path = os.path.join(pkg_share, 'maps', 'rtabmap.db')
         except Exception as e:
             status_text = self.full_control_status_text if mode == 'full' else self.base_status_text
-            status_text.append(f"Error: Could not find navi_wall package: {e}")
+            self._log_append(status_text, f"Error: Could not find navi_wall package: {e}")
             return
         
         process_key = 'full_view_map' if mode == 'full' else 'view_map'
         self._toggle_base_process(process_key, button, 'View map',
                                  'rtabmap-databaseViewer', [db_path])
     
-    def toggle_nav2(self, mode='base', button=None, sim_combo=None):
+    def toggle_nav2(self, mode='base', button=None, sim_combo=None, controller_type_combo=None):
         """Toggle Nav2 with configurable mode parameter"""
         if button is None:
             button = self.btn_launch_nav2
         if sim_combo is None:
             sim_combo = self.sim_mode_combo
+        if controller_type_combo is None:
+            controller_type_combo = self.controller_type_combo
         
         sim_mode = sim_combo.currentText()
+        controller_type = controller_type_combo.currentText()
         process_key = f'{mode}_nav2' if mode != 'base' else 'nav2'
         display_name = 'Nav2'
         
         self._toggle_base_process(process_key, button, display_name,
                                 'ros2', ['launch', 'navi_wall', 'navigation_launch.py',
-                                        f'use_sim_time:={sim_mode}'])
+                                        f'use_sim_time:={sim_mode}', f'controller_type:={controller_type}'])
         if mode == 'full':
             self._update_tab_states_for_full_control()
+        else:
+            self._update_tab_states_for_base()
             
     def toggle_exploration(self, mode='base', button=None, sim_combo=None):
         """Toggle exploration with configurable mode parameter"""
@@ -1232,6 +3654,8 @@ class RobotControlUI(QMainWindow):
                                         '--ros-args', '--params-file', params_file])
         if mode == 'full':
             self._update_tab_states_for_full_control()
+        else:
+            self._update_tab_states_for_base()
    
     # Helper methods to get the correct buttons for each mode
     def _get_mapping_button_for_mode(self, mode):
@@ -1257,41 +3681,21 @@ class RobotControlUI(QMainWindow):
         return None
 
     def clear_full_control_status(self):
-        """Clear full control status text and save backup for restore"""
-        self.full_control_cleared_status_backup = self.full_control_status_text.toHtml()
-        self.full_control_status_text.clear()
+        widget = self.full_control_status_text
+        self.tab_log_backups[id(widget)] = list(self.tab_log_entries.get(id(widget), []))
+        self.tab_log_entries[id(widget)] = []
+        widget.clear()
         self.btn_restore_full_control_status.setVisible(True)
 
     def restore_full_control_status(self):
-        """Restore previously cleared full control status text"""
-        if hasattr(self, 'full_control_cleared_status_backup') and self.full_control_cleared_status_backup:
-            current_content = self.full_control_status_text.toHtml()
-            self.full_control_status_text.setHtml(self.full_control_cleared_status_backup + current_content)
-            self.full_control_cleared_status_backup = None
+        widget = self.full_control_status_text
+        backup = self.tab_log_backups.get(id(widget))
+        if backup:
+            current = self.tab_log_entries.get(id(widget), [])
+            self.tab_log_entries[id(widget)] = backup + current
+            self.tab_log_backups[id(widget)] = []
+            self._log_apply_filter(widget)
             self.btn_restore_full_control_status.setVisible(False)
-
-    def search_full_control_status(self, forward=True):
-        """Search for text in full control status box"""
-        search_text = self.full_control_search_input.text()
-        if not search_text:
-            return
-        
-        from PyQt5.QtGui import QTextDocument
-        flags = QTextDocument.FindFlags()
-        if not forward:
-            flags = QTextDocument.FindBackward
-        
-        found = self.full_control_status_text.find(search_text, flags)
-        
-        if not found:
-            # Wrap around: move cursor to start/end and try again
-            cursor = self.full_control_status_text.textCursor()
-            if forward:
-                cursor.movePosition(cursor.Start)
-            else:
-                cursor.movePosition(cursor.End)
-            self.full_control_status_text.setTextCursor(cursor)
-            self.full_control_status_text.find(search_text, flags)
 
     def toggle_rqt(self, mode='base', button=None):
         """Toggle RQT on/off"""
@@ -1308,12 +3712,8 @@ class RobotControlUI(QMainWindow):
  
         # Display command in bold green
         cmd_str = 'ps aux | grep -E \'ros2|robot\' | grep -v grep'
-        cursor = self.base_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.base_status_text.setTextCursor(cursor)
-        self.base_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        cursor.insertText('\n')  # Ensure newline after command
- 
+        self._log_append(self.base_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         # Run the command using shell to support pipe
         process_key = 'ps_ros2'
         process.finished.connect(lambda: self._cleanup_ps_ros(process_key))
@@ -1324,25 +3724,36 @@ class RobotControlUI(QMainWindow):
         """Clean up finished ps aux process"""
         if process_key in self.process_map:
             del self.process_map[process_key]
+
+    def _build_list_all_controllers_script(self):
+        """Shell script that lists controllers for every detected controller_manager node."""
+        return (
+            "manager_nodes=$(ros2 node list 2>/dev/null | grep -E '(^|/)controller_manager$' | sort -u); "
+            "if [ -z \"$manager_nodes\" ]; then "
+            "  echo \"No controller_manager nodes found.\"; "
+            "  exit 1; "
+            "fi; "
+            "for cm in $manager_nodes; do "
+            "  echo \"===== $cm =====\"; "
+            "  timeout 8 ros2 control list_controllers -c \"$cm\" || echo \"[WARN] Failed to query $cm\"; "
+            "  echo; "
+            "done"
+        )
  
     def run_list_base_controllers(self):
-        """List ROS2 controllers using ros2 control CLI"""
+        """List controllers for all detected controller_manager nodes."""
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
         process.readyReadStandardOutput.connect(lambda: self.handle_base_output(process))
  
         # Display command in bold green
-        cmd_str = 'timeout 10 ros2 control list_controllers'
-        cursor = self.base_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.base_status_text.setTextCursor(cursor)
-        self.base_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        cursor.insertText('\n')  # Ensure newline after command
- 
+        cmd_str = "for cm in $(ros2 node list | grep -E '(^|/)controller_manager$'); do ros2 control list_controllers -c $cm; done"
+        self._log_append(self.base_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         # Run the command with timeout (10 seconds)
         process_key = 'list_base_controllers'
         process.finished.connect(lambda: self._cleanup_list_base_controllers(process_key))
-        process.start('timeout', ['10', 'ros2', 'control', 'list_controllers'])
+        process.start('bash', ['-c', self._build_list_all_controllers_script()])
         self.process_map[process_key] = process
  
     def _cleanup_list_base_controllers(self, process_key):
@@ -1351,28 +3762,24 @@ class RobotControlUI(QMainWindow):
             exit_code = self.process_map[process_key].exitCode()
             del self.process_map[process_key]
             if exit_code != 0:
-                self.base_status_text.append(f"<span style='color: #c69026;'>⚠ List controllers command finished with exit code {exit_code}</span>")
+                self._log_append(self.base_status_text, f"<span style='color: #c69026;'>⚠ List controllers command finished with exit code {exit_code}</span>")
             else:
-                self.base_status_text.append("✓ List controllers command completed")
+                self._log_append(self.base_status_text, "✓ List controllers command completed")
 
     def run_list_full_controllers(self):
-        """List ROS2 controllers using ros2 control CLI (Full Control tab)"""
+        """List controllers for all detected controller_manager nodes (Full Control tab)."""
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
         process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
 
         # Display command in bold green
-        cmd_str = 'timeout 10 ros2 control list_controllers'
-        cursor = self.full_control_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.full_control_status_text.setTextCursor(cursor)
-        self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        cursor.insertText('\n')  # Ensure newline after command
+        cmd_str = "for cm in $(ros2 node list | grep -E '(^|/)controller_manager$'); do ros2 control list_controllers -c $cm; done"
+        self._log_append(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
 
         # Run the command with timeout (10 seconds)
         process_key = 'full_list_base_controllers'
         process.finished.connect(lambda: self._cleanup_list_full_controllers(process_key))
-        process.start('timeout', ['10', 'ros2', 'control', 'list_controllers'])
+        process.start('bash', ['-c', self._build_list_all_controllers_script()])
         self.process_map[process_key] = process
 
     def _cleanup_list_full_controllers(self, process_key):
@@ -1381,11 +3788,11 @@ class RobotControlUI(QMainWindow):
             exit_code = self.process_map[process_key].exitCode()
             del self.process_map[process_key]
             if exit_code != 0:
-                self.full_control_status_text.append(
+                self._log_append(self.full_control_status_text,
                     f"<span style='color: #c69026;'>⚠ List controllers command finished with exit code {exit_code}</span>"
                 )
             else:
-                self.full_control_status_text.append("✓ List controllers command completed")
+                self._log_append(self.full_control_status_text, "✓ List controllers command completed")
  
     def refresh_topics_list(self):
         """Refresh the list of available ROS2 topics"""
@@ -1394,12 +3801,8 @@ class RobotControlUI(QMainWindow):
         
         # Display command in status
         cmd_str = 'ros2 topic list'
-        cursor = self.full_control_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.full_control_status_text.setTextCursor(cursor)
-        self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        cursor.insertText('\n')
-        
+        self._log_append(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         # Start process and capture output
         process.finished.connect(lambda: self._on_topics_list_finished(process))
         process.start('ros2', ['topic', 'list'])
@@ -1414,9 +3817,9 @@ class RobotControlUI(QMainWindow):
         
         if topics:
             self.topics_combo.addItems(topics)
-            self.full_control_status_text.append(f"✓ Found {len(topics)} topics")
+            self._log_append(self.full_control_status_text, f"✓ Found {len(topics)} topics")
         else:
-            self.full_control_status_text.append("<span style='color: #c69026;'>⚠ No topics found</span>")
+            self._log_append(self.full_control_status_text, "<span style='color: #c69026;'>⚠ No topics found</span>")
     
     def check_topic_bandwidth(self):
         """Check bandwidth of selected topic"""
@@ -1513,7 +3916,7 @@ class RobotControlUI(QMainWindow):
         """Echo selected topic once"""
         topic = self.topics_combo.currentText()
         if not topic:
-            self.full_control_status_text.append("<span style='color: #c69026;'>⚠ No topic selected</span>")
+            self._log_append(self.full_control_status_text, "<span style='color: #c69026;'>⚠ No topic selected</span>")
             return
         
         process = QProcess(self)
@@ -1522,12 +3925,8 @@ class RobotControlUI(QMainWindow):
         
         # Display command
         cmd_str = f'timeout 10 ros2 topic echo --once {topic}'
-        cursor = self.full_control_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.full_control_status_text.setTextCursor(cursor)
-        self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        cursor.insertText('\n')
-        
+        self._log_append(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         # Start process with timeout
         process_key = f'topic_echo_{topic}'
         process.finished.connect(lambda: self._cleanup_topic_command(process_key))
@@ -1605,11 +4004,11 @@ class RobotControlUI(QMainWindow):
             exit_code = self.process_map[process_key].exitCode()
             del self.process_map[process_key]
             if exit_code == 124:  # timeout exit code
-                self.full_control_status_text.append("<span style='color: #c69026;'>⚠ Command timed out</span>")
+                self._log_append(self.full_control_status_text, "<span style='color: #c69026;'>⚠ Command timed out</span>")
             elif exit_code != 0:
-                self.full_control_status_text.append(f"<span style='color: #c69026;'>⚠ Command finished with exit code {exit_code}</span>")
+                self._log_append(self.full_control_status_text, f"<span style='color: #c69026;'>⚠ Command finished with exit code {exit_code}</span>")
             else:
-                self.full_control_status_text.append("✓ Command completed")
+                self._log_append(self.full_control_status_text, "✓ Command completed")
 
     def _toggle_process(self, process_key, button, name, program, args):
         """Toggle a process on/off and update button state"""
@@ -1633,6 +4032,9 @@ class RobotControlUI(QMainWindow):
                         pass
                 # Extra cleanup for child ROS processes spawned by launch files
                 self._cleanup_ros_children_of_pid(pid)
+                # Kill Gazebo processes when stopping Arm launch
+                if process_key == 'arm_launch':
+                    self._kill_gazebo_processes()
  
             process.terminate()
             process.waitForFinished(3000)
@@ -1642,21 +4044,17 @@ class RobotControlUI(QMainWindow):
             del self.process_map[process_key]
             button.setText(f"Start {name}")
             button.setStyleSheet("")
-            self.status_text.append(f"⏹ Stopped {name}")
+            self._log_append(self.status_text, f"⏹ Stopped {name}")
         else:
             # Start the process
             process = QProcess(self)
             process.setProcessChannelMode(QProcess.MergedChannels)
             process.readyReadStandardOutput.connect(lambda: self.handle_output(process))
             process.finished.connect(lambda: self._on_process_finished(process_key, button, name))
- 
+
             # Display command in bold green
             cmd_str = program + ' ' + ' '.join(args)
-            cursor = self.status_text.textCursor()
-            cursor.movePosition(cursor.End)
-            self.status_text.setTextCursor(cursor)
-            self.status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-            cursor.insertText('\n')  # Ensure newline after command
+            self._log_append(self.status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
  
             process.start(program, args)
             self.process_map[process_key] = process
@@ -1686,13 +4084,13 @@ class RobotControlUI(QMainWindow):
                     # Longer wait for mapping to save rtabmap.db
                     wait_ms = 5000 if 'mapping' in process_key else 3000
                     if 'mapping' in process_key:
-                        status_text.append("💾 Saving mapping database... (waiting for shutdown)")
+                        self._log_append(status_text, "💾 Saving mapping database... (waiting for shutdown)")
                     process.waitForFinished(wait_ms)
                 except ProcessLookupError:
                     # Process already gone
                     pass
                 except Exception as e:
-                    status_text.append(f"⚠ Could not send SIGINT: {e}")
+                    self._log_append(status_text, f"⚠ Could not send SIGINT: {e}")
 
             # If still running, escalate
             if process.state() == QProcess.Running:
@@ -1702,13 +4100,33 @@ class RobotControlUI(QMainWindow):
                 process.kill()
                 process.waitForFinished(2000)
 
+            # Kill orphaned launch children/Gazebo for simulator-backed launches.
+            if self._is_robot_bringup_process(process_key) and pid:
+                try:
+                    subprocess.run(['pkill', '-9', '-P', str(pid)], timeout=2, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+                self._cleanup_ros_children_of_pid(pid)
+
+            uses_gazebo = bool(button.property('uses_gazebo'))
+
+            # Kill Gazebo processes when stopping mapping, localization, or a sim-backed full robot bringup
+            if (
+                'mapping' in process_key
+                or 'localization' in process_key
+                or (self._is_robot_bringup_process(process_key) and uses_gazebo)
+            ):
+                self._kill_gazebo_processes()
+
             # Final cleanup
             if process_key in self.process_map:
                 del self.process_map[process_key]
 
-            button.setText(f"Start {name}")
+            button.setText(self._get_base_process_start_text(process_key, name))
             button.setStyleSheet("")
-            status_text.append(f"⏹ Stopped {name}")
+            if self._is_robot_bringup_process(process_key):
+                button.setProperty('uses_gazebo', False)
+            self._log_append(status_text, f"⏹ Stopped {name}")
 
             # Re‑enable mutually exclusive buttons
             if 'mapping' in process_key:
@@ -1723,7 +4141,7 @@ class RobotControlUI(QMainWindow):
                     btn.setEnabled(True)
 
             # Only base mode affects tab states
-            if not process_key.startswith('full') and process_key in ['mapping', 'localization']:
+            if not process_key.startswith('full') and self._is_base_tab_state_process(process_key):
                 self._update_tab_states_for_base()
 
         else:
@@ -1739,15 +4157,11 @@ class RobotControlUI(QMainWindow):
             process.finished.connect(lambda: self._on_base_process_finished(process_key, button, name))
 
             cmd_str = program + ' ' + ' '.join(args)
-            cursor = status_text.textCursor()
-            cursor.movePosition(cursor.End)
-            status_text.setTextCursor(cursor)
-            status_text.insertHtml(f"<b style='color:#57ab5a;'>▶ {cmd_str}</b>")
-            cursor.insertText('\n')
+            self._log_append(status_text, f"<b style='color:#57ab5a;'>▶ {cmd_str}</b>")
 
             process.start(program, args)
             self.process_map[process_key] = process
-            button.setText(f"Stop {name}")
+            button.setText(self._get_base_process_stop_text(process_key, name))
             button.setStyleSheet("background-color:#4CAF50; color:white; font-weight:bold;")
 
 
@@ -1761,16 +4175,28 @@ class RobotControlUI(QMainWindow):
                 # Skip expected shutdown messages
                 if 'process has died' in line and 'exit code -9' in line:
                     continue
-                
+
                 # Convert ANSI color codes to HTML
                 html_line = self._ansi_to_html(line)
-                
+
                 # Use insertHtml to properly render HTML entities
-                cursor = self.full_control_status_text.textCursor()
-                cursor.movePosition(cursor.End)
-                self.full_control_status_text.setTextCursor(cursor)
-                self.full_control_status_text.insertHtml(html_line)
-                cursor.insertText('\n')
+                self._log_append(self.full_control_status_text, html_line)
+
+    def handle_joint_output(self, process):
+        """Handle output for joint control processes (outputs to joint_status_text)"""
+        output = process.readAllStandardOutput().data().decode()
+        if output:
+            lines = output.split('\n')
+            for line in lines:
+                # Skip expected shutdown messages
+                if 'process has died' in line and 'exit code -9' in line:
+                    continue
+
+                # Convert ANSI color codes to HTML
+                html_line = self._ansi_to_html(line)
+
+                # Use insertHtml to properly render HTML entities
+                self._append_to_text_widget(self.joint_status_text, html_line)
  
     def _on_process_finished(self, process_key, button, name):
         """Handle when a process finishes unexpectedly"""
@@ -1778,7 +4204,7 @@ class RobotControlUI(QMainWindow):
             del self.process_map[process_key]
             button.setText(f"Start {name}")
             button.setStyleSheet("")
-            self.status_text.append(f"⚠ {name} exited")
+            self._log_append(self.status_text, f"⚠ {name} exited")
             
             # Update tab states when arm processes finish
             if process_key == 'arm_launch':
@@ -1789,7 +4215,7 @@ class RobotControlUI(QMainWindow):
         """Handle when a base process finishes unexpectedly"""
         if process_key in self.process_map:
             del self.process_map[process_key]
-            button.setText(f"Start {name}")
+            button.setText(self._get_base_process_start_text(process_key, name))
             button.setStyleSheet("")
             
             # Determine which status text to use
@@ -1798,7 +4224,11 @@ class RobotControlUI(QMainWindow):
             else:
                 status_text = self.base_status_text
             
-            status_text.append(f"{name} exited")
+            self._log_append(status_text, f"{name} exited")
+
+            if self._is_robot_bringup_process(process_key) and bool(button.property('uses_gazebo')):
+                self._kill_gazebo_processes()
+                button.setProperty('uses_gazebo', False)
             
             # Re-enable mutually exclusive buttons
             if 'mapping' in process_key:
@@ -1816,11 +4246,12 @@ class RobotControlUI(QMainWindow):
                     btn.setEnabled(True)
             
             # Update tab states when base processes finish
-            if not process_key.startswith('full') and process_key in ['mapping', 'localization']:
+            if not process_key.startswith('full') and self._is_base_tab_state_process(process_key):
                 self._update_tab_states_for_base()
 
             elif process_key.startswith('full') and any(
-                p in process_key for p in ['mapping', 'localization', 'nav2', 'exploration']
+                p in process_key
+                for p in ['mobile_manipulator', 'mapping', 'localization', 'nav2', 'exploration']
             ):
                 self._update_tab_states_for_full_control()
  
@@ -1838,12 +4269,8 @@ class RobotControlUI(QMainWindow):
                 html_line = self._ansi_to_html(line)
  
                 # Use insertHtml to properly render HTML entities
-                cursor = self.status_text.textCursor()
-                cursor.movePosition(cursor.End)
-                self.status_text.setTextCursor(cursor)
-                self.status_text.insertHtml(html_line)
-                cursor.insertText('\n')  # Use plain text newline to preserve formatting
- 
+                self._log_append(self.status_text, html_line)
+
     def handle_base_output(self, process):
         """Handle output for base control processes (outputs to base_status_text)"""
         output = process.readAllStandardOutput().data().decode()
@@ -1859,16 +4286,24 @@ class RobotControlUI(QMainWindow):
                 html_line = self._ansi_to_html(line)
  
                 # Use insertHtml to properly render HTML entities
-                cursor = self.base_status_text.textCursor()
-                cursor.movePosition(cursor.End)
-                self.base_status_text.setTextCursor(cursor)
-                self.base_status_text.insertHtml(html_line)
-                cursor.insertText('\n')  # Use plain text newline to preserve formatting
- 
+                self._log_append(self.base_status_text, html_line)
+
     def _connect_robot_socket(self, status_text=None):
         """Connect to robot dashboard if not already connected"""
         if status_text is None:
             status_text = self.status_text
+
+        context = 'full' if status_text is self.full_control_status_text else 'arm'
+        desired_host = self._get_robot_ip_for_launch(context=context)
+        if self.robot_host != desired_host:
+            if self.robot_socket:
+                try:
+                    self.robot_socket.close()
+                except Exception:
+                    pass
+                self.robot_socket = None
+            self.robot_host = desired_host
+
         if self.robot_socket is None:
             try:
                 self.robot_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1877,53 +4312,154 @@ class RobotControlUI(QMainWindow):
                 # Read initial connection message
                 data = self.robot_socket.recv(1024)
                 response = data.decode('utf-8').strip()
-                status_text.append(f"✓ Connected to robot: {response}")
+                self._log_append(status_text, f"✓ Connected to robot: {response}")
                 return True
             except Exception as e:
-                status_text.append(f"<span style='color: #f47067;'>✗ Failed to connect to robot: {e}</span>")
+                self._log_append(status_text, f"<span style='color: #f47067;'>✗ Failed to connect to robot: {e}</span>")
                 self.robot_socket = None
                 return False
         return True
  
+    def _build_status_indicators(self, parent_layout):
+        """Add Robot Mode / Safety Status / Program State indicator rows to parent_layout.
+
+        Returns a dict keyed by command name ('robotmode', 'safetystatus',
+        'programState') with (icon_label, value_label) tuples for later updates.
+        """
+        indicators = {}
+        rows = [
+            ('robotmode',    'Robot Mode'),
+            ('safetystatus', 'Safety Status'),
+            ('programState', 'Program State'),
+        ]
+        for key, label_text in rows:
+            row = QHBoxLayout()
+            icon = QLabel("○")
+            icon.setStyleSheet("color: #8b949e; font-size: 16pt; font-weight: bold;")
+            icon.setFixedWidth(24)
+            icon.setAlignment(Qt.AlignCenter)
+            name = QLabel(label_text + ":")
+            name.setStyleSheet("font-weight: bold;")
+            name.setFixedWidth(110)
+            value = QLabel("—")
+            value.setStyleSheet("color: #8b949e;")
+            value.setWordWrap(True)
+            row.addWidget(icon)
+            row.addWidget(name)
+            row.addWidget(value, 1)
+            parent_layout.addLayout(row)
+            indicators[key] = (icon, value)
+        return indicators
+
+    def _update_status_indicator(self, command, response, status_text):
+        """Update icon/value labels based on the dashboard response."""
+        if command not in ('robotmode', 'safetystatus', 'programState'):
+            return
+        if status_text is self.status_text:
+            indicators = getattr(self, 'arm_status_indicators', None)
+        elif status_text is getattr(self, 'full_control_status_text', None):
+            indicators = getattr(self, 'full_status_indicators', None)
+        else:
+            indicators = None
+        if not indicators or command not in indicators:
+            return
+
+        icon_label, value_label = indicators[command]
+        text = (response or "").strip()
+        GREEN = "#2ea043"
+        RED = "#f47067"
+        GREY = "#8b949e"
+
+        if command == 'robotmode':
+            val = text.split(':', 1)[-1].strip() if ':' in text else text
+            ok = val.upper() == 'RUNNING'
+            icon_label.setText("●")
+            icon_label.setStyleSheet(
+                f"color: {GREEN if ok else RED}; font-size: 16pt; font-weight: bold;"
+            )
+            value_label.setText(val or "—")
+            value_label.setStyleSheet(f"color: {GREEN if ok else RED};")
+        elif command == 'safetystatus':
+            val = text.split(':', 1)[-1].strip() if ':' in text else text
+            ok = val.upper() == 'NORMAL'
+            icon_label.setText("☑" if ok else "⛔")
+            icon_label.setStyleSheet(
+                f"color: {GREEN if ok else RED}; font-size: 16pt; font-weight: bold;"
+            )
+            value_label.setText(val or "—")
+            value_label.setStyleSheet(f"color: {GREEN if ok else RED};")
+        elif command == 'programState':
+            first = text.split()[0].upper() if text else ""
+            ok = first == 'PLAYING'
+            icon_label.setText("●")
+            icon_label.setStyleSheet(
+                f"color: {GREEN if ok else RED}; font-size: 16pt; font-weight: bold;"
+            )
+            value_label.setText("PLAYING" if ok else "STOPPED")
+            value_label.setStyleSheet(f"color: {GREEN if ok else RED};")
+
+    # Map of control commands to the status query(ies) that should be re-issued
+    # afterwards so the indicators reflect the actual post-command robot state.
+    _CONTROL_STATUS_REFRESH = {
+        'power on':                 ['robotmode'],
+        'power off':                ['robotmode'],
+        'brake release':            ['robotmode'],
+        'shutdown':                 ['robotmode'],
+        'play':                     ['programState', 'robotmode'],
+        'pause':                    ['programState'],
+        'stop':                     ['programState'],
+        'load Test_external_control.urp': ['programState'],
+        'restart safety':           ['safetystatus', 'robotmode'],
+        'close safety popup':       ['safetystatus'],
+        'unlock protective stop':   ['safetystatus', 'robotmode'],
+    }
+
+    def _schedule_status_refresh(self, command, status_text):
+        """If `command` is a control command we know about, query the related
+        status(es) shortly afterwards so the indicators reflect the actual
+        robot state (e.g. 'play' that fails should not leave PLAYING showing)."""
+        refreshes = self._CONTROL_STATUS_REFRESH.get(command)
+        if not refreshes:
+            return
+
+        def _do_refresh():
+            for s in refreshes:
+                self._send_robot_command(s, status_text=status_text)
+
+        # Small delay so the robot has time to transition before we query.
+        QTimer.singleShot(500, _do_refresh)
+
     def _send_robot_command(self, command, status_text=None):
         """Send command to robot dashboard and return response"""
         if status_text is None:
             status_text = self.status_text
         if not self._connect_robot_socket(status_text=status_text):
             return None
- 
+
         try:
             self.robot_socket.send(str.encode(command + '\n'))
-            status_text.append(f"<b style='color: #57ab5a;'>→ SENT: {command}</b>")
-            status_text.append("")  # Add newline after command
- 
+            self._log_append(status_text, f"<b style='color: #57ab5a;'>→ SENT: {command}</b>")
+            self._log_append(status_text, "")  # Add newline after command
+
             data = self.robot_socket.recv(1024)
             response = data.decode('utf-8').strip()
-            status_text.append(f"← RECV: {response}")
+            self._log_append(status_text, f"← RECV: {response}")
+            self._update_status_indicator(command, response, status_text)
+            self._schedule_status_refresh(command, status_text)
             return response
         except Exception as e:
-            status_text.append(f"<span style='color: #f47067;'>✗ Command failed: {e}</span>")
+            self._log_append(status_text, f"<span style='color: #f47067;'>✗ Command failed: {e}</span>")
             # Close socket on error so it reconnects next time
             if self.robot_socket:
                 self.robot_socket.close()
                 self.robot_socket = None
             return None
  
-    def send_status_command(self, status_text=None):
-        """Send selected status command to robot"""
-        command = self.status_cmd_combo.currentText()
-        self._send_robot_command(command, status_text=status_text)
- 
     def send_control_command(self, status_text=None):
         """Send selected control command to robot"""
         command = self.control_cmd_combo.currentText()
         self._send_robot_command(command, status_text=status_text)
- 
-    def send_full_control_status_command(self):
-        """Send selected status command to robot (Full Control tab)"""
-        command = self.full_control_status_cmd_combo.currentText()
-        self._send_robot_command(command, status_text=self.full_control_status_text)
-    
+
     def send_all_full_control_status_commands(self):
         """Send all status commands sequentially (Full Control tab)"""
         status_commands = [
@@ -1935,27 +4471,27 @@ class RobotControlUI(QMainWindow):
             'is in remote control'
         ]
         
-        self.full_control_status_text.append("=" * 50)
-        self.full_control_status_text.append("📋 Sending all status commands...")
-        self.full_control_status_text.append("=" * 50)
-        
+        self._log_append(self.full_control_status_text, "=" * 50)
+        self._log_append(self.full_control_status_text, "📋 Sending all status commands...")
+        self._log_append(self.full_control_status_text, "=" * 50)
+
         success_count = 0
         for command in status_commands:
             response = self._send_robot_command(command, status_text=self.full_control_status_text)
             if response is not None:
                 success_count += 1
             # Add a small visual separator between commands
-            self.full_control_status_text.append("-" * 50)
+            self._log_append(self.full_control_status_text, "-" * 50)
 
         if success_count == len(status_commands):
-            self.full_control_status_text.append("✓ All status commands sent")
+            self._log_append(self.full_control_status_text, "✓ All status commands sent")
         elif success_count == 0:
-            self.full_control_status_text.append("✗ All status commands failed")
+            self._log_append(self.full_control_status_text, "✗ All status commands failed")
         else:
-            self.full_control_status_text.append(
+            self._log_append(self.full_control_status_text,
                 f"⚠ {success_count}/{len(status_commands)} status commands succeeded"
             )
-        self.full_control_status_text.append("")
+        self._log_append(self.full_control_status_text, "")
     
     def send_full_control_control_command(self):
         """Send selected control command to robot (Full Control tab)"""
@@ -1966,24 +4502,47 @@ class RobotControlUI(QMainWindow):
         """Run ps aux | grep ros2 command (Full Control tab)"""
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
-        process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
+        
+        # Clear accumulator for new ps command
+        self.ps_output_accumulator = ""
+        
+        # Connect to special handler that accumulates output
+        process.readyReadStandardOutput.connect(lambda: self._handle_ps_output(process))
  
         # Display command in bold green
         cmd_str = 'ps aux | grep -E \'ros2|robot\' | grep -v grep'
-        cursor = self.full_control_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.full_control_status_text.setTextCursor(cursor)
-        self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        cursor.insertText('\n')  # Ensure newline after command
- 
+        self._log_append(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         # Run the command using shell to support pipe
         process_key = 'full_ps_ros2'
-        process.finished.connect(lambda: self._cleanup_full_ps_ros(process_key))
+        process.finished.connect(lambda: self._cleanup_full_ps_ros(process_key, process))
         process.start('bash', ['-c', 'ps aux | grep -E \'ros2|robot\' | grep -v grep'])
         self.process_map[process_key] = process
  
-    def _cleanup_full_ps_ros(self, process_key):
-        """Clean up finished ps aux process (Full Control tab)"""
+    def _handle_ps_output(self, process):
+        """Handle output from ps command, accumulating it and displaying it"""
+        output = process.readAllStandardOutput().data().decode()
+        if output:
+            # Accumulate for later parsing
+            self.ps_output_accumulator += output
+            
+            # Also display it
+            lines = output.split('\n')
+            for line in lines:
+                if line.strip():
+                    html_line = self._ansi_to_html(line)
+                    self._log_append(self.full_control_status_text, html_line)
+
+    def _cleanup_full_ps_ros(self, process_key, process):
+        """Clean up finished ps aux process and populate process combobox (Full Control tab)"""
+        # Read any remaining output
+        remaining_output = process.readAllStandardOutput().data().decode()
+        if remaining_output:
+            self.ps_output_accumulator += remaining_output
+        
+        # Parse the accumulated process list and populate combobox
+        self.populate_process_combo(self.ps_output_accumulator)
+        
         if process_key in self.process_map:
             del self.process_map[process_key]
     
@@ -2011,21 +4570,17 @@ class RobotControlUI(QMainWindow):
             del self.process_map[process_key]
             button.setText(f"Start {name}")
             button.setStyleSheet("")
-            self.full_control_status_text.append(f"⏹ Stopped {name}")
+            self._log_append(self.full_control_status_text, f"⏹ Stopped {name}")
         else:
             # Start the process
             process = QProcess(self)
             process.setProcessChannelMode(QProcess.MergedChannels)
             process.readyReadStandardOutput.connect(lambda: self.handle_full_control_output(process))
             process.finished.connect(lambda: self._on_full_control_process_finished(process_key, button, name))
- 
+
             # Display command in bold green
             cmd_str = program + ' ' + ' '.join(args)
-            cursor = self.full_control_status_text.textCursor()
-            cursor.movePosition(cursor.End)
-            self.full_control_status_text.setTextCursor(cursor)
-            self.full_control_status_text.insertHtml(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-            cursor.insertText('\n')  # Ensure newline after command
+            self._log_append(self.full_control_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
  
             process.start(program, args)
             self.process_map[process_key] = process
@@ -2038,23 +4593,22 @@ class RobotControlUI(QMainWindow):
             del self.process_map[process_key]
             button.setText(f"Start {name}")
             button.setStyleSheet("")
-            self.full_control_status_text.append(f"⚠ {name} exited")
+            self._log_append(self.full_control_status_text, f"⚠ {name} exited")
 
     def list_controllers(self):
-        """List ROS2 controllers using ros2 control CLI"""
+        """List controllers for all detected controller_manager nodes (Arm tab)."""
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
         process.readyReadStandardOutput.connect(lambda: self.handle_output(process))
  
         # Display command in bold green
-        cmd_str = 'ros2 control list_controllers -c /arm/controller_manager'
-        self.status_text.append(f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
-        self.status_text.append("")  # Add newline after command
- 
+        cmd_str = "for cm in $(ros2 node list | grep -E '(^|/)controller_manager$'); do ros2 control list_controllers -c $cm; done"
+        self._log_append(self.status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         # Run the command
         process_key = 'list_controllers'
         process.finished.connect(lambda: self._cleanup_list_controllers(process_key))
-        process.start('ros2', ['control', 'list_controllers', '-c', '/arm/controller_manager'])
+        process.start('bash', ['-c', self._build_list_all_controllers_script()])
         self.process_map[process_key] = process
  
     def _cleanup_list_controllers(self, process_key):
@@ -2063,102 +4617,64 @@ class RobotControlUI(QMainWindow):
             exit_code = self.process_map[process_key].exitCode()
             del self.process_map[process_key]
             if exit_code != 0:
-                self.status_text.append(f"<span style='color: #c69026;'>⚠ List controllers command finished with exit code {exit_code}</span>")
+                self._log_append(self.status_text, f"<span style='color: #c69026;'>⚠ List controllers command finished with exit code {exit_code}</span>")
             else:
-                self.status_text.append("✓ List controllers command completed")
+                self._log_append(self.status_text, "✓ List controllers command completed")
  
     def clear_status(self):
-        """Clear status text and save backup for restore"""
-        self.cleared_status_backup = self.status_text.toHtml()
-        self.status_text.clear()
+        widget = self.status_text
+        self.tab_log_backups[id(widget)] = list(self.tab_log_entries.get(id(widget), []))
+        self.tab_log_entries[id(widget)] = []
+        widget.clear()
         self.btn_restore_status.setVisible(True)
- 
+
     def restore_status(self):
-        """Restore previously cleared status text (prepends old content like Ctrl+L undo)"""
-        if self.cleared_status_backup:
-            current_content = self.status_text.toHtml()
-            self.status_text.setHtml(self.cleared_status_backup + current_content)
-            self.cleared_status_backup = None
+        widget = self.status_text
+        backup = self.tab_log_backups.get(id(widget))
+        if backup:
+            current = self.tab_log_entries.get(id(widget), [])
+            self.tab_log_entries[id(widget)] = backup + current
+            self.tab_log_backups[id(widget)] = []
+            self._log_apply_filter(widget)
             self.btn_restore_status.setVisible(False)
- 
+
     def clear_base_status(self):
-        """Clear base status text and save backup for restore"""
-        self.base_cleared_status_backup = self.base_status_text.toHtml()
-        self.base_status_text.clear()
+        widget = self.base_status_text
+        self.tab_log_backups[id(widget)] = list(self.tab_log_entries.get(id(widget), []))
+        self.tab_log_entries[id(widget)] = []
+        widget.clear()
         self.btn_restore_base_status.setVisible(True)
- 
+
     def restore_base_status(self):
-        """Restore previously cleared base status text (prepends old content like Ctrl+L undo)"""
-        if self.base_cleared_status_backup:
-            current_content = self.base_status_text.toHtml()
-            self.base_status_text.setHtml(self.base_cleared_status_backup + current_content)
-            self.base_cleared_status_backup = None
+        widget = self.base_status_text
+        backup = self.tab_log_backups.get(id(widget))
+        if backup:
+            current = self.tab_log_entries.get(id(widget), [])
+            self.tab_log_entries[id(widget)] = backup + current
+            self.tab_log_backups[id(widget)] = []
+            self._log_apply_filter(widget)
             self.btn_restore_base_status.setVisible(False)
- 
-    def search_status(self, forward=True):
-        """Search for text in arm status box"""
-        search_text = self.search_input.text()
-        if not search_text:
-            return
- 
-        from PyQt5.QtGui import QTextDocument
-        flags = QTextDocument.FindFlags()
-        if not forward:
-            flags |= QTextDocument.FindBackward
- 
-        found = self.status_text.find(search_text, flags)
-        if not found:
-            # Wrap around: move cursor to start/end and try again
-            cursor = self.status_text.textCursor()
-            if forward:
-                cursor.movePosition(cursor.Start)
-            else:
-                cursor.movePosition(cursor.End)
-            self.status_text.setTextCursor(cursor)
-            self.status_text.find(search_text, flags)
- 
-    def search_base_status(self, forward=True):
-        """Search for text in base status box"""
-        search_text = self.base_search_input.text()
-        if not search_text:
-            return
- 
-        from PyQt5.QtGui import QTextDocument
-        flags = QTextDocument.FindFlags()
-        if not forward:
-            flags |= QTextDocument.FindBackward
- 
-        found = self.base_status_text.find(search_text, flags)
-        if not found:
-            # Wrap around: move cursor to start/end and try again
-            cursor = self.base_status_text.textCursor()
-            if forward:
-                cursor.movePosition(cursor.Start)
-            else:
-                cursor.movePosition(cursor.End)
-            self.base_status_text.setTextCursor(cursor)
-            self.base_status_text.find(search_text, flags)
-   
+
     def clear_joint_status(self):
         """Clear joint control status text"""
         self.joint_status_text.clear()
     
     def read_joint_positions(self, silent=False):
-        """Read current joint positions from /arm/joint_states and populate input fields"""
+        """Read current joint positions from the active joint_states topic and populate input fields."""
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
+        joint_states_topic = self._get_joint_states_topic_for_ui(context='full')
         
         # Display command in bold green (only if not silent)
         if not silent:
-            cursor = self.joint_status_text.textCursor()
-            cursor.movePosition(cursor.End)
-            self.joint_status_text.setTextCursor(cursor)
-            self.joint_status_text.insertHtml("<b style='color: #539bf5;'>▶ ros2 topic echo /joint_states --once</b><br>")
-            cursor.insertText('\n')
+            self._append_to_text_widget(
+                self.joint_status_text,
+                f"<b style='color: #539bf5;'>▶ ros2 topic echo {joint_states_topic} --once</b><br>"
+            )
         
         # Store the process to retrieve output later
         process.finished.connect(lambda: self.parse_joint_states(process, silent))
-        process.start('bash', ['-c', 'timeout 5 ros2 topic echo /joint_states --once'])
+        process.start('bash', ['-c', f'timeout 5 ros2 topic echo {joint_states_topic} --once'])
 
     
     def parse_joint_states(self, process, silent=False):
@@ -2170,11 +4686,7 @@ class RobotControlUI(QMainWindow):
             lines = output.split('\n')
             for line in lines:
                 html_line = self._ansi_to_html(line)
-                cursor = self.joint_status_text.textCursor()
-                cursor.movePosition(cursor.End)
-                self.joint_status_text.setTextCursor(cursor)
-                self.joint_status_text.insertHtml(html_line)
-                cursor.insertText('\n')
+                self._append_to_text_widget(self.joint_status_text, html_line)
         
         # Check if topic actually published data (not timeout or error)
         if not output.strip() or 'ERROR' in output or output.strip().startswith('timeout'):
@@ -2234,14 +4746,7 @@ class RobotControlUI(QMainWindow):
             joint_position_map = dict(zip(joint_names, positions))
             
             # Expected joint order (for UI display and publishing)
-            expected_joints = [
-                'arm_shoulder_pan_joint',
-                'arm_shoulder_lift_joint',
-                'arm_elbow_joint',
-                'arm_wrist_1_joint',
-                'arm_wrist_2_joint',
-                'arm_wrist_3_joint'
-            ]
+            expected_joints = self.arm_joint_names
             
             # Verify all expected joints are present
             missing_joints = [j for j in expected_joints if j not in joint_position_map]
@@ -2297,16 +4802,11 @@ class RobotControlUI(QMainWindow):
 
      
     def publish_joint_trajectory(self):
-        """Publish joint trajectory to /arm/planned_trajectory topic"""
+        """Publish joint trajectory to the active planned_trajectory topic."""
+        planned_trajectory_topic = self._get_planned_trajectory_topic_for_ui()
+
         # Expected joint order for publishing
-        expected_joints = [
-            'arm_shoulder_pan_joint',
-            'arm_shoulder_lift_joint',
-            'arm_elbow_joint',
-            'arm_wrist_1_joint',
-            'arm_wrist_2_joint',
-            'arm_wrist_3_joint'
-        ]
+        expected_joints = self.arm_joint_names
         
         # Get joint positions from input fields (in expected order)
         positions = [field.value() for field in self.joint_inputs]
@@ -2358,18 +4858,14 @@ class RobotControlUI(QMainWindow):
         time_nanosec = int((self.time_from_start_input.value() - time_sec) * 1e9)
         
         # Build the ros2 topic pub command
-        cmd = f"ros2 topic pub --once /planned_trajectory trajectory_msgs/msg/JointTrajectory \"{{header: {{stamp: {{sec: 0, nanosec: 0}}, frame_id: ''}}, joint_names: ['arm_shoulder_pan_joint', 'arm_shoulder_lift_joint', 'arm_elbow_joint', 'arm_wrist_1_joint', 'arm_wrist_2_joint', 'arm_wrist_3_joint'], points: [{{positions: [{positions_str}], velocities: [], accelerations: [], effort: [], time_from_start: {{sec: {time_sec}, nanosec: {time_nanosec}}}}}]}}\""
+        cmd = f"ros2 topic pub --once {planned_trajectory_topic} trajectory_msgs/msg/JointTrajectory \"{{header: {{stamp: {{sec: 0, nanosec: 0}}, frame_id: ''}}, joint_names: ['arm_shoulder_pan_joint', 'arm_shoulder_lift_joint', 'arm_elbow_joint', 'arm_wrist_1_joint', 'arm_wrist_2_joint', 'arm_wrist_3_joint'], points: [{{positions: [{positions_str}], velocities: [], accelerations: [], effort: [], time_from_start: {{sec: {time_sec}, nanosec: {time_nanosec}}}}}]}}\""
         
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
         process.readyReadStandardOutput.connect(lambda: self._handle_joint_publish_output(process))
         
         # Display command in bold green
-        cursor = self.joint_status_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.joint_status_text.setTextCursor(cursor)
-        self.joint_status_text.insertHtml("<b style='color: #57ab5a;'>📤 Publishing joint trajectory...</b><br>")
-        cursor.insertText('\n')
+        self._append_to_text_widget(self.joint_status_text, "<b style='color: #57ab5a;'>📤 Publishing joint trajectory...</b><br>", add_newline=True)
         
         # Show the positions being published
         self.joint_status_text.append(f"Positions: {positions_str}")
@@ -2387,11 +4883,7 @@ class RobotControlUI(QMainWindow):
             lines = output.split('\n')
             for line in lines:
                 html_line = self._ansi_to_html(line)
-                cursor = self.joint_status_text.textCursor()
-                cursor.movePosition(cursor.End)
-                self.joint_status_text.setTextCursor(cursor)
-                self.joint_status_text.insertHtml(html_line)
-                cursor.insertText('\n')
+                self._append_to_text_widget(self.joint_status_text, html_line)
 
     def on_joint_publish_finished(self, process):
         """Handle completion of joint trajectory publish command"""
@@ -2414,7 +4906,7 @@ class RobotControlUI(QMainWindow):
 
     def send_goal(self):
         if not rclpy.ok():
-            self.status_text.append("<span style='color: #c69026;'>⚠ ROS context invalid - cannot publish</span>")
+            self._log_append(self.status_text, "<span style='color: #c69026;'>⚠ ROS context invalid - cannot publish</span>")
             return
         try:
             pose = Pose()
@@ -2426,60 +4918,288 @@ class RobotControlUI(QMainWindow):
             pose.orientation.z = self.qz_input.value()
             pose.orientation.w = self.qw_input.value()
             self.goal_publisher.publish(pose)
-            self.status_text.append(f"Sent goal: pos({pose.position.x:.2f}, {pose.position.y:.2f}, {pose.position.z:.2f}) orn({pose.orientation.x:.2f}, {pose.orientation.y:.2f}, {pose.orientation.z:.2f}, {pose.orientation.w:.2f})")
+            self._log_append(self.status_text, f"Sent goal: pos({pose.position.x:.2f}, {pose.position.y:.2f}, {pose.position.z:.2f}) orn({pose.orientation.x:.2f}, {pose.orientation.y:.2f}, {pose.orientation.z:.2f}, {pose.orientation.w:.2f})")
         except Exception as e:
-            self.status_text.append(f"<span style='color: #f47067;'>❌ Failed to send goal: {e}</span>")
+            self._log_append(self.status_text, f"<span style='color: #f47067;'>❌ Failed to send goal: {e}</span>")
  
     def send_position_command(self):
-        """Send position by launching node with selected position as argument"""
+        """Send selected position using dynamic send_position service endpoint (Arm Control tab)."""
         position_name = self.position_dropdown.currentText()
- 
-        # Build command
-        ros2_args = ['run', 'arm_control', 'position_sender_node', 
-                     '--ros-args', '-r', '__ns:=/arm']
+        self._send_position_service_call(
+            position_name=position_name,
+            status_text=self.status_text,
+            output_handler=self.handle_output,
+            ui_context='arm',
+        )
+
+    def send_full_control_position_command(self):
+        """Send selected position using dynamic send_position service endpoint (Full Control tab)."""
+        position_name = self.full_control_position_dropdown.currentText()
+        self._send_position_service_call(
+            position_name=position_name,
+            status_text=self.full_control_status_text,
+            output_handler=self.handle_full_control_output,
+            ui_context='full',
+        )
+
+    def reset_planner_arm(self):
+        """Reset the planner from Arm Control tab"""
+        self._reset_planner_generic('reset_planner_arm', self.status_text, self.handle_output)
+
+    def reset_planner(self):
+        """Reset the planner from Full Control tab"""
+        self._reset_planner_generic('reset_planner_full', self.full_control_status_text, self.handle_full_control_output)
+
+    def reset_planner_joint(self):
+        """Reset the planner from Joint Control tab"""
+        self._reset_planner_generic('reset_planner_joint', self.joint_status_text, self.handle_joint_output)
+    
+    def _reset_planner_generic(self, process_key, status_text_widget, output_handler):
+        """Generic method to reset the planner by publishing to /planner/reset topic"""
+        # Clean up existing process if any
+        if process_key in self.process_map:
+            existing_process = self.process_map[process_key]
+            if existing_process.state() == QProcess.Running:
+                existing_process.kill()
+                existing_process.waitForFinished(1000)
+            del self.process_map[process_key]
         
-        # Build xterm command
-        ros2_cmd = 'ros2 ' + ' '.join(ros2_args)
-        xterm_args = ['-e', 'bash', '-c', ros2_cmd]
- 
+        # Create and start the process
+        process = QProcess()
+        command = 'ros2'
+        args = ['topic', 'pub', '--once', '/planner/reset', 'std_msgs/msg/Bool', '{data: true}']
+        
         # Display command in bold green
-        cmd_str = 'xterm -e ' + ros2_cmd
-        self.status_text.append(f"<b style='color: #57ab5a;'>→ {cmd_str}</b>")
-        self.status_text.append("")  # Add newline after command
- 
-        # Launch the position_sender_node in xterm
+        cmd_str = command + ' ' + ' '.join(args)
+        self._log_append(status_text_widget, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+        
+        # Connect output handler
+        process.readyReadStandardOutput.connect(lambda: output_handler(process))
+        process.readyReadStandardError.connect(lambda: output_handler(process))
+        process.finished.connect(lambda: self._cleanup_reset_planner(process_key, status_text_widget))
+        
+        # Start the process
+        process.start(command, args)
+        self.process_map[process_key] = process
+    
+    def _cleanup_reset_planner(self, process_key, status_text_widget):
+        """Clean up reset planner process"""
+        if process_key in self.process_map:
+            process = self.process_map[process_key]
+            exit_code = process.exitCode()
+            if exit_code == 0:
+                self._append_to_text_widget(
+                    status_text_widget,
+                    f"<span style='color: #3fb950;'>[Reset Planner]</span> Successfully reset planner."
+                )
+            else:
+                self._append_to_text_widget(
+                    status_text_widget,
+                    f"<span style='color: #f85149;'>[Reset Planner]</span> Command failed with exit code {exit_code}."
+                )
+            del self.process_map[process_key]
+
+    def _is_hybrid_sim_enabled(self, context='full'):
+        """Return True when the requested tab is using hybrid / URSim mode."""
+        if context == 'arm':
+            if not hasattr(self, "arm_hybrid_sim_combo"):
+                return False
+            return self.arm_hybrid_sim_combo.currentText() == 'true'
+
+        if not hasattr(self, "full_control_sim_mode_combo"):
+            return False
+        return self._sync_full_control_hybrid_sim_state() == 'true'
+
+    def _get_joint_states_topic_for_ui(self, context='arm'):
+        """Pick the joint_states topic for slider updates/readback based on context and simulation settings."""
+        if context == 'arm':
+            planner_backend = self._get_planner_backend(context='arm')
+            if planner_backend == 'moveit':
+                return '/arm/joint_states'
+            return '/joint_states'
+        # Full Control tab uses namespace when both simulation and hybrid_sim are true
+        if (
+            hasattr(self, 'full_control_sim_mode_combo')
+            and self.full_control_sim_mode_combo.currentText() == 'true'
+            and self._sync_full_control_hybrid_sim_state() == 'true'
+        ):
+            return '/arm/joint_states'
+        return '/joint_states'
+
+    def _get_planned_trajectory_topic_for_ui(self):
+        """Pick the planned_trajectory topic for Joint Control publishing."""
+        if self._full_control_uses_arm_namespace():
+            return '/arm/planned_trajectory'
+        return '/planned_trajectory'
+
+    def _get_robot_ip_for_launch(self, context='arm'):
+        """Pick robot_ip based on the tab's hybrid/URSim selector."""
+        if self._is_hybrid_sim_enabled(context=context):
+            return '192.168.56.101'
+        return '192.168.1.102'
+
+    def _get_planner_backend(self, context='arm'):
+        """Pick planner_backend from the requested tab."""
+        if context == 'full':
+            if hasattr(self, 'full_control_planner_backend_combo'):
+                return self.full_control_planner_backend_combo.currentText()
+            return 'legacy'
+
+        if hasattr(self, 'arm_planner_backend_combo'):
+            return self.arm_planner_backend_combo.currentText()
+        return 'legacy'
+
+    def _get_moveit_planning_pipeline(self, context='arm'):
+        """Pick the MoveIt planning pipeline from the requested tab."""
+        if context == 'full':
+            if hasattr(self, 'full_control_moveit_pipeline_combo'):
+                return self.full_control_moveit_pipeline_combo.currentText()
+        elif hasattr(self, 'arm_moveit_pipeline_combo'):
+            return self.arm_moveit_pipeline_combo.currentText()
+        return 'pilz_industrial_motion_planner'
+
+    def _get_moveit_planner_id(self, context='arm'):
+        """Pick the MoveIt planner id from the requested tab."""
+        if context == 'full':
+            if hasattr(self, 'full_control_moveit_planner_id_combo'):
+                return self.full_control_moveit_planner_id_combo.currentText()
+        elif hasattr(self, 'arm_moveit_planner_id_combo'):
+            return self.arm_moveit_planner_id_combo.currentText()
+        return 'PTP'
+
+    def _get_moveit_launch_args(self, context='arm'):
+        """Build launch arguments for the selected MoveIt pipeline and planner id."""
+        if self._get_planner_backend(context=context) != 'moveit':
+            return []
+
+        planning_pipeline = self._get_moveit_planning_pipeline(context=context)
+        moveit_args = [f'moveit_planning_pipeline:={planning_pipeline}']
+
+        if planning_pipeline == 'pilz_industrial_motion_planner':
+            pose_planner_id = self._get_moveit_planner_id(context=context)
+            moveit_args.append(f'moveit_pose_planner_id:={pose_planner_id}')
+            moveit_args.append('moveit_joint_planner_id:=PTP')
+        else:
+            moveit_args.append('moveit_pose_planner_id:=RRTConnectkConfigDefault')
+            moveit_args.append('moveit_joint_planner_id:=RRTConnectkConfigDefault')
+
+        return moveit_args
+
+    def _get_namespace_for_arm_launch(self, planner_backend):
+        """Arm launches now stay in the root namespace for both backends."""
+        return ''
+
+    def _full_control_uses_arm_namespace(self):
+        """Only the Full Control hybrid launch keeps the arm stack under /arm."""
+        return (
+            hasattr(self, 'full_control_sim_mode_combo') and
+            self.full_control_sim_mode_combo.currentText() == 'true' and
+            self._sync_full_control_hybrid_sim_state() == 'true'
+        )
+
+    def _get_robot_ip_for_arm_launch(self):
+        """Backward-compatible arm launch helper."""
+        return self._get_robot_ip_for_launch(context='arm')
+
+    def _get_emergency_stop_topic_for_ui(self, context='arm'):
+        """Pick the emergency_stop topic based on context and simulation settings."""
+        if context == 'arm':
+            planner_backend = self._get_planner_backend(context='arm')
+            if planner_backend == 'moveit':
+                return '/arm/emergency_stop'
+            return '/emergency_stop'
+        # Full Control tab uses namespace when both simulation and hybrid_sim are true
+        if (
+            hasattr(self, 'full_control_sim_mode_combo')
+            and self.full_control_sim_mode_combo.currentText() == 'true'
+            and self._sync_full_control_hybrid_sim_state() == 'true'
+        ):
+            return '/arm/emergency_stop'
+        return '/emergency_stop'
+
+    def _get_status_text_for_context(self, context='arm'):
+        """Get the appropriate status text widget based on context."""
+        if context == 'full':
+            return self.full_control_status_text
+        return self.status_text
+
+    def _get_emergency_stop_button_for_context(self, context='arm'):
+        """Get the appropriate emergency stop button based on context."""
+        if context == 'full' and hasattr(self, 'btn_full_control_emergency_stop'):
+            return self.btn_full_control_emergency_stop
+        return self.btn_emergency_stop
+
+    def _get_send_position_service_name(self, context='arm'):
+        """Pick send_position service name based on the active tab and planner backend."""
+        if context == 'arm':
+            planner_backend = self._get_planner_backend(context='arm')
+            namespace = self._get_namespace_for_arm_launch(planner_backend)
+            if namespace:
+                return f'/{namespace}/send_position'
+            return '/send_position'
+        if self._is_hybrid_sim_enabled(context=context):
+            return '/arm/send_position'
+        return '/send_position'
+
+    def _send_position_service_call(self, position_name, status_text, output_handler, ui_context='arm'):
+        """Execute ros2 service call for the selected send_position service and stream output."""
+        payload = f"{{position_name: '{position_name}'}}"
+        service_name = self._get_send_position_service_name(context=ui_context)
+        ros2_args = [
+            'service',
+            'call',
+            service_name,
+            'arm_control/srv/SendPosition',
+            payload,
+        ]
+
+        cmd_str = f'ros2 service call {service_name} arm_control/srv/SendPosition "{payload}"'
+        self._log_append(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.MergedChannels)
-        process.readyReadStandardOutput.connect(lambda: self.handle_output(process))
- 
-        # Store process temporarily to prevent garbage collection
-        process_key = f'position_cmd_{position_name}'
-        process.finished.connect(lambda: self._cleanup_position_sender(process_key, position_name))
-        process.start('xterm', xterm_args)
+        process.readyReadStandardOutput.connect(lambda: output_handler(process))
+
+        process_key = f"send_position_service_{time.time_ns()}"
+        process.finished.connect(
+            lambda: self._cleanup_send_position_service_call(process_key, position_name, status_text)
+        )
+
+        process.start('ros2', ros2_args)
         self.process_map[process_key] = process
+
+    def _cleanup_send_position_service_call(self, process_key, position_name, status_text):
+        """Clean up one-shot send position service call process."""
+        if process_key not in self.process_map:
+            return
+
+        exit_code = self.process_map[process_key].exitCode()
+        del self.process_map[process_key]
+
+        if exit_code == 0:
+            self._log_append(status_text, f"✓ Position '{position_name}' request completed")
+        else:
+            self._log_append(status_text,
+                f"<span style='color: #c69026;'>⚠ Position '{position_name}' request finished with exit code {exit_code}</span>"
+            )
  
-    def _cleanup_position_sender(self, process_key, position_name):
-        """Clean up finished position sender process"""
-        if process_key in self.process_map:
-            del self.process_map[process_key]
-        self.status_text.append(f"✓ Position '{position_name}' command completed")
- 
-    def emergency_stop(self):
+    def emergency_stop(self, context='arm'):
         """Toggle emergency stop state (latched)."""
-        self.set_emergency_stop_state(not self.emergency_stop_active, source="ui")
+        self.set_emergency_stop_state(not self.emergency_stop_active, source="ui", context=context)
             
     def _on_emergency_stop_state(self, msg: Bool):
         """Sync UI with the latched /arm/emergency_stop state (even if published externally)."""
-        self.set_emergency_stop_state(bool(msg.data), source="topic")
+        self.set_emergency_stop_state(bool(msg.data), source="topic", context='arm')
 
-    def set_emergency_stop_state(self, active: bool, source: str = "ui"):
+    def set_emergency_stop_state(self, active: bool, source: str = "ui", context: str = "arm"):
         """
         Centralized state setter.
 
         Behavior (matches old behavior):
-        - Only publishes to /arm/emergency_stop when source == "ui"
+        - Only publishes to emergency_stop topic when source == "ui"
         - Only publishes when the state actually changes
         - Topic callbacks only update UI (no re-publish), preventing feedback loops
+        - Topic namespace depends on context and simulation settings
         """
         # If no change, do nothing (prevents repeated publishes / UI churn)
         if active == getattr(self, "emergency_stop_active", False):
@@ -2487,105 +5207,133 @@ class RobotControlUI(QMainWindow):
 
         # Update internal state + UI
         self.emergency_stop_active = active
-        self._update_emergency_stop_button_ui()
+        self._update_emergency_stop_button_ui(context=context)
         # QApplication.processEvents()
 
         # If this came from the topic, do not publish or trigger side effects
         if source != "ui":
             return
 
+        # Get the appropriate status text widget for this context
+        status_text = self._get_status_text_for_context(context)
+
         if not rclpy.ok():
-            self.status_text.append("<span style='color: #c69026;'>⚠ ROS context invalid - cannot set emergency stop</span>")
+            self._log_append(status_text, "<span style='color: #c69026;'>⚠ ROS context invalid - cannot set emergency stop</span>")
             return
+
+        # Determine the correct topic based on context and simulation settings
+        emergency_stop_topic = self._get_emergency_stop_topic_for_ui(context)
+
+        # Display the command being executed in green color
+        action_str = "true" if active else "false"
+        cmd_str = f'ros2 topic pub --once {emergency_stop_topic} std_msgs/msg/Bool "{{data: {action_str}}}"'
+        self._log_append(status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
 
         # Publish only on user-triggered change
         try:
             stop_msg = Bool()
             stop_msg.data = active
-            self.emergency_stop_publisher.publish(stop_msg)
+
+            # Get or create a persistent publisher for the determined topic
+            publisher = self._emergency_stop_publishers.get(emergency_stop_topic)
+            if publisher is None:
+                qos_profile = QoSProfile(
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=10,
+                )
+                publisher = self.node.create_publisher(Bool, emergency_stop_topic, qos_profile)
+                self._emergency_stop_publishers[emergency_stop_topic] = publisher
+
+            publisher.publish(stop_msg)
+
         except Exception as e:
-            self.status_text.append(f"<span style='color: #f47067;'>❌ Failed to publish /arm/emergency_stop: {e}</span>")
+            self._log_append(status_text, f"<span style='color: #f47067;'>❌ Failed to publish {emergency_stop_topic}: {e}</span>")
             return
 
         # User-triggered side-effects only
         try:
             if active:
-                self.status_text.append("<span style='color: #c69026; font-weight: bold;'>⚠ EMERGENCY STOP - Published stop signal</span>")
+                self._log_append(status_text, "<span style='color: #c69026; font-weight: bold;'>⚠ EMERGENCY STOP - Published stop signal</span>")
 
                 if self.current_goal_handle is not None:
                     self.current_goal_handle.cancel_goal_async()
-                    self.status_text.append("<span style='color: #c69026;'>⚠ Canceling current trajectory goal...</span>")
+                    self._log_append(status_text, "<span style='color: #c69026;'>⚠ Canceling current trajectory goal...</span>")
                     self.current_goal_handle = None
 
-                response = self._send_robot_command('stop')
+                response = self._send_robot_command('stop', status_text=status_text)
                 if response:
-                    self.status_text.append("<span style='color: #c69026; font-weight: bold;'>⚠ Robot protective stop triggered</span>")
+                    self._log_append(status_text, "<span style='color: #c69026; font-weight: bold;'>⚠ Robot protective stop triggered</span>")
 
             else:
-                self.status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ EMERGENCY STOP RELEASED - Published release signal</span>")
+                self._log_append(status_text, "<span style='color: #57ab5a; font-weight: bold;'>✓ EMERGENCY STOP RELEASED - Published release signal</span>")
 
-                self._send_robot_command('close safety popup')
-                response = self._send_robot_command('unlock protective stop')
+                self._send_robot_command('close safety popup', status_text=status_text)
+                response = self._send_robot_command('unlock protective stop', status_text=status_text)
                 if response:
-                    self.status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ Robot protective stop released (requested)</span>")
-                    
-                    play_resp = self._send_robot_command('play')
+                    self._log_append(status_text, "<span style='color: #57ab5a; font-weight: bold;'>✓ Robot protective stop released (requested)</span>")
+
+                    play_resp = self._send_robot_command('play', status_text=status_text)
                     if play_resp:
-                        self.status_text.append("<span style='color: #57ab5a; font-weight: bold;'>✓ Robot program started (play)</span>")
-                    
+                        self._log_append(status_text, "<span style='color: #57ab5a; font-weight: bold;'>✓ Robot program started (play)</span>")
+
         except Exception as e:
-            self.status_text.append(f"<span style='color: #f47067;'>❌ Error while applying emergency stop state: {e}</span>")
+            self._log_append(status_text, f"<span style='color: #f47067;'>❌ Error while applying emergency stop state: {e}</span>")
 
 
-    def _update_emergency_stop_button_ui(self):
-        """Update button label + color according to emergency stop state."""
-        if not hasattr(self, "btn_emergency_stop"):
-            return
-
+    def _update_emergency_stop_button_ui(self, context='arm'):
+        """Update button label + color according to emergency stop state.
+        Updates both buttons to keep them in sync."""
         if self.emergency_stop_active:
-            self.btn_emergency_stop.setText("EMERGENCY STOP ACTIVE (Click to Release)")
-            self.btn_emergency_stop.setStyleSheet("background-color: #8b0000; color: white; font-weight: bold;")
-            self.btn_emergency_stop.setChecked(True)
+            text = "EMERGENCY STOP ACTIVE (Click to Release)"
+            style = "background-color: #8b0000; color: white; font-weight: bold;"
+            checked = True
         else:
-            self.btn_emergency_stop.setText("EMERGENCY STOP (Click to Activate)")
-            self.btn_emergency_stop.setStyleSheet("background-color: red; color: white; font-weight: bold;")
-            self.btn_emergency_stop.setChecked(False)
+            text = "EMERGENCY STOP (Click to Activate)"
+            style = "background-color: red; color: white; font-weight: bold;"
+            checked = False
+
+        # Update Arm Control button
+        if hasattr(self, "btn_emergency_stop"):
+            self.btn_emergency_stop.setText(text)
+            self.btn_emergency_stop.setStyleSheet(style)
+            self.btn_emergency_stop.setChecked(checked)
+
+        # Update Full Control button
+        if hasattr(self, "btn_full_control_emergency_stop"):
+            self.btn_full_control_emergency_stop.setText(text)
+            self.btn_full_control_emergency_stop.setStyleSheet(style)
+            self.btn_full_control_emergency_stop.setChecked(checked)
  
     def closeEvent(self, event):
         self.timer.stop()
-        self.status_text.append("Shutting down and cleaning up processes...")
- 
-        # Terminate all launched processes
-        for process_key, process in list(self.process_map.items()):
-            if process.state() == QProcess.Running:
-                # Get PID and kill entire process group
-                pid = process.processId()
-                self.status_text.append(f"Terminating {process_key} (PID: {pid})...")
- 
-                # Try graceful termination first
-                process.terminate()
-                if not process.waitForFinished(2000):
-                    # Force kill if still running
-                    process.kill()
-                    process.waitForFinished(1000)
- 
-                # Kill entire process group to catch child processes
-                if pid:
-                    try:
-                        subprocess.run(['pkill', '-9', '-P', str(pid)], timeout=1, stderr=subprocess.DEVNULL)
-                    except:
-                        pass
 
-        # Kill any remaining ROS2 processes from this session
-        self._cleanup_ros_children()
- 
+        # Detach every QProcess from this window so Qt does NOT send SIGTERM
+        # to the underlying OS processes when the window is destroyed.
+        for process in list(self.process_map.values()):
+            try:
+                process.setParent(None)
+            except Exception:
+                pass
+        self.process_map.clear()
+
+        for proc in (self.fsm_launch_process, self.fsm_node_process):
+            if proc is not None:
+                try:
+                    proc.setParent(None)
+                except Exception:
+                    pass
+        self.fsm_launch_process = None
+        self.fsm_node_process = None
+
         # Close robot socket if connected
         if self.robot_socket:
             try:
                 self.robot_socket.close()
-            except:
+            except Exception:
                 pass
- 
+
         self.node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
@@ -2631,9 +5379,524 @@ class RobotControlUI(QMainWindow):
                         pass
         except:
             pass
+
+    def _kill_gazebo_processes(self):
+        """Kill newer Gazebo (Ignition/gz) processes."""
+        # List of Gazebo/Ignition process patterns to kill
+        gz_patterns = [
+            'gz sim',
+            'ign gazebo',
+            'ruby.*gz',
+            'gzserver',
+            'gz-sim',
+        ]
+        
+        for pattern in gz_patterns:
+            try:
+                subprocess.run(['pkill', '-9', '-f', pattern], timeout=2, stderr=subprocess.DEVNULL)
+            except:
+                pass
+    
+    def populate_process_combo(self, ps_output):
+        """Parse ps output and populate the process combobox"""
+        self.current_process_list = []
+        self.process_combo.clear()
+        
+        if not ps_output:
+            self.process_combo.addItem("No processes found")
+            return
+        
+        lines = ps_output.strip().split('\n')
+        item_index = 0
+        for line in lines:
+            if not line.strip():
+                continue
+            
+            # Parse ps aux output: USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND
+            parts = line.split(None, 10)  # Split into max 11 parts
+            if len(parts) >= 11:
+                pid = parts[1]
+                command = parts[10]
+                
+                # Store process info and add to combobox
+                process_info = {'pid': pid, 'command': command, 'full_line': line}
+                self.current_process_list.append(process_info)
+                
+                # Display only PID in the combobox
+                display_text = f"PID: {pid}"
+                self.process_combo.addItem(display_text)
+                
+                # Set tooltip to show full command
+                tooltip = f"PID: {pid}\nCommand: {command}"
+                self.process_combo.setItemData(item_index, tooltip, Qt.ToolTipRole)
+                item_index += 1
+        
+        if not self.current_process_list:
+            self.process_combo.addItem("No processes found")
+        else:
+            self._log_append(self.full_control_status_text,
+                             f"<span style='color: #57ab5a;'>Found {len(self.current_process_list)} ROS2 processes</span>")
+
+    def kill_selected_process(self):
+        """Kill the process selected in the combobox"""
+        current_index = self.process_combo.currentIndex()
+
+        if current_index < 0 or current_index >= len(self.current_process_list):
+            self._log_append(self.full_control_status_text,
+                             "<span style='color: #d73a49;'>No process selected or invalid selection</span>")
+            return
+
+        process_info = self.current_process_list[current_index]
+        pid = process_info['pid']
+        command = process_info['command']
+
+        # Confirm and kill
+        from PyQt5.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self,
+            'Confirm Kill Process',
+            f"Are you sure you want to kill process {pid}?\n\nCommand: {command[:100]}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            # Execute kill command
+            kill_process = QProcess(self)
+            kill_process.setProcessChannelMode(QProcess.MergedChannels)
+
+            cmd_str = f'kill -9 {pid}'
+            self._log_append(self.full_control_status_text,
+                             f"<b style='color: #d73a49;'>▶ {cmd_str}</b>")
+
+            kill_process.finished.connect(lambda: self._on_kill_process_finished(pid, kill_process))
+            kill_process.start('kill', ['-9', pid])
+
+    def _on_kill_process_finished(self, pid, process):
+        """Handle kill process completion"""
+        exit_code = process.exitCode()
+
+        if exit_code == 0:
+            self._log_append(self.full_control_status_text,
+                             f"<span style='color: #57ab5a;'>✓ Successfully killed process {pid}</span>")
+            # Refresh the process list after killing
+            QTimer.singleShot(500, self.run_full_control_ps_ros)
+        else:
+            error_output = process.readAllStandardOutput().data().decode()
+            self._log_append(self.full_control_status_text,
+                             f"<span style='color: #d73a49;'>✗ Failed to kill process {pid}: {error_output}</span>")
+
+    def kill_all_processes(self):
+        """Kill all detected processes except UI itself and ros2 daemon"""
+        if not self.current_process_list:
+            self._log_append(self.full_control_status_text,
+                             "<span style='color: #d73a49;'>No processes to kill</span>")
+            return
+
+        # Get our own PID to exclude
+        ui_pid = os.getpid()
+
+        # Filter processes to kill (exclude UI and ros2 daemon)
+        processes_to_kill = []
+        for process_info in self.current_process_list:
+            pid = process_info['pid']
+            command = process_info['command'].lower()
+
+            # Skip our own process
+            if int(pid) == ui_pid:
+                continue
+
+            # Skip ros2 daemon
+            if 'ros2' in command and 'daemon' in command:
+                continue
+
+            # Skip if it's the UI.py script
+            if 'ui.py' in command:
+                continue
+
+            processes_to_kill.append(process_info)
+
+        if not processes_to_kill:
+            self._log_append(self.full_control_status_text,
+                             "<span style='color: #d73a49;'>No processes to kill (all are protected)</span>")
+            return
+
+        # Confirm kill all
+        from PyQt5.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self,
+            'Confirm Kill All Processes',
+            f"Are you sure you want to kill {len(processes_to_kill)} process(es)?\n\n"
+            f"This will kill all detected processes except the UI and ros2 daemon.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            killed_count = 0
+            failed_count = 0
+
+            self._log_append(self.full_control_status_text,
+                             f"<b style='color: #d73a49;'>▶ Killing {len(processes_to_kill)} process(es)...</b>")
+
+            for process_info in processes_to_kill:
+                pid = process_info['pid']
+                command = process_info['command']
+
+                try:
+                    # Use os.kill for synchronous killing
+                    os.kill(int(pid), signal.SIGKILL)
+                    self._log_append(self.full_control_status_text,
+                                     f"<span style='color: #57ab5a;'>✓ Killed PID {pid}: {command[:60]}...</span>")
+                    killed_count += 1
+                except ProcessLookupError:
+                    self._log_append(self.full_control_status_text,
+                                     f"<span style='color: #e3b341;'>⚠ Process {pid} already terminated</span>")
+                    failed_count += 1
+                except PermissionError:
+                    self._log_append(self.full_control_status_text,
+                                     f"<span style='color: #d73a49;'>✗ Permission denied for PID {pid}</span>")
+                    failed_count += 1
+                except Exception as e:
+                    self._log_append(self.full_control_status_text,
+                                     f"<span style='color: #d73a49;'>✗ Failed to kill PID {pid}: {str(e)}</span>")
+                    failed_count += 1
+
+            self._log_append(self.full_control_status_text,
+                             f"<b style='color: #57ab5a;'>Finished: {killed_count} killed, {failed_count} failed</b>")
+            
+            # Refresh the process list after killing
+            QTimer.singleShot(500, self.run_full_control_ps_ros)
  
+    # ───────────────────────── FSM TAB ─────────────────────────
+
+    def _create_fsm_tab(self):
+        """Create the FSM control tab."""
+        fsm_tab = QWidget()
+        fsm_tab_layout = QVBoxLayout(fsm_tab)
+
+        # ── Controls row ──
+        controls_row = QHBoxLayout()
+
+        controls_row.addWidget(QLabel("Sim Mode:"))
+        self.fsm_sim_combo = QComboBox()
+        self.fsm_sim_combo.addItems(["true", "false"])
+        controls_row.addWidget(self.fsm_sim_combo)
+
+        controls_row.addSpacing(16)
+        controls_row.addWidget(QLabel("Planner Backend:"))
+        self.fsm_planner_combo = QComboBox()
+        self.fsm_planner_combo.addItems(["legacy", "moveit"])
+        controls_row.addWidget(self.fsm_planner_combo)
+
+        controls_row.addSpacing(16)
+        controls_row.addWidget(QLabel("Initial State:"))
+        self.fsm_state_combo = QComboBox()
+        self.fsm_state_combo.addItems([
+            "ScanWall", "CreateMap", "ExhaustiveScan",
+            "Armfolding", "ArmUnfolding", "NavigateToPose", "BasePlacement",
+        ])
+        controls_row.addWidget(self.fsm_state_combo)
+
+        controls_row.addSpacing(24)
+        self.btn_fsm_start = QPushButton("Start FSM")
+        self.btn_fsm_start.clicked.connect(self._toggle_fsm)
+        controls_row.addWidget(self.btn_fsm_start)
+
+        controls_row.addStretch()
+        fsm_tab_layout.addLayout(controls_row)
+
+        # ── Status header ──
+        fsm_status_header = QHBoxLayout()
+        fsm_status_header.addWidget(QLabel("FSM Output"))
+        fsm_status_header.addStretch()
+
+        fsm_status_header.addWidget(QLabel("Filter:"))
+        self.fsm_filter_input = QLineEdit()
+        self.fsm_filter_input.setPlaceholderText("Filter output lines...")
+        self.fsm_filter_input.setMaximumWidth(200)
+        self.fsm_filter_input.textChanged.connect(self._fsm_apply_filter)
+        fsm_status_header.addWidget(self.fsm_filter_input)
+
+        self.btn_restore_fsm_status = QPushButton("Restore")
+        self.btn_restore_fsm_status.clicked.connect(self.restore_fsm_status)
+        self.btn_restore_fsm_status.setMaximumWidth(80)
+        self.btn_restore_fsm_status.setVisible(False)
+        fsm_status_header.addWidget(self.btn_restore_fsm_status)
+
+        btn_clear_fsm_status = QPushButton("Clear")
+        btn_clear_fsm_status.clicked.connect(self.clear_fsm_status)
+        btn_clear_fsm_status.setMaximumWidth(80)
+        fsm_status_header.addWidget(btn_clear_fsm_status)
+
+        fsm_tab_layout.addLayout(fsm_status_header)
+
+        # ── Status output (full width, wrapped) ──
+        self.fsm_status_text = QTextEdit()
+        self.fsm_status_text.setReadOnly(True)
+        self.fsm_status_text.setAcceptRichText(True)
+        self.fsm_status_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.fsm_status_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.fsm_status_text.setStyleSheet(
+            "background-color: #22272e; color: #adbac7; border: 1px solid #444c56; "
+            "font-family: 'Courier New', monospace; white-space: pre-wrap;"
+        )
+        font_metrics = QFontMetrics(self.fsm_status_text.font())
+        self.fsm_status_text.setTabStopDistance(font_metrics.horizontalAdvance(' ') * 8)
+        fsm_tab_layout.addWidget(self.fsm_status_text, 1)
+
+        # ── Stdin input row ──
+        stdin_row = QHBoxLayout()
+        stdin_row.addWidget(QLabel("Send input:"))
+        self.fsm_stdin_input = QLineEdit()
+        self.fsm_stdin_input.setPlaceholderText("Type input for the running FSM process and press Enter...")
+        self.fsm_stdin_input.setEnabled(False)
+        self.fsm_stdin_input.returnPressed.connect(self._send_fsm_input)
+        stdin_row.addWidget(self.fsm_stdin_input)
+        self.btn_fsm_send_input = QPushButton("Send")
+        self.btn_fsm_send_input.setMaximumWidth(70)
+        self.btn_fsm_send_input.setEnabled(False)
+        self.btn_fsm_send_input.clicked.connect(self._send_fsm_input)
+        stdin_row.addWidget(self.btn_fsm_send_input)
+        fsm_tab_layout.addLayout(stdin_row)
+
+        return fsm_tab
+
+    def _toggle_fsm(self):
+        """Start or stop the FSM launch + node pair."""
+        if self.fsm_launch_process is not None or self.fsm_node_process is not None:
+            self._stop_fsm()
+        else:
+            self._start_fsm()
+
+    def _start_fsm(self):
+        sim = self.fsm_sim_combo.currentText()
+        planner = self.fsm_planner_combo.currentText()
+        state = self.fsm_state_combo.currentText()
+
+        self.btn_fsm_start.setText("Stop FSM")
+        self.btn_fsm_start.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self._fsm_set_input_enabled(True)
+
+        # ── Step 1: launch file ──
+        launch_args = ['launch', 'task_planner_fsm', 'task_planner.launch.py']
+        self._fsm_append_log(
+            f"<b style='color: #57ab5a;'>▶ ros2 {' '.join(launch_args)}</b>",
+            f"▶ ros2 {' '.join(launch_args)}",
+        )
+        proc_launch = QProcess(self)
+        proc_launch.setProcessChannelMode(QProcess.MergedChannels)
+        proc_launch.readyReadStandardOutput.connect(
+            lambda p=proc_launch: self._handle_fsm_output(p)
+        )
+        proc_launch.finished.connect(
+            lambda code, status, p=proc_launch: self._on_fsm_launch_finished(p, code)
+        )
+        proc_launch.start('ros2', launch_args)
+        self.fsm_launch_process = proc_launch
+
+        # ── Step 2: fsm_node (delayed so launch has time to spin up) ──
+        node_args = [
+            'run', 'task_planner_fsm', 'fsm_node',
+            '--sim', sim,
+            '--planner-backend', planner,
+            '--initial-state', state,
+        ]
+        QTimer.singleShot(3000, lambda: self._start_fsm_node(node_args))
+
+    def _start_fsm_node(self, node_args):
+        """Start the fsm_node process (called after launch delay)."""
+        if self.fsm_launch_process is None:
+            # Launch was already stopped before the timer fired
+            return
+        self._fsm_append_log(
+            f"<b style='color: #57ab5a;'>▶ ros2 {' '.join(node_args)}</b>",
+            f"▶ ros2 {' '.join(node_args)}",
+        )
+        proc_node = QProcess(self)
+        proc_node.setProcessChannelMode(QProcess.MergedChannels)
+        proc_node.readyReadStandardOutput.connect(
+            lambda p=proc_node: self._handle_fsm_output(p)
+        )
+        proc_node.finished.connect(
+            lambda code, status, p=proc_node: self._on_fsm_node_finished(p, code)
+        )
+        proc_node.start('ros2', node_args)
+        self.fsm_node_process = proc_node
+
+    def _stop_fsm(self):
+        """Stop both FSM processes and their entire spawned process trees."""
+
+        # ── Phase 1: collect all descendant PIDs BEFORE sending any signals.
+        # Once a parent is killed its children are reparented to init (PID 1),
+        # so pgrep -P <dead_parent> returns nothing. We must snapshot the tree now.
+        def _collect_descendants(parent_pid):
+            pids = []
+            if not parent_pid:
+                return pids
+            try:
+                r = subprocess.run(
+                    ['pgrep', '-P', str(parent_pid)],
+                    capture_output=True, text=True, timeout=1,
+                )
+                for s in r.stdout.strip().split('\n'):
+                    if s.strip():
+                        child = int(s)
+                        pids.extend(_collect_descendants(child))
+                        pids.append(child)
+            except Exception:
+                pass
+            return pids
+
+        procs = [p for p in (self.fsm_node_process, self.fsm_launch_process) if p is not None]
+        proc_pids = []
+        all_descendants = []
+        for proc in procs:
+            try:
+                proc.finished.disconnect()
+            except Exception:
+                pass
+            pid = proc.processId()
+            proc_pids.append(pid)
+            if pid:
+                all_descendants.extend(_collect_descendants(pid))
+
+        # ── Phase 2: graceful SIGINT to parent processes.
+        for pid in proc_pids:
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGINT)
+                except Exception:
+                    pass
+        for proc in procs:
+            proc.waitForFinished(3000)
+
+        # ── Phase 3: SIGKILL every collected descendant.
+        for dpid in all_descendants:
+            try:
+                os.kill(dpid, signal.SIGKILL)
+            except Exception:
+                pass
+
+        # ── Phase 4: force-kill the parent QProcesses if still alive.
+        for proc in procs:
+            if proc.state() == QProcess.Running:
+                proc.terminate()
+                proc.waitForFinished(1000)
+            if proc.state() == QProcess.Running:
+                proc.kill()
+                proc.waitForFinished(1000)
+            proc.deleteLater()
+
+        # ── Phase 5: wipe out Gazebo and any remaining stragglers.
+        self._kill_gazebo_processes()
+
+        self.fsm_node_process = None
+        self.fsm_launch_process = None
+        self.btn_fsm_start.setText("Start FSM")
+        self.btn_fsm_start.setStyleSheet("")
+        self._fsm_set_input_enabled(False)
+        self._fsm_append_log(
+            "<span style='color: #e3b341;'>⏹ FSM stopped</span>",
+            "⏹ FSM stopped",
+        )
+
+    def _handle_fsm_output(self, process):
+        """Stream output from a FSM process into the status pane."""
+        output = process.readAllStandardOutput().data().decode(errors='replace')
+        if not output:
+            return
+        for line in output.split('\n'):
+            if line.strip():
+                self._fsm_append_log(self._ansi_to_html(line), line)
+
+    def _on_fsm_launch_finished(self, process, exit_code):
+        if process is not self.fsm_launch_process:
+            return
+        self.fsm_launch_process = None
+        color = '#57ab5a' if exit_code == 0 else '#f47067'
+        msg = f"Launch exited (code {exit_code})"
+        self._fsm_append_log(f"<span style='color: {color};'>{msg}</span>", msg)
+        process.deleteLater()
+        if self.fsm_node_process is None:
+            self.btn_fsm_start.setText("Start FSM")
+            self.btn_fsm_start.setStyleSheet("")
+            self._fsm_set_input_enabled(False)
+
+    def _on_fsm_node_finished(self, process, exit_code):
+        if process is not self.fsm_node_process:
+            return
+        self.fsm_node_process = None
+        color = '#57ab5a' if exit_code == 0 else '#f47067'
+        msg = f"fsm_node exited (code {exit_code})"
+        self._fsm_append_log(f"<span style='color: {color};'>{msg}</span>", msg)
+        process.deleteLater()
+        if self.fsm_launch_process is None:
+            self.btn_fsm_start.setText("Start FSM")
+            self.btn_fsm_start.setStyleSheet("")
+            self._fsm_set_input_enabled(False)
+
+    def _fsm_set_input_enabled(self, enabled: bool):
+        self.fsm_stdin_input.setEnabled(enabled)
+        self.btn_fsm_send_input.setEnabled(enabled)
+        if not enabled:
+            self.fsm_stdin_input.clear()
+
+    def _send_fsm_input(self):
+        text = self.fsm_stdin_input.text()
+        if not text:
+            return
+        # Prefer the node process; fall back to the launch process
+        target = self.fsm_node_process or self.fsm_launch_process
+        if target is None or target.state() != QProcess.Running:
+            self._fsm_append_log(
+                "<span style='color: #f47067;'>⚠ No running FSM process to send input to</span>",
+                "⚠ No running FSM process to send input to",
+            )
+            return
+        target.write((text + '\n').encode())
+        self._fsm_append_log(
+            f"<span style='color: #76e3ea;'>▷ {html.escape(text)}</span>",
+            f"▷ {text}",
+        )
+        self.fsm_stdin_input.clear()
+
+    def _fsm_append_log(self, html_content, plain_text, add_newline=True):
+        """Store entry in the log buffer and display it if it passes the current filter."""
+        self.fsm_log_entries.append((html_content, plain_text, add_newline))
+        term = self.fsm_filter_input.text().strip().lower()
+        if not term or term in plain_text.lower():
+            self._append_to_text_widget(self.fsm_status_text, html_content, add_newline)
+
+    def _fsm_apply_filter(self):
+        """Rebuild the status pane showing only lines that match the filter text."""
+        term = self.fsm_filter_input.text().strip().lower()
+        scrollbar = self.fsm_status_text.verticalScrollBar()
+        was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 10
+        self.fsm_status_text.clear()
+        for h, plain, nl in self.fsm_log_entries:
+            if not term or term in plain.lower():
+                self._append_to_text_widget(self.fsm_status_text, h, nl)
+        if was_at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+
+    def clear_fsm_status(self):
+        self.fsm_log_backup = list(self.fsm_log_entries)
+        self.fsm_log_entries.clear()
+        self.fsm_status_text.clear()
+        self.btn_restore_fsm_status.setVisible(True)
+
+    def restore_fsm_status(self):
+        if self.fsm_log_backup:
+            self.fsm_log_entries = self.fsm_log_backup + self.fsm_log_entries
+            self.fsm_log_backup = []
+            self._fsm_apply_filter()
+            self.btn_restore_fsm_status.setVisible(False)
+
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
     window = RobotControlUI()
     window.show()
     sys.exit(app.exec_())
