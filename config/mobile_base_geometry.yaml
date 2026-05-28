@@ -15,7 +15,7 @@
 
 /**:
   ros__parameters:
-    simplified_mobile_base_box_inflation: [0.3, 0.10, 0.10]
+    simplified_mobile_base_box_inflation: [0.3, 0.10, 0.15]
     arm_mode_base_raw_box_dims: [0.8802, 0.6801, 1.0120]
     arm_mode_base_box_center: [-0.2037, 0.2028, -0.6060]
     arm_mode_base_box_rotation_z_deg: -45.0

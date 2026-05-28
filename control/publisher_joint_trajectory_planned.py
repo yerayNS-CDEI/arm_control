@@ -168,8 +168,8 @@ class PublisherJointTrajectoryActionClient(Node):
         # Timing: each segment is sized so that the peak joint velocity during the
         # cubic segment stays at or below max_joint_speed.  For a zero-velocity
         # cubic, peak velocity ≈ 1.5 * (delta / T), so T = 1.5 * delta / max_joint_speed.
-        max_joint_speed  = 0.5   # rad/s — intentionally slow for smooth, safe motion
-        min_segment_time = 0.5   # seconds — floor for very small moves
+        max_joint_speed  = 0.1   # rad/s — intentionally slow for smooth, safe motion
+        min_segment_time = 0.9  # seconds — floor for very small moves
 
         n = len(trajectory.points)
 

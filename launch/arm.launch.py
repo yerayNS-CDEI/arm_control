@@ -108,7 +108,7 @@ def _resolve_controller_names(context, *args, **kwargs):
     mcn = cfg.get('moveit_controller_name', 'passthrough_trajectory_controller').strip()
     is_pure_gazebo = (sim_v == 'true' and hybrid_v != 'true')
     effective = 'joint_trajectory_controller' if is_pure_gazebo else mcn
-    jct = effective if pb == 'moveit' else 'joint_trajectory_controller'
+    jct = effective if pb == 'moveit' else 'passthrough_trajectory_controller'
     cfg['_arm_initial_joint_controller'] = jct
     cfg['_arm_default_trajectory_controller'] = effective
     return []
@@ -400,6 +400,7 @@ def generate_launch_description():
             'mode': mode,
             'main_tf_prefix': tf_prefix,
         }.items(),
+        condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'legacy'"])),
     )
     
     enable_octomap = LaunchConfiguration('enable_octomap')
