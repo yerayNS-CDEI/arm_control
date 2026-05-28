@@ -259,6 +259,8 @@ install(DIRECTORY collision/include/
 install(DIRECTORY collision/
   DESTINATION share/${PROJECT_NAME}/collision
   FILES_MATCHING PATTERN "*.hpp" PATTERN "*.cpp"
+)
+
 # C++ EE Jacobian node
 add_executable(ee_jacobian_node control/ee_jacobian_node.cpp)
 ament_target_dependencies(ee_jacobian_node
