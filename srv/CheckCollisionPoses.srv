@@ -1,0 +1,5 @@
+sensor_msgs/JointState[] joint_states
+bool publish_visualization
+---
+bool[] in_collision
+bool[] check_succeeded

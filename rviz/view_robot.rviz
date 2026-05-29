@@ -9,8 +9,10 @@ Panels:
         - /TF1/Frames1
         - /Marker1
         - /RobotModel2
+        - /Marker2
+        - /Marker2/Topic1
       Splitter Ratio: 0.48235294222831726
-    Tree Height: 778
+    Tree Height: 322
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -63,6 +65,86 @@ Visualization Manager:
         Expand Link Details: false
         Expand Tree: false
         Link Tree Style: Links in Alphabetic Order
+        arm_base:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        arm_base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        arm_base_link_inertia:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_ee_cylinder_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_flange:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        arm_forearm_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_ft_frame:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        arm_plate_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_sensor_A_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_sensor_B_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_sensor_C_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_shoulder_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_tool0:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        arm_upper_arm_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_wrist_1_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_wrist_2_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        arm_wrist_3_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
         base_footprint:
           Alpha: 1
           Show Axes: false
@@ -104,11 +186,11 @@ Visualization Manager:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-          Value: true
         front_sick_scan:
           Alpha: 1
           Show Axes: false
           Show Trail: false
+          Value: true
         os_lidar:
           Alpha: 1
           Show Axes: false
@@ -123,11 +205,11 @@ Visualization Manager:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-          Value: true
         rear_sick_scan:
           Alpha: 1
           Show Axes: false
           Show Trail: false
+          Value: true
         turret_caster_bl:
           Alpha: 1
           Show Axes: false
@@ -204,8 +286,6 @@ Visualization Manager:
           Value: false
         arm_tool0:
           Value: true
-        arm_tool0_controller:
-          Value: true
         arm_upper_arm_link:
           Value: false
         arm_wrist_1_link:
@@ -222,6 +302,72 @@ Visualization Manager:
           Value: true
         camera_link:
           Value: true
+        collision/arm_base:
+          Value: true
+        collision/arm_base_link:
+          Value: true
+        collision/arm_base_link_inertia:
+          Value: true
+        collision/arm_ee_cylinder_link:
+          Value: true
+        collision/arm_flange:
+          Value: true
+        collision/arm_forearm_link:
+          Value: true
+        collision/arm_ft_frame:
+          Value: true
+        collision/arm_plate_link:
+          Value: true
+        collision/arm_sensor_A_link:
+          Value: true
+        collision/arm_sensor_B_link:
+          Value: true
+        collision/arm_sensor_C_link:
+          Value: true
+        collision/arm_shoulder_link:
+          Value: true
+        collision/arm_tool0:
+          Value: true
+        collision/arm_upper_arm_link:
+          Value: true
+        collision/arm_wrist_1_link:
+          Value: true
+        collision/arm_wrist_2_link:
+          Value: true
+        collision/arm_wrist_3_link:
+          Value: true
+        collision/base_footprint:
+          Value: true
+        collision/base_link:
+          Value: true
+        collision/camera_link:
+          Value: true
+        collision/column_link:
+          Value: true
+        collision/drivewhl_l_joint_link:
+          Value: true
+        collision/drivewhl_r_joint_link:
+          Value: true
+        collision/front_sick:
+          Value: true
+        collision/front_sick_scan:
+          Value: true
+        collision/os_sensor_mount:
+          Value: true
+        collision/rear_sick:
+          Value: true
+        collision/rear_sick_scan:
+          Value: true
+        collision/turret_caster_bl:
+          Value: true
+        collision/turret_caster_br:
+          Value: true
+        collision/turret_caster_fl:
+          Value: true
+        collision/turret_caster_fr:
+          Value: true
+        collision/turret_link:
+          Value: true
         column_link:
           Value: false
         dome_scan:
@@ -233,6 +379,8 @@ Visualization Manager:
         front_sick:
           Value: true
         front_sick_scan:
+          Value: true
+        odom:
           Value: true
         os_lidar:
           Value: true
@@ -250,70 +398,70 @@ Visualization Manager:
           Value: true
         turret_caster_fr:
           Value: true
+        turret_footprint:
+          Value: true
         turret_link:
           Value: true
-        world:
-          Value: false
       Marker Scale: 1
       Name: TF
       Show Arrows: true
       Show Axes: true
       Show Names: false
       Tree:
-        base_footprint:
-          base_link:
-            drivewhl_l_joint_link:
-              {}
-            drivewhl_r_joint_link:
-              {}
-            turret_link:
-              camera_link:
-                camera_color_optical_frame:
+        odom:
+          turret_footprint:
+            base_footprint:
+              base_link:
+                drivewhl_l_joint_link:
                   {}
-              os_sensor_mount:
-                front_sick:
-                  front_sick_scan:
-                    {}
-                os_lidar:
-                  dome_scan:
-                    {}
-                rear_sick:
-                  rear_sick_scan:
-                    {}
-              turret_caster_bl:
-                {}
-              turret_caster_br:
-                {}
-              turret_caster_fl:
-                {}
-              turret_caster_fr:
-                {}
-        column_link:
-          world:
-            arm_base_link:
-              arm_base:
-                arm_tool0_controller:
+                drivewhl_r_joint_link:
                   {}
-              arm_base_link_inertia:
-                arm_shoulder_link:
-                  arm_upper_arm_link:
-                    arm_forearm_link:
-                      arm_wrist_1_link:
-                        arm_wrist_2_link:
-                          arm_wrist_3_link:
-                            arm_flange:
-                              arm_ee_cylinder_link:
-                                arm_plate_link:
-                                  arm_sensor_A_link:
-                                    {}
-                                  arm_sensor_B_link:
-                                    {}
-                                  arm_sensor_C_link:
-                                    {}
-                                arm_tool0:
-                                  {}
-                            arm_ft_frame:
-                              {}
+                turret_link:
+                  column_link:
+                    arm_base_link:
+                      arm_base:
+                        {}
+                      arm_base_link_inertia:
+                        arm_shoulder_link:
+                          arm_upper_arm_link:
+                            arm_forearm_link:
+                              arm_wrist_1_link:
+                                arm_wrist_2_link:
+                                  arm_wrist_3_link:
+                                    arm_flange:
+                                      arm_ee_cylinder_link:
+                                        arm_plate_link:
+                                          arm_sensor_A_link:
+                                            {}
+                                          arm_sensor_B_link:
+                                            {}
+                                          arm_sensor_C_link:
+                                            {}
+                                        arm_tool0:
+                                          {}
+                                    arm_ft_frame:
+                                      {}
+                  os_sensor_mount:
+                    camera_link:
+                      camera_color_optical_frame:
+                        {}
+                    front_sick_scan:
+                      front_sick:
+                        {}
+                    os_lidar:
+                      dome_scan:
+                        {}
+                    rear_sick_scan:
+                      rear_sick:
+                        {}
+                  turret_caster_bl:
+                    {}
+                  turret_caster_br:
+                    {}
+                  turret_caster_fl:
+                    {}
+                  turret_caster_fr:
+                    {}
       Update Interval: 0
       Value: true
     - Class: rviz_default_plugins/Marker
@@ -347,90 +495,6 @@ Visualization Manager:
         Expand Link Details: false
         Expand Tree: false
         Link Tree Style: Links in Alphabetic Order
-        arm_base:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        arm_base_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        arm_base_link_inertia:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_ee_cylinder_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_flange:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        arm_forearm_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_ft_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        arm_plate_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_sensor_A_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_sensor_B_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_sensor_C_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_shoulder_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_tool0:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        arm_upper_arm_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_wrist_1_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_wrist_2_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        arm_wrist_3_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        world:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
       Mass Properties:
         Inertia: false
         Mass: false
@@ -439,6 +503,32 @@ Visualization Manager:
       Update Interval: 0
       Value: true
       Visual Enabled: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Marker
+      Namespaces:
+        {}
+      Topic:
+        Depth: 100
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /goal_pose_marker
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Marker
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /dilated_grid_marker
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -485,39 +575,39 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 4.192470550537109
+      Distance: 2.4674534797668457
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -0.061846040189266205
-        Y: -0.15752223134040833
-        Z: 0.6858258843421936
+        X: -0.043636564165353775
+        Y: 0.04627396538853645
+        Z: 1.0820679664611816
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.2147969752550125
+      Pitch: 0.4597969949245453
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 2.395406484603882
+      Yaw: 3.510406494140625
     Saved: ~
 Window Geometry:
   Displays:
-    collapsed: false
-  Height: 1016
-  Hide Left Dock: false
+    collapsed: true
+  Height: 560
+  Hide Left Dock: true
   Hide Right Dock: true
-  QMainWindow State: 000000ff00000000fd0000000400000000000001560000039efc0200000008fb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003d0000039e000000c900fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c0000026100000001000001100000039efc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000003d0000039e000000a400fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000004420000003efc0100000002fb0000000800540069006d00650100000000000004420000000000000000fb0000000800540069006d00650100000000000004500000000000000000000002640000039e00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd000000040000000000000156000001d6fc0200000008fb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073000000003d000001d6000000c900fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c0000026100000001000001100000039efc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000003d0000039e000000a400fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000004420000003efc0100000002fb0000000800540069006d00650100000000000004420000000000000000fb0000000800540069006d00650100000000000004500000000000000000000003a0000001d600000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Tool Properties:
     collapsed: false
   Views:
     collapsed: true
-  Width: 960
-  X: 960
+  Width: 928
+  X: 992
   Y: 27

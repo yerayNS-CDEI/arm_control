@@ -13,19 +13,39 @@ endif()
 # Find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
+find_package(rclcpp REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(shape_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(action_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(rcl_interfaces REQUIRED)
+find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(tf2_eigen REQUIRED)
+find_package(tf2_eigen_kdl REQUIRED)
+find_package(tf2_kdl REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(urdf REQUIRED)
+find_package(kdl_parser REQUIRED)
+find_package(geometric_shapes REQUIRED)
+find_package(octomap REQUIRED)
+find_package(octomap_msgs REQUIRED)
+find_package(pcl_ros REQUIRED)
+find_package(fcl REQUIRED)
+find_package(assimp REQUIRED)
+find_package(resource_retriever REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(Boost REQUIRED)
+find_library(EIGEN_CDDLIB eigen-cddlib)
+find_package(octomap_filter_interfaces REQUIRED)
+find_package(robot_collision_checking REQUIRED)
 find_package(backward_ros REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -34,6 +54,20 @@ find_package(moveit_ros_planning REQUIRED)
 
 # Generate service interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/Matrix.msg"
+  "msg/ObjectDistances.msg"
+  "msg/Polytope.msg"
+  "srv/AddRemoveCollisionMesh.srv"
+  "srv/AddRemoveCollisionSolid.srv"
+  "srv/AddRemoveCollisionMeshStamped.srv"
+  "srv/AddRemoveCollisionSolidStamped.srv"
+  "srv/GetJacobianMatrix.srv"
+  "srv/GetPolytopes.srv"
+  "srv/GetSlicedPolytope.srv"
+  "srv/UpdateCollisionPose.srv"
+  "srv/UpdateCollisionPoseStamped.srv"
+  "srv/CheckCollisionPose.srv"
+  "srv/CheckCollisionPoses.srv"
   "srv/ComputeBasePlacement.srv"
   "srv/ComputeWallDiscretization.srv"
   "srv/OptimalBase.srv"
@@ -41,7 +75,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/HyperspectralConfig.srv"
   "srv/SendPosition.srv"
   "srv/ScriptCommand.srv"
-  DEPENDENCIES geometry_msgs std_msgs
+  DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs shape_msgs std_msgs
 )
 
 # Install Python modules as symlinks for development
@@ -151,6 +185,82 @@ install(DIRECTORY UI_utils/
   FILES_MATCHING PATTERN "*.py"
 )
 
+set(collision_cpp_dependencies
+  rclcpp
+  geometry_msgs
+  std_msgs
+  sensor_msgs
+  shape_msgs
+  visualization_msgs
+  tf2
+  tf2_ros
+  tf2_eigen
+  tf2_eigen_kdl
+  tf2_kdl
+  kdl_parser
+  urdf
+  geometric_shapes
+  octomap_msgs
+  pcl_ros
+  fcl
+  assimp
+  resource_retriever
+  octomap_filter_interfaces
+  robot_collision_checking
+)
+
+add_library(collision_core SHARED
+  collision/src/constrained_manipulability_mod.cpp
+  collision/src/path_collision_checking.cpp
+  collision/src/constrained_manipulability_utils.cpp
+  collision/src/polytope.cpp
+)
+target_include_directories(collision_core PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/collision/include>
+  $<INSTALL_INTERFACE:include>
+  ${Eigen3_INCLUDE_DIRS}
+)
+target_link_libraries(collision_core
+  Boost::boost
+  ${EIGEN_CDDLIB}
+  ${OCTOMAP_LIBRARIES}
+  ${fcl_LIBRARIES}
+  ${assimp_LIBRARIES}
+)
+ament_target_dependencies(collision_core ${collision_cpp_dependencies})
+rosidl_get_typesupport_target(arm_control_interfaces_typesupport ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(collision_core ${arm_control_interfaces_typesupport})
+
+add_executable(constrained_manipulability_node_mod
+  collision/src/constrained_manipulability_mod_main.cpp
+)
+target_link_libraries(constrained_manipulability_node_mod collision_core)
+ament_target_dependencies(constrained_manipulability_node_mod ${collision_cpp_dependencies})
+
+add_executable(path_collision_checking
+  collision/src/path_collision_checking_main.cpp
+)
+target_link_libraries(path_collision_checking collision_core)
+ament_target_dependencies(path_collision_checking ${collision_cpp_dependencies})
+
+install(TARGETS
+  collision_core
+  constrained_manipulability_node_mod
+  path_collision_checking
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY collision/include/
+  DESTINATION include
+)
+
+install(DIRECTORY collision/
+  DESTINATION share/${PROJECT_NAME}/collision
+  FILES_MATCHING PATTERN "*.hpp" PATTERN "*.cpp"
+)
+
 # C++ EE Jacobian node
 add_executable(ee_jacobian_node control/ee_jacobian_node.cpp)
 ament_target_dependencies(ee_jacobian_node
@@ -174,5 +284,6 @@ endif()
 
 # Export dependencies
 ament_export_dependencies(rosidl_default_runtime)
+ament_export_dependencies(${collision_cpp_dependencies})
 
 ament_package()

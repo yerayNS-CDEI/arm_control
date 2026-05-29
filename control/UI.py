@@ -1935,7 +1935,7 @@ class RobotControlUI(QMainWindow):
 
     def _get_freedrive_controller_check_command(self):
         """Return the shell command used to detect freedrive-related controllers."""
-        return "ros2 control list_controllers -c /controller_manager | grep -E 'freedrive|joint_traj'"
+        return "ros2 control list_controllers -c /controller_manager | grep -E 'freedrive|trajectory_controller'"
 
     def _get_controller_states(self, status_text=None):
         """Return freedrive-related controller states parsed from the direct shell command output."""
@@ -2002,6 +2002,7 @@ class RobotControlUI(QMainWindow):
         if controller_states is None:
             controller_states = self._get_controller_states()
         trajectory_controller_candidates = (
+            'passthrough_trajectory_controller',
             'joint_trajectory_controller',
             'scaled_joint_trajectory_controller',
         )

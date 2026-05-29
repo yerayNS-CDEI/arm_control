@@ -29,8 +29,8 @@
 # Author: Denis Stogl
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
-from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from launch_ros.parameter_descriptions import ParameterValue
@@ -71,7 +71,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "description_package",
-            default_value="ur_description",
+            default_value="arm_control",
             description="Description package with robot URDF/XACRO files. Usually the argument "
             "is not set, it enables use of a custom description.",
         )
@@ -92,6 +92,37 @@ def generate_launch_description():
             "have to be updated.",
         )
     )
+    # End-effector cylinder parameters
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "ee_cylinder_length",
+            default_value="0.15",
+            description="Length of the end-effector cylinder.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "ee_cylinder_radius",
+            default_value="0.035",
+            description="Radius of the end-effector cylinder.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "sensors_offset",
+            default_value="0.15",
+            description="Offset for sensors mounting position.",
+        )
+    )
+    # Mode argument: arm (arm only) or full (mobile manipulator)
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "mode",
+            default_value="arm",
+            description="Collision robot mode: 'arm' for arm-only URDF, 'full' for mobile manipulator URDF",
+            choices=["arm", "full"],
+        )
+    )
 
     # Initialize Arguments
     ur_type = LaunchConfiguration("ur_type")
@@ -102,67 +133,103 @@ def generate_launch_description():
     description_package = LaunchConfiguration("description_package")
     description_file = LaunchConfiguration("description_file")
     tf_prefix = LaunchConfiguration("tf_prefix")
+    mode = LaunchConfiguration("mode")
+    # End-effector parameters
+    ee_cylinder_length = LaunchConfiguration("ee_cylinder_length")
+    ee_cylinder_radius = LaunchConfiguration("ee_cylinder_radius")
+    sensors_offset = LaunchConfiguration("sensors_offset")
 
-    robot_description_content = Command(
-        [
-            PathJoinSubstitution([FindExecutable(name="xacro")]),
-            " ",
-            PathJoinSubstitution([FindPackageShare(description_package), "urdf", description_file]),
-            " ",
-            "safety_limits:=",
-            safety_limits,
-            " ",
-            "safety_pos_margin:=",
-            safety_pos_margin,
-            " ",
-            "safety_k_position:=",
-            safety_k_position,
-            " ",
-            "name:=",
-            "ur",
-            " ",
-            "ur_type:=",
-            ur_type,
-            " ",
-            "tf_prefix:=",
-            tf_prefix,
+    # Conditional URDF selection based on mode
+    # For 'arm' mode: use ur.urdf.xacro from arm_control package
+    # For 'full' mode: use mobile_manipulator.urdf.xacro from navi_wall package
+    
+    def launch_setup(context, *args, **kwargs):
+        mode_value = LaunchConfiguration('mode').perform(context)
+        ur_type_value = LaunchConfiguration('ur_type').perform(context)
+        tf_prefix_value = LaunchConfiguration('tf_prefix').perform(context)
+        ee_cylinder_length_value = LaunchConfiguration('ee_cylinder_length').perform(context)
+        ee_cylinder_radius_value = LaunchConfiguration('ee_cylinder_radius').perform(context)
+        sensors_offset_value = LaunchConfiguration('sensors_offset').perform(context)
+        
+        print(f"[collision_view_ur DEBUG] mode_value = '{mode_value}'")
+        print(f"[collision_view_ur DEBUG] tf_prefix_value = '{tf_prefix_value}'")
+        
+        if mode_value == 'full':
+            # Full mobile manipulator URDF
+            navi_wall_share = FindPackageShare('navi_wall').perform(context)
+            urdf_file = PathJoinSubstitution([navi_wall_share, 'navi_wall_description', 'description', 'mobile_manipulator.urdf.xacro']).perform(context)
+            xacro_command = [
+                FindExecutable(name='xacro').perform(context),
+                ' ', urdf_file,
+                ' simulation:=false',
+                ' use_mock_hardware:=false',
+                ' ur_type:=', ur_type_value,
+                ' tf_prefix:=', tf_prefix_value,
+                ' ee_cylinder_length:=', ee_cylinder_length_value,
+                ' ee_cylinder_radius:=', ee_cylinder_radius_value,
+                ' sensors_offset:=', sensors_offset_value,
+            ]
+        else:
+            # Arm-only URDF
+            description_package_value = LaunchConfiguration('description_package').perform(context)
+            description_file_value = LaunchConfiguration('description_file').perform(context)
+            safety_limits_value = LaunchConfiguration('safety_limits').perform(context)
+            safety_pos_margin_value = LaunchConfiguration('safety_pos_margin').perform(context)
+            safety_k_position_value = LaunchConfiguration('safety_k_position').perform(context)
+            
+            arm_control_share = FindPackageShare(description_package_value).perform(context)
+            urdf_file = PathJoinSubstitution([arm_control_share, 'urdf', description_file_value]).perform(context)
+            xacro_command = [
+                FindExecutable(name='xacro').perform(context),
+                ' ', urdf_file,
+                ' safety_limits:=', safety_limits_value,
+                ' safety_pos_margin:=', safety_pos_margin_value,
+                ' safety_k_position:=', safety_k_position_value,
+                ' name:=ur',
+                ' ur_type:=', ur_type_value,
+                ' tf_prefix:=', tf_prefix_value,
+                ' ee_cylinder_length:=', ee_cylinder_length_value,
+                ' ee_cylinder_radius:=', ee_cylinder_radius_value,
+                ' sensors_offset:=', sensors_offset_value,
+            ]
+        
+        robot_description_content = Command([''.join(xacro_command)])
+        robot_description = {
+            'robot_description': ParameterValue(value=robot_description_content, value_type=str)
+        }
+
+        rviz_config_file = PathJoinSubstitution(
+            [FindPackageShare('arm_control'), 'rviz', 'view_collision_robot.rviz']
+        ).perform(context)
+
+        # Add frame_prefix to robot_description so all TF frames get /collision/ prefix
+        robot_description_with_prefix = {'robot_description': robot_description['robot_description'],
+                                          'frame_prefix': 'collision/'}
+
+        robot_state_publisher_node = Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            namespace='collision',
+            output='both',
+            parameters=[robot_description_with_prefix],
+        )
+        
+        # Note: joint_state_publisher is NOT included - the collision checking service
+        # publishes joint states only when checking a configuration, so the robot
+        # visualization will stay at the last tested configuration
+        
+        rviz_node = Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            output='log',
+            arguments=['-d', rviz_config_file],
+        )
+
+        nodes_to_start = [
+            robot_state_publisher_node,
+            rviz_node,
         ]
-    )
-    robot_description = {
-        "robot_description": ParameterValue(value=robot_description_content, value_type=str)
-    }
+        return nodes_to_start
 
-    rviz_config_file = PathJoinSubstitution(
-        [FindPackageShare("arm_control"), "rviz", "view_collision_robot.rviz"]
-    )
-
-    joint_state_publisher_node = Node(
-        package="joint_state_publisher",
-        executable="joint_state_publisher",
-        namespace='collision',
-        name="joint_state_publisher",
-    )
-    robot_state_publisher_node = Node(
-        package="robot_state_publisher",
-        executable="robot_state_publisher",
-        namespace='collision',
-        name="robot_state_publisher",
-        output="both",
-        parameters=[robot_description],
-    )
-    rviz_node = Node(
-        package="rviz2",
-        executable="rviz2",
-        namespace='collision',
-        name="rviz2",
-        output="log",
-        arguments=["-d", rviz_config_file],
-    )
-
-    nodes_to_start = [
-        # joint_state_publisher_node,
-        robot_state_publisher_node,
-        rviz_node,
-    ]
-
-    return LaunchDescription(declared_arguments + nodes_to_start)
+    return LaunchDescription(declared_arguments + [OpaqueFunction(function=launch_setup)])
