@@ -108,7 +108,8 @@ def _resolve_controller_names(context, *args, **kwargs):
     mcn = cfg.get('moveit_controller_name', 'passthrough_trajectory_controller').strip()
     is_pure_gazebo = (sim_v == 'true' and hybrid_v != 'true')
     effective = 'joint_trajectory_controller' if is_pure_gazebo else mcn
-    jct = effective if pb == 'moveit' else 'passthrough_trajectory_controller'
+    # jct = effective if pb == 'moveit' else 'passthrough_trajectory_controller'
+    jct = effective
     cfg['_arm_initial_joint_controller'] = jct
     cfg['_arm_default_trajectory_controller'] = effective
     return []
@@ -296,7 +297,7 @@ def generate_launch_description():
     # In pure Gazebo (sim=true and hybrid_sim=false) the arm runs through
     # gz_ros2_control, which doesn't provide the UR-specific passthrough
     # command interfaces — PTC/SJTC can't load there. Force JTC in that path.
-    effective_moveit_controller_name = LaunchConfiguration('_arm_default_trajectory_controller')
+    effective_trajectory_controller_name = LaunchConfiguration('_arm_default_trajectory_controller')
     joint_controller_type = LaunchConfiguration('_arm_initial_joint_controller')
     
     
@@ -333,6 +334,8 @@ def generate_launch_description():
                     'mode': mode,
                     'stack_launch_rviz': stack_launch_rviz,
                     'controllers_file': controllers_file,
+                    'initial_joint_controller': effective_trajectory_controller_name,
+                    'activate_joint_controller': 'true',
                     'publish_controller_odom_tf': publish_controller_odom_tf,
                 }.items(),
                 condition=IfCondition(AndSubstitution(simulation, NotSubstitution(hybrid_sim))),
@@ -349,7 +352,7 @@ def generate_launch_description():
                     'sim': inverted_sim,
                     'ethercat_interface': ethercat_interface,
                     'stack_launch_rviz': stack_launch_rviz,
-                    'initial_joint_controller': joint_controller_type,
+                    'initial_joint_controller': effective_trajectory_controller_name,
                     'activate_joint_controller': 'true',
                     'publish_controller_odom_tf': publish_controller_odom_tf,
                 }.items(),
@@ -357,7 +360,10 @@ def generate_launch_description():
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(publisher_launch),
-                launch_arguments={'check_starting_point': 'false'}.items(),
+                launch_arguments={
+                    'check_starting_point': 'false',
+                    'controller_name': effective_trajectory_controller_name,
+                }.items(),
                 condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'legacy'"])),
             ),
             Node(
@@ -417,7 +423,7 @@ def generate_launch_description():
             'launch_rviz': launch_rviz,
             'rviz_config_file': rviz_config_file,
             'joint_states_topic': moveit_joint_states_topic,
-            'default_trajectory_controller': effective_moveit_controller_name,
+            'default_trajectory_controller': effective_trajectory_controller_name,
             'enable_octomap': enable_octomap,
             'sim': simulation,
         }.items(),
