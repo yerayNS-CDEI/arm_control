@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Point
 from std_msgs.msg import Bool, ColorRGBA
 from sensor_msgs.msg import JointState
 from visualization_msgs.msg import Marker
@@ -67,8 +67,8 @@ class PositionSenderNode(Node):
                 'pose': (0.56100, -0.17302, 0.85076, 0.406, 0.577, 0.408, 0.580)
             },
             'folded': {
-                'joints': (3.290, -2.007, -2.513, -0.647, -0.468, -1.048),
-                'pose': (-0.44101, 0.38792, 0.13674, -0.327, 0.753, 0.564, -0.087)
+                'joints': (-3.619, -1.298, -2.243, -1.177, 1.564, -4.373),
+                'pose': (-0.345, 0.378, 0.132, 0.918, -0.396, 0.002, -0.005)
             },
             'unfolded': {
                 'joints': (3.291, -2.169, -1.523, -2.790, -0.367, 0.167),
@@ -130,7 +130,7 @@ class PositionSenderNode(Node):
             },
             'initial': {
                 'joints': (),
-                'pose': (0.17536, 0.43514, 0.28396, -0.16963, 0.98548, 0.00540, 0.00323)
+                'pose': (0.1749, 0.5879, -0.0058, -0.1679, 0.9753, -0.1413, -0.0240)
             },
             'under': {
                 'joints': (1.346, -2.958, -1.727, -0.069, 1.607, 2.134),
@@ -138,7 +138,7 @@ class PositionSenderNode(Node):
             },
             'under1': {
                 'joints': (3.810, -2.978, -1.793, 0.103, 1.506, 1.417),
-                'pose': (-0.681, -0.281, -0.700, 0.916, 0.398, -0.030, -0.026)
+                'pose': (-0.681, -0.281, -0.700, -0.382, 0.923, -0.006, -0.027)
             },
             'under2': {
                 'joints': (-5.73, 0.176, 1.426, -3.18, 4.714, -3.396),
@@ -204,6 +204,7 @@ class PositionSenderNode(Node):
         # goal joint config is known-valid, and APS plans collision-aware in joint space.
         self.aps_pose_positions = {'folded_fsm', 'unfolded_fsm'}
         self.joint_indices = None
+        self.goal_marker_namespace = 'position_sender_goal_pose'
         
         # Timer for checking status
         self.timer = self.create_timer(0.5, self.check_status)
@@ -259,6 +260,67 @@ class PositionSenderNode(Node):
         response.message = message
         
         return response
+
+    def publish_goal_pose_marker(self, position_name, pose_data):
+        """Publish a pose marker with RGB axes so the goal frame is visible in RViz."""
+        try:
+            origin = np.array(pose_data[:3], dtype=float)
+            rotation = R.from_quat(pose_data[3:])
+        except ValueError as exc:
+            self.get_logger().warn(
+                f"Could not publish goal marker for '{position_name}': invalid pose/quaternion ({exc})"
+            )
+            return
+
+        latest_tf_time = rclpy.time.Time().to_msg()
+        axis_length = 0.12
+        axis_endpoints = rotation.apply(np.eye(3) * axis_length) + origin
+
+        origin_marker = Marker()
+        origin_marker.header.frame_id = 'arm_base'
+        origin_marker.header.stamp = latest_tf_time
+        origin_marker.ns = self.goal_marker_namespace
+        origin_marker.id = 0
+        origin_marker.type = Marker.SPHERE
+        origin_marker.action = Marker.ADD
+        origin_marker.pose.position.x = float(origin[0])
+        origin_marker.pose.position.y = float(origin[1])
+        origin_marker.pose.position.z = float(origin[2])
+        origin_marker.pose.orientation.w = 1.0
+        origin_marker.scale.x = 0.035
+        origin_marker.scale.y = 0.035
+        origin_marker.scale.z = 0.035
+        origin_marker.color = ColorRGBA(r=1.0, g=0.85, b=0.2, a=0.95)
+        origin_marker.lifetime.sec = 0
+        self.marker_pub.publish(origin_marker)
+
+        axis_colors = (
+            ColorRGBA(r=1.0, g=0.2, b=0.2, a=0.95),
+            ColorRGBA(r=0.2, g=1.0, b=0.2, a=0.95),
+            ColorRGBA(r=0.2, g=0.4, b=1.0, a=0.95),
+        )
+
+        start_point = Point(x=float(origin[0]), y=float(origin[1]), z=float(origin[2]))
+        for axis_id, (endpoint, color) in enumerate(zip(axis_endpoints, axis_colors), start=1):
+            axis_marker = Marker()
+            axis_marker.header.frame_id = 'arm_base'
+            axis_marker.header.stamp = latest_tf_time
+            axis_marker.ns = self.goal_marker_namespace
+            axis_marker.id = axis_id
+            axis_marker.type = Marker.ARROW
+            axis_marker.action = Marker.ADD
+            axis_marker.points = [
+                start_point,
+                Point(x=float(endpoint[0]), y=float(endpoint[1]), z=float(endpoint[2]))
+            ]
+            axis_marker.scale.x = 0.01
+            axis_marker.scale.y = 0.02
+            axis_marker.scale.z = 0.025
+            axis_marker.color = color
+            axis_marker.lifetime.sec = 0
+            self.marker_pub.publish(axis_marker)
+
+        self.get_logger().info(f"Published goal pose marker for '{position_name}' on /goal_pose_marker")
             
     def send_position(self, position_name):
         """Send a predefined position to the manipulator."""
@@ -331,6 +393,7 @@ class PositionSenderNode(Node):
         msg.pose.orientation.w = pose_data[6]
         
         pose_goal_pub.publish(msg)
+        self.publish_goal_pose_marker(position_name, pose_data)
         
         self.goal_sent = True
         self.movement_done = False

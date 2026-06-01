@@ -13,6 +13,11 @@ def generate_launch_description():
     return LaunchDescription(
         [
             DeclareLaunchArgument(
+                "controller_name",
+                default_value="passthrough_trajectory_controller",
+                description="FollowJointTrajectory controller used by the trajectory publisher"
+            ),
+            DeclareLaunchArgument(
                 "check_starting_point",
                 default_value="false",
                 description="Check if current joint state is within allowed starting limits"
@@ -29,7 +34,8 @@ def generate_launch_description():
                 name="publisher_joint_trajectory_planned",
                 parameters=[
                     controller_config,
-                    {"check_starting_point": LaunchConfiguration("check_starting_point"),
+                    {"controller_name": LaunchConfiguration("controller_name"),
+                     "check_starting_point": LaunchConfiguration("check_starting_point"),
                      "use_sim_time": LaunchConfiguration("use_sim_time")}
                 ],
                 output="screen",

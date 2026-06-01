@@ -11,7 +11,7 @@
    <xacro:arg name="ur_type" default="ur5x"/>
 
    <!-- parameters -->
-   <xacro:arg name="tf_prefix" default="" />
+   <xacro:arg name="tf_prefix" default="arm_" />
    <xacro:arg name="joint_limit_params" default="$(find ur_description)/config/$(arg ur_type)/joint_limits.yaml"/>
    <xacro:arg name="kinematics_params" default="$(find ur_description)/config/$(arg ur_type)/default_kinematics.yaml"/>
    <xacro:arg name="physical_params" default="$(find ur_description)/config/$(arg ur_type)/physical_parameters.yaml"/>

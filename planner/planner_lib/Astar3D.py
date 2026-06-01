@@ -3,19 +3,46 @@ import numpy as np
 import heapq
 from math import sqrt
 
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 # from mpl_toolkits.mplot3d import Axes3D  # Not needed - 3D projection auto-registers in matplotlib 3.1+
 
 from scipy.ndimage import binary_dilation
 
+
+VALID_ASTAR_COLLISION_MODES = {'dual', 'wrist3', 'tool0_proxy'}
+
 def dilate_obstacles(occupancy_grid, dilation_distance, x_vals):
     # Create a structuring element for dilation (3D cube of size dilation_distance)
     dilation_size = int(np.ceil(dilation_distance / (x_vals[1] - x_vals[0])))  # Convert distance to grid units
+    
+    if dilation_size == 0:
+        return occupancy_grid
+    
     struct_element = np.ones((dilation_size, dilation_size, dilation_size), dtype=np.uint8)
     
     # Perform 3D dilation
     dilated_grid = binary_dilation(occupancy_grid, structure=struct_element).astype(np.uint8)
     return dilated_grid
+
+def _coord_to_grid_index_and_in_bounds(coord, vals):
+    """
+    Map a scalar coordinate to the nearest voxel-center index and report
+    whether the coordinate lies within the grid extents.
+
+    The grid values represent voxel centers, so the valid continuous extent
+    includes half a voxel beyond the first and last centers.
+    """
+    idx = int(np.argmin(np.abs(vals - coord)))
+
+    if len(vals) > 1:
+        half_step = float(vals[1] - vals[0]) / 2.0
+    else:
+        half_step = 0.0
+
+    lower_bound = float(vals[0]) - half_step
+    upper_bound = float(vals[-1]) + half_step
+    in_bounds = lower_bound <= float(coord) <= upper_bound
+    return idx, in_bounds
 
 def world_to_grid(x, y, z, x_vals, y_vals, z_vals):
     """
@@ -24,10 +51,19 @@ def world_to_grid(x, y, z, x_vals, y_vals, z_vals):
     x,y: real-world coordinates
     x_vals,y_vals: 1D arrays of grid coordinates along x and y (create_2d_grid)
     """
-    i = np.argmin(np.abs(x_vals - x))   # find closest x in the grid
-    j = np.argmin(np.abs(y_vals - y))   # find closest y in the grid
-    k = np.argmin(np.abs(z_vals - z))   # find closest z in the grid
+    i, _ = _coord_to_grid_index_and_in_bounds(x, x_vals)
+    j, _ = _coord_to_grid_index_and_in_bounds(y, y_vals)
+    k, _ = _coord_to_grid_index_and_in_bounds(z, z_vals)
     return i, j, k
+
+def world_to_grid_checked(x, y, z, x_vals, y_vals, z_vals):
+    """
+    Return the nearest voxel-center indices together with an in-bounds flag.
+    """
+    i, x_in_bounds = _coord_to_grid_index_and_in_bounds(x, x_vals)
+    j, y_in_bounds = _coord_to_grid_index_and_in_bounds(y, y_vals)
+    k, z_in_bounds = _coord_to_grid_index_and_in_bounds(z, z_vals)
+    return (i, j, k), (x_in_bounds and y_in_bounds and z_in_bounds)
 
 # i, j = world_to_grid(0.0, -0.5, x_vals, y_vals)
 # print(i, j)  # might print something like (381, 208)
@@ -138,6 +174,7 @@ def check_dual_frame_collision(
     z_vals: np.ndarray,
     T_wrist3_tool0: np.ndarray,
     orientation_matrix: np.ndarray,
+    collision_mode: str = 'dual',
     cylinder_center_xy: Tuple[float, float] = None,
     cylinder_radius: float = None,
     cylinder_z_range: Tuple[float, float] = None
@@ -164,18 +201,31 @@ def check_dual_frame_collision(
         cylinder_radius: Radius of cylinder (optional, currently unused)
         cylinder_z_range: (z_min, z_max) of cylinder (optional, currently unused)
     
+    Args:
+        collision_mode: One of 'dual', 'wrist3', or 'tool0_proxy'.
+
     Returns:
         True if collision-free, False if collision detected or wrist_3 out of bounds
     """
     i, j, k = wrist3_idx
     rows, cols, depth = grid.shape
+
+    if collision_mode not in VALID_ASTAR_COLLISION_MODES:
+        raise ValueError(
+            f"Unsupported A* collision mode '{collision_mode}'. "
+            f"Expected one of {sorted(VALID_ASTAR_COLLISION_MODES)}."
+        )
     
     # CRITICAL: Wrist_3 must be in reachable workspace bounds
     if not (0 <= i < rows and 0 <= j < cols and 0 <= k < depth):
         return False  # Wrist_3 unreachable
+
+    if collision_mode == 'wrist3':
+        return grid[i, j, k] == 0
     
-    # CRITICAL: Wrist_3 must not collide with obstacles
-    if grid[i, j, k] == 1:
+    # Dual mode blocks both wrist_3 and tool0. The tool0 proxy mode intentionally
+    # ignores wrist_3 occupancy and uses only the derived tool0 voxel as the A* gate.
+    if collision_mode == 'dual' and grid[i, j, k] == 1:
         return False  # Wrist_3 in collision
     
     # Convert wrist_3 grid position to world coordinates
@@ -189,13 +239,13 @@ def check_dual_frame_collision(
     tool0_world = T_world_tool0[:3, 3]
     
     # Convert tool0 to grid indices
-    ti = np.argmin(np.abs(x_vals - tool0_world[0]))
-    tj = np.argmin(np.abs(y_vals - tool0_world[1]))
-    tk = np.argmin(np.abs(z_vals - tool0_world[2]))
+    (ti, tj, tk), tool0_in_bounds = world_to_grid_checked(
+        tool0_world[0], tool0_world[1], tool0_world[2], x_vals, y_vals, z_vals
+    )
     
     # Check tool0 collision ONLY if within grid bounds
     # If tool0 extends beyond workspace, we allow it (can't verify collision, but wrist_3 is safe)
-    if (0 <= ti < rows and 0 <= tj < cols and 0 <= tk < depth):
+    if tool0_in_bounds and (0 <= ti < rows and 0 <= tj < cols and 0 <= tk < depth):
         if grid[ti, tj, tk] == 1:
             return False  # Tool0 in collision (within checkable region)
     # else: tool0 outside grid bounds - allowed (wrist_3 is reachable, tool is just extended)
@@ -213,6 +263,9 @@ def get_valid_neighbors_dual_frame(
     slerp = None,
     start_idx: Tuple[int, int, int] = None,
     max_dist_grid: float = None,
+    dual_frame_validity_cache: Dict[Tuple[int, int, int], bool] = None,
+    dual_frame_cache_stats: Dict[str, int] = None,
+    collision_mode: str = 'dual',
     cylinder_center_xy: Tuple[float, float] = None,
     cylinder_radius: float = None,
     cylinder_z_range: Tuple[float, float] = None
@@ -247,33 +300,57 @@ def get_valid_neighbors_dual_frame(
         (x-1, y+1, z-1), (x-1, y-1, z-1),
     ]
     
-    # If dual-frame checking is disabled, use original logic
-    if (x_vals is None or y_vals is None or z_vals is None or 
-        T_wrist3_tool0 is None or slerp is None or start_idx is None or max_dist_grid is None):
+    orientation_collision_enabled = collision_mode in {'dual', 'tool0_proxy'}
+
+    # If orientation-based checking is disabled, use wrist_3-only grid occupancy.
+    if (
+        collision_mode == 'wrist3'
+        or x_vals is None or y_vals is None or z_vals is None or
+        T_wrist3_tool0 is None or slerp is None or start_idx is None or max_dist_grid is None
+    ):
         return [
             (nx, ny, nz) for nx, ny, nz in possible_moves
             if 0 <= nx < rows and 0 <= ny < cols and 0 <= nz < depth
             and grid[nx, ny, nz] == 0
         ]
     
-    # Dual-frame checking: validate both wrist_3 AND tool0
-    # CRITICAL: Each neighbor gets its OWN orientation based on its distance from start
+    # Dual-frame checking: validate both wrist_3 AND tool0.
+    # For a single A* search, validity is deterministic per voxel because start/goal,
+    # SLERP interpolation, tool transform, and occupancy grid stay fixed.
+    # Cache those results so repeated neighbor expansions do not recompute them.
     valid_neighbors = []
     start_idx_array = np.array(start_idx, dtype=float)
+    if dual_frame_validity_cache is None:
+        dual_frame_validity_cache = {}
+    if dual_frame_cache_stats is None:
+        dual_frame_cache_stats = {}
     
     for nx, ny, nz in possible_moves:
+        neighbor_pos = (nx, ny, nz)
+        cached_validity = dual_frame_validity_cache.get(neighbor_pos)
+        if cached_validity is not None:
+            dual_frame_cache_stats['hits'] = dual_frame_cache_stats.get('hits', 0) + 1
+            if cached_validity:
+                valid_neighbors.append(neighbor_pos)
+            continue
+
+        dual_frame_cache_stats['misses'] = dual_frame_cache_stats.get('misses', 0) + 1
+
         # Compute orientation specifically for this neighbor
-        neighbor_idx_array = np.array([nx, ny, nz], dtype=float)
+        neighbor_idx_array = np.array(neighbor_pos, dtype=float)
         dist_from_start_grid = np.linalg.norm(neighbor_idx_array - start_idx_array)
         progress = min(dist_from_start_grid / max_dist_grid, 1.0) if max_dist_grid > 0 else 0.0
         neighbor_orientation = slerp([progress])[0].as_matrix()
         
-        if check_dual_frame_collision(
-            (nx, ny, nz), grid, x_vals, y_vals, z_vals,
+        is_valid = check_dual_frame_collision(
+            neighbor_pos, grid, x_vals, y_vals, z_vals,
             T_wrist3_tool0, neighbor_orientation,
+            collision_mode,
             cylinder_center_xy, cylinder_radius, cylinder_z_range
-        ):
-            valid_neighbors.append((nx, ny, nz))
+        )
+        dual_frame_validity_cache[neighbor_pos] = is_valid
+        if is_valid:
+            valid_neighbors.append(neighbor_pos)
     
     return valid_neighbors
 
@@ -286,6 +363,8 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
               T_wrist3_tool0: np.ndarray = None,
               start_orientation: np.ndarray = None,
               goal_orientation: np.ndarray = None,
+              astar_collision_mode: str = 'dual',
+              stats_out: Dict[str, int] = None,
               cylinder_center_xy: Tuple[float, float] = None,
               cylinder_radius: float = None,
               cylinder_z_range: Tuple[float, float] = None) -> List[Tuple[int, int, int]]:
@@ -308,12 +387,21 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
         List of grid positions representing the optimal path
         
     Note:
-        If dual-frame params are provided, A* will check collision for BOTH
-        wrist_3 and tool0 at each node. Otherwise, only wrist_3 is checked.
-        All obstacles (including cylinder) block both wrist_3 and tool0.
+        astar_collision_mode controls how node validity is computed:
+        - 'dual': current behavior, block if wrist_3 or tool0 collides.
+        - 'wrist3': use only wrist_3 grid occupancy.
+        - 'tool0_proxy': search in wrist_3 coordinates but block only by the
+          derived tool0 voxel under the interpolated orientation.
     """
-    # Determine if dual-frame checking is enabled
+    if astar_collision_mode not in VALID_ASTAR_COLLISION_MODES:
+        raise ValueError(
+            f"Unsupported A* collision mode '{astar_collision_mode}'. "
+            f"Expected one of {sorted(VALID_ASTAR_COLLISION_MODES)}."
+        )
+
+    # Determine if orientation-based tool0 checking is enabled.
     dual_frame_enabled = (
+        astar_collision_mode in {'dual', 'tool0_proxy'} and
         x_vals is not None and y_vals is not None and z_vals is not None and
         T_wrist3_tool0 is not None and start_orientation is not None and goal_orientation is not None
     )
@@ -327,9 +415,13 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
         
         # Compute diagonal distance for progress estimation (in grid index space)
         max_dist_grid = calculate_heuristic(start, goal)
+        dual_frame_validity_cache = {}
+        dual_frame_cache_stats = {'hits': 0, 'misses': 0}
     else:
         slerp = None
         max_dist_grid = None
+        dual_frame_validity_cache = None
+        dual_frame_cache_stats = None
     
     # Initialize start node
     start_node = create_node(
@@ -343,13 +435,37 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
     open_dict = {start: start_node}         # For quick node lookup
     closed_set = set()                      # Explored nodes
     
-    while open_list:
+    # Add max iterations to prevent infinite loops
+    MAX_ITERATIONS = 100000  # Reasonable limit for most paths
+    iterations = 0
+
+    def record_search_stats():
+        if stats_out is None:
+            return
+
+        stats_out.clear()
+        stats_out['iterations'] = iterations
+        stats_out['collision_mode'] = astar_collision_mode
+        stats_out['dual_frame_cache_enabled'] = int(dual_frame_enabled)
+        if dual_frame_enabled:
+            stats_out['dual_frame_cache_hits'] = int(dual_frame_cache_stats.get('hits', 0))
+            stats_out['dual_frame_cache_misses'] = int(dual_frame_cache_stats.get('misses', 0))
+            stats_out['dual_frame_cache_entries'] = int(len(dual_frame_validity_cache))
+        else:
+            stats_out['dual_frame_cache_hits'] = 0
+            stats_out['dual_frame_cache_misses'] = 0
+            stats_out['dual_frame_cache_entries'] = 0
+    
+    while open_list and iterations < MAX_ITERATIONS:
+        iterations += 1
+        
         # Get node with lowest f value
         _, current_pos = heapq.heappop(open_list)
         current_node = open_dict[current_pos]
         
         # Check if we've reached the goal
         if current_pos == goal:
+            record_search_stats()
             return reconstruct_path(current_node)
             
         closed_set.add(current_pos)
@@ -359,6 +475,9 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
         for neighbor_pos in get_valid_neighbors_dual_frame(
             grid, current_pos, x_vals, y_vals, z_vals,
             T_wrist3_tool0, slerp, start, max_dist_grid,
+            dual_frame_validity_cache,
+            dual_frame_cache_stats,
+            astar_collision_mode,
             cylinder_center_xy, cylinder_radius, cylinder_z_range
         ):
             # Skip if already explored
@@ -385,12 +504,22 @@ def find_path(grid: np.ndarray, start: Tuple[int, int, int],
                 neighbor['f'] = tentative_g + neighbor['h']
                 neighbor['parent'] = current_node
     
+    # No path found (either open list empty or max iterations reached)
+    if iterations >= MAX_ITERATIONS:
+        print(f"WARNING: A* search terminated after {MAX_ITERATIONS} iterations without finding a path")
+
+    record_search_stats()
     return []  # No path found
 
 def visualize_path(grid: np.ndarray, path: List[Tuple[int, int, int]]):
     """
     Visualize the grid and found path.
     """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        raise RuntimeError("matplotlib is required only for plotting")
+    
     fig = plt.figure()
     ax = plt.axes(projection='3d')
 

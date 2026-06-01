@@ -108,7 +108,8 @@ def _resolve_controller_names(context, *args, **kwargs):
     mcn = cfg.get('moveit_controller_name', 'passthrough_trajectory_controller').strip()
     is_pure_gazebo = (sim_v == 'true' and hybrid_v != 'true')
     effective = 'joint_trajectory_controller' if is_pure_gazebo else mcn
-    jct = effective if pb == 'moveit' else 'joint_trajectory_controller'
+    # jct = effective if pb == 'moveit' else 'passthrough_trajectory_controller'
+    jct = effective
     cfg['_arm_initial_joint_controller'] = jct
     cfg['_arm_default_trajectory_controller'] = effective
     return []
@@ -117,6 +118,7 @@ def generate_launch_description():
     ur_pkg = FindPackageShare('arm_control')
     ur_sim_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_sim_control.launch.py'])
     ur_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_control.launch.py'])
+    abstract_ur_launch = PathJoinSubstitution([ur_pkg, 'launch', 'abstract_ur.launch.py'])
     publisher_launch = PathJoinSubstitution(
         [ur_pkg, 'launch', 'test_scaled_joint_trajectory_planned.launch.py']
     )
@@ -251,6 +253,12 @@ def generate_launch_description():
         description='Planner backend to use: legacy or moveit',
         choices=['legacy', 'moveit'],
     )
+    astar_collision_mode_arg = DeclareLaunchArgument(
+        'astar_collision_mode',
+        default_value='wrist3',
+        description='Legacy planner A* collision mode: dual, wrist3, or tool0_proxy',
+        choices=['dual', 'wrist3', 'tool0_proxy'],
+    )
     enable_wall_scene_sync_arg = DeclareLaunchArgument(
         'enable_wall_scene_sync',
         default_value='false',
@@ -280,6 +288,7 @@ def generate_launch_description():
     publish_controller_odom_tf = LaunchConfiguration('publish_controller_odom_tf')
     namespace_arm = LaunchConfiguration('namespace_arm')
     planner_backend = LaunchConfiguration('planner_backend')
+    astar_collision_mode = LaunchConfiguration('astar_collision_mode')
     enable_wall_scene_sync = LaunchConfiguration('enable_wall_scene_sync')
     stack_launch_rviz = PythonExpression(
         ["'false' if '", planner_backend, "' == 'moveit' else '", launch_rviz, "'"]
@@ -288,7 +297,7 @@ def generate_launch_description():
     # In pure Gazebo (sim=true and hybrid_sim=false) the arm runs through
     # gz_ros2_control, which doesn't provide the UR-specific passthrough
     # command interfaces — PTC/SJTC can't load there. Force JTC in that path.
-    effective_moveit_controller_name = LaunchConfiguration('_arm_default_trajectory_controller')
+    effective_trajectory_controller_name = LaunchConfiguration('_arm_default_trajectory_controller')
     joint_controller_type = LaunchConfiguration('_arm_initial_joint_controller')
     
     
@@ -325,6 +334,8 @@ def generate_launch_description():
                     'mode': mode,
                     'stack_launch_rviz': stack_launch_rviz,
                     'controllers_file': controllers_file,
+                    'initial_joint_controller': effective_trajectory_controller_name,
+                    'activate_joint_controller': 'true',
                     'publish_controller_odom_tf': publish_controller_odom_tf,
                 }.items(),
                 condition=IfCondition(AndSubstitution(simulation, NotSubstitution(hybrid_sim))),
@@ -341,7 +352,7 @@ def generate_launch_description():
                     'sim': inverted_sim,
                     'ethercat_interface': ethercat_interface,
                     'stack_launch_rviz': stack_launch_rviz,
-                    'initial_joint_controller': joint_controller_type,
+                    'initial_joint_controller': effective_trajectory_controller_name,
                     'activate_joint_controller': 'true',
                     'publish_controller_odom_tf': publish_controller_odom_tf,
                 }.items(),
@@ -349,7 +360,10 @@ def generate_launch_description():
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(publisher_launch),
-                launch_arguments={'check_starting_point': 'false'}.items(),
+                launch_arguments={
+                    'check_starting_point': 'false',
+                    'controller_name': effective_trajectory_controller_name,
+                }.items(),
                 condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'legacy'"])),
             ),
             Node(
@@ -357,6 +371,15 @@ def generate_launch_description():
                 executable='planner_node',
                 name='robotic_arm_planner_node',
                 output='screen',
+                parameters=[
+                    {
+                        'mode': mode,
+                        'astar_collision_mode': astar_collision_mode,
+                    },
+                    PathJoinSubstitution(
+                        [FindPackageShare('arm_control'), 'config', 'mobile_base_geometry.yaml']
+                    ),
+                ],
                 condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'legacy'"])),
             ),
             Node(
@@ -376,6 +399,16 @@ def generate_launch_description():
         ]
     )
 
+    collision_world_include = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(abstract_ur_launch),
+        launch_arguments={
+            'ur_type': ur_type,
+            'mode': mode,
+            'main_tf_prefix': tf_prefix,
+        }.items(),
+        condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'legacy'"])),
+    )
+    
     enable_octomap = LaunchConfiguration('enable_octomap')
 
     moveit_include = IncludeLaunchDescription(
@@ -390,7 +423,7 @@ def generate_launch_description():
             'launch_rviz': launch_rviz,
             'rviz_config_file': rviz_config_file,
             'joint_states_topic': moveit_joint_states_topic,
-            'default_trajectory_controller': effective_moveit_controller_name,
+            'default_trajectory_controller': effective_trajectory_controller_name,
             'enable_octomap': enable_octomap,
             'sim': simulation,
         }.items(),
@@ -423,10 +456,12 @@ def generate_launch_description():
             publish_controller_odom_tf_arg,
             namespace_arm_arg,
             planner_backend_arg,
+            astar_collision_mode_arg,
             enable_wall_scene_sync_arg,
             enable_octomap_arg,
             OpaqueFunction(function=_resolve_controller_names),
             arm_group,
+            collision_world_include,
             moveit_include,
             moveit_planner_node_opaque,
         ]

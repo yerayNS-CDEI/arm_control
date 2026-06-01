@@ -1,0 +1,3 @@
+sensor_msgs/JointState joint_state                      # Configuration at which to calculate Jacobian 
+---
+arm_control/Matrix jacobian   # Resulting Jacobian as a custom Matrix type
