@@ -1855,7 +1855,12 @@ class PlannerNode(Node):
             self._collision_check_cache_misses += 1
 
         if not self.collision_check_client.service_is_ready():
-            return finish(CollisionCheckStatus.CHECK_FAILED)
+            wait_timeout = max(0.1, min(timeout_sec, 0.5))
+            if not self.collision_check_client.wait_for_service(timeout_sec=wait_timeout):
+                self.get_logger().warn(
+                    f"Collision check service '/collision/check_collision_pose' is not ready after waiting {wait_timeout:.2f}s."
+                )
+                return finish(CollisionCheckStatus.CHECK_FAILED)
         
         request = CheckCollisionPose.Request()
         request.joint_state = self._make_collision_request_joint_state(joint_values)
@@ -1986,6 +1991,14 @@ class PlannerNode(Node):
             or len(uncached_entries) == 1
             or not self.collision_check_batch_client.service_is_ready()
         ):
+            if len(uncached_entries) > 1 and not self.collision_check_batch_client.service_is_ready():
+                wait_timeout = max(0.1, min(timeout_sec, 0.5))
+                if self.collision_check_batch_client.wait_for_service(timeout_sec=wait_timeout):
+                    pass
+                else:
+                    self.get_logger().warn(
+                        f"Batch collision service '/collision/check_collision_poses' is not ready after waiting {wait_timeout:.2f}s; falling back to single checks."
+                    )
             return fallback_to_single_checks()
 
         request_entries = [entry for entry in uncached_entries if entry[3]] + [

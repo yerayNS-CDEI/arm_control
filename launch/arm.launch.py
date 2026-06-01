@@ -119,6 +119,7 @@ def generate_launch_description():
     ur_sim_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_sim_control.launch.py'])
     ur_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_control.launch.py'])
     abstract_ur_launch = PathJoinSubstitution([ur_pkg, 'launch', 'abstract_ur.launch.py'])
+    legacy_octomap_launch = PathJoinSubstitution([ur_pkg, 'launch', 'legacy_octomap.launch.py'])
     publisher_launch = PathJoinSubstitution(
         [ur_pkg, 'launch', 'test_scaled_joint_trajectory_planned.launch.py']
     )
@@ -267,7 +268,27 @@ def generate_launch_description():
     enable_octomap_arg = DeclareLaunchArgument(
         'enable_octomap',
         default_value='true',
-        description='Enable LiDAR pointcloud OctoMap integration in MoveIt (mode:=full only)',
+        description='Enable LiDAR pointcloud OctoMap integration for the selected planner backend.',
+    )
+    octomap_point_cloud_topic_arg = DeclareLaunchArgument(
+        'octomap_point_cloud_topic',
+        default_value='/combined_cloud_filtered',
+        description='Robot-free fused PointCloud2 topic used to build the octomap.',
+    )
+    octomap_frame_arg = DeclareLaunchArgument(
+        'octomap_frame',
+        default_value='odom',
+        description='Fixed frame used by the octomap server.',
+    )
+    octomap_resolution_arg = DeclareLaunchArgument(
+        'octomap_resolution',
+        default_value='0.05',
+        description='Octomap voxel resolution in meters.',
+    )
+    octomap_max_range_arg = DeclareLaunchArgument(
+        'octomap_max_range',
+        default_value='3.0',
+        description='Maximum range integrated from the fused point cloud.',
     )
     robot_ip = LaunchConfiguration('robot_ip')
     use_fake_hardware = LaunchConfiguration('use_fake_hardware')
@@ -410,6 +431,27 @@ def generate_launch_description():
     )
     
     enable_octomap = LaunchConfiguration('enable_octomap')
+    octomap_point_cloud_topic = LaunchConfiguration('octomap_point_cloud_topic')
+    octomap_frame = LaunchConfiguration('octomap_frame')
+    octomap_resolution = LaunchConfiguration('octomap_resolution')
+    octomap_max_range = LaunchConfiguration('octomap_max_range')
+
+    legacy_octomap_include = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(legacy_octomap_launch),
+        launch_arguments={
+            'mode': mode,
+            'point_cloud_topic': octomap_point_cloud_topic,
+            'frame_id': octomap_frame,
+            'resolution': octomap_resolution,
+            'max_range': octomap_max_range,
+        }.items(),
+        condition=IfCondition(
+            AndSubstitution(
+                PythonExpression(["'", planner_backend, "' == 'legacy'"]),
+                enable_octomap,
+            )
+        ),
+    )
 
     moveit_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(moveit_launch),
@@ -459,9 +501,14 @@ def generate_launch_description():
             astar_collision_mode_arg,
             enable_wall_scene_sync_arg,
             enable_octomap_arg,
+            octomap_point_cloud_topic_arg,
+            octomap_frame_arg,
+            octomap_resolution_arg,
+            octomap_max_range_arg,
             OpaqueFunction(function=_resolve_controller_names),
             arm_group,
             collision_world_include,
+            legacy_octomap_include,
             moveit_include,
             moveit_planner_node_opaque,
         ]
