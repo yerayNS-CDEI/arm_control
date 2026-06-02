@@ -203,7 +203,8 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
         "simplified_collision_box_link_suffixes",
         std::vector<std::string>{"plate_link"});
     publish_debug_octomap_occupied_voxels_ = this->declare_parameter<bool>("publish_debug_octomap_occupied_voxels", true);
-    this->declare_parameter<double>("octomap_dilation_radius", 0.05);
+    log_detailed_collision_events_ = this->declare_parameter<bool>("log_detailed_collision_events", false);
+    this->declare_parameter<double>("octomap_dilation_radius", 0.071);
     simplified_collision_skip_link_suffixes_ = this->declare_parameter<std::vector<std::string>>(
         "simplified_collision_skip_link_suffixes",
         std::vector<std::string>{"sensor_A_link", "sensor_B_link", "sensor_C_link", "ee_cylinder_link"});
@@ -273,7 +274,7 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     publish_tested_joint_states_ = this->declare_parameter<bool>("publish_tested_joint_states", false);
     short_circuit_env_on_self_collision_ = this->declare_parameter<bool>("short_circuit_env_on_self_collision", true);
     log_collision_service_metrics_ = this->declare_parameter<bool>("log_collision_service_metrics", true);
-    collision_service_metrics_interval_ = this->declare_parameter<int>("collision_service_metrics_interval", 5);
+    collision_service_metrics_interval_ = this->declare_parameter<int>("collision_service_metrics_interval", 20);
 
     // TF properties
     buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -1448,8 +1449,11 @@ bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::Joint
         if (collision_world_->checkCollisionObject(robot_env_collision_objects_[i], collision_object_ids))
         {
             env_collision = true;
-            RCLCPP_WARN(this->get_logger(), "Environment collision detected for link %s with object IDs: %zu objects",
-                       collision_link_names_[i].c_str(), collision_object_ids.size());
+            if (log_detailed_collision_events_)
+            {
+                RCLCPP_WARN(this->get_logger(), "Environment collision detected for link %s with object IDs: %zu objects",
+                           collision_link_names_[i].c_str(), collision_object_ids.size());
+            }
             break;
         }
     }
@@ -1573,8 +1577,11 @@ bool PathCollisionChecking::checkSelfCollision(const GeometryInformation& geomet
                 std::string link_i_name = (i < n_names) ? collision_link_names_[i] : "link_" + std::to_string(i);
                 std::string link_j_name = (j < n_names) ? collision_link_names_[j] : "link_" + std::to_string(j);
 
-                RCLCPP_WARN(this->get_logger(), "Self-collision detected between '%s' (index %d) and '%s' (index %d)", 
-                            link_i_name.c_str(), i, link_j_name.c_str(), j);
+                if (log_detailed_collision_events_)
+                {
+                    RCLCPP_WARN(this->get_logger(), "Self-collision detected between '%s' (index %d) and '%s' (index %d)", 
+                                link_i_name.c_str(), i, link_j_name.c_str(), j);
+                }
                 return true;
             }
             else
@@ -1582,8 +1589,11 @@ bool PathCollisionChecking::checkSelfCollision(const GeometryInformation& geomet
                 std::string link_i_name = (i < n_names) ? collision_link_names_[i] : "link_" + std::to_string(i);
                 std::string link_j_name = (j < n_names) ? collision_link_names_[j] : "link_" + std::to_string(j);
 
-                RCLCPP_INFO(this->get_logger(), "Self-collision cleared between '%s' (index %d) and '%s' (index %d)", 
-                            link_i_name.c_str(), i, link_j_name.c_str(), j);
+                if (log_detailed_collision_events_)
+                {
+                    RCLCPP_INFO(this->get_logger(), "Self-collision cleared between '%s' (index %d) and '%s' (index %d)", 
+                                link_i_name.c_str(), i, link_j_name.c_str(), j);
+                }
             }
         }
 
@@ -1592,9 +1602,12 @@ bool PathCollisionChecking::checkSelfCollision(const GeometryInformation& geomet
             any_collision_active = true;
             std::string link_i_name = (i < n_names) ? collision_link_names_[i] : "link_" + std::to_string(i);
             std::string link_j_name = (j < n_names) ? collision_link_names_[j] : "link_" + std::to_string(j);
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-                "Active collision: '%s' (index %d) <-> '%s' (index %d)",
-                link_i_name.c_str(), i, link_j_name.c_str(), j);
+            if (log_detailed_collision_events_)
+            {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                    "Active collision: '%s' (index %d) <-> '%s' (index %d)",
+                    link_i_name.c_str(), i, link_j_name.c_str(), j);
+            }
         }
     }
 
