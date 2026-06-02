@@ -23,7 +23,7 @@ def generate_launch_description():
     )
     resolution_arg = DeclareLaunchArgument(
         'resolution',
-        default_value='0.05',
+        default_value='0.1',
         description='Octomap voxel resolution in meters.',
     )
     max_range_arg = DeclareLaunchArgument(
@@ -31,12 +31,43 @@ def generate_launch_description():
         default_value='3.0',
         description='Maximum sensor range integrated into the octomap.',
     )
+    point_cloud_min_z_arg = DeclareLaunchArgument(
+        'point_cloud_min_z',
+        default_value='-0.02',
+        description='Discard incoming cloud points below this height in the map frame.',
+    )
+    point_cloud_max_z_arg = DeclareLaunchArgument(
+        'point_cloud_max_z',
+        default_value='2.5',
+        description='Discard incoming cloud points above this height in the map frame.',
+    )
+    occupancy_min_z_arg = DeclareLaunchArgument(
+        'occupancy_min_z',
+        default_value='0.0',
+        description='Do not create occupied octomap cells below this height.',
+    )
+    occupancy_max_z_arg = DeclareLaunchArgument(
+        'occupancy_max_z',
+        default_value='2.5',
+        description='Do not create occupied octomap cells above this height.',
+    )
+    filter_speckles_arg = DeclareLaunchArgument(
+        'filter_speckles',
+        default_value='true',
+        description='Drop isolated occupied voxels that usually come from sensor noise.',
+        choices=['true', 'false'],
+    )
 
     mode = LaunchConfiguration('mode')
     point_cloud_topic = LaunchConfiguration('point_cloud_topic')
     frame_id = LaunchConfiguration('frame_id')
     resolution = LaunchConfiguration('resolution')
     max_range = LaunchConfiguration('max_range')
+    point_cloud_min_z = LaunchConfiguration('point_cloud_min_z')
+    point_cloud_max_z = LaunchConfiguration('point_cloud_max_z')
+    occupancy_min_z = LaunchConfiguration('occupancy_min_z')
+    occupancy_max_z = LaunchConfiguration('occupancy_max_z')
+    filter_speckles = LaunchConfiguration('filter_speckles')
 
     base_frame_id = PythonExpression([
         "'base_footprint' if '", mode, "' == 'full' else 'arm_base_link'",
@@ -53,6 +84,11 @@ def generate_launch_description():
                 'base_frame_id': base_frame_id,
                 'resolution': resolution,
                 'sensor_model.max_range': max_range,
+                'pointcloud_min_z': point_cloud_min_z,
+                'pointcloud_max_z': point_cloud_max_z,
+                'occupancy_min_z': occupancy_min_z,
+                'occupancy_max_z': occupancy_max_z,
+                'filter_speckles': filter_speckles,
                 'filter_ground_plane': True,
                 'compress_map': True,
                 'publish_free_space': False,
@@ -71,5 +107,10 @@ def generate_launch_description():
         frame_id_arg,
         resolution_arg,
         max_range_arg,
+        point_cloud_min_z_arg,
+        point_cloud_max_z_arg,
+        occupancy_min_z_arg,
+        occupancy_max_z_arg,
+        filter_speckles_arg,
         octomap_server_node,
     ])

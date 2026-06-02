@@ -290,6 +290,32 @@ def generate_launch_description():
         default_value='3.0',
         description='Maximum range integrated from the fused point cloud.',
     )
+    octomap_point_cloud_min_z_arg = DeclareLaunchArgument(
+        'octomap_point_cloud_min_z',
+        default_value='-0.02',
+        description='Discard fused cloud points below this height before octomap integration.',
+    )
+    octomap_point_cloud_max_z_arg = DeclareLaunchArgument(
+        'octomap_point_cloud_max_z',
+        default_value='2.5',
+        description='Discard fused cloud points above this height before octomap integration.',
+    )
+    octomap_occupancy_min_z_arg = DeclareLaunchArgument(
+        'octomap_occupancy_min_z',
+        default_value='0.0',
+        description='Do not create occupied voxels below this height.',
+    )
+    octomap_occupancy_max_z_arg = DeclareLaunchArgument(
+        'octomap_occupancy_max_z',
+        default_value='2.5',
+        description='Do not create occupied voxels above this height.',
+    )
+    octomap_filter_speckles_arg = DeclareLaunchArgument(
+        'octomap_filter_speckles',
+        default_value='true',
+        description='Drop isolated occupied voxels created by point-cloud noise.',
+        choices=['true', 'false'],
+    )
     robot_ip = LaunchConfiguration('robot_ip')
     use_fake_hardware = LaunchConfiguration('use_fake_hardware')
     tf_prefix = LaunchConfiguration('tf_prefix')
@@ -435,6 +461,11 @@ def generate_launch_description():
     octomap_frame = LaunchConfiguration('octomap_frame')
     octomap_resolution = LaunchConfiguration('octomap_resolution')
     octomap_max_range = LaunchConfiguration('octomap_max_range')
+    octomap_point_cloud_min_z = LaunchConfiguration('octomap_point_cloud_min_z')
+    octomap_point_cloud_max_z = LaunchConfiguration('octomap_point_cloud_max_z')
+    octomap_occupancy_min_z = LaunchConfiguration('octomap_occupancy_min_z')
+    octomap_occupancy_max_z = LaunchConfiguration('octomap_occupancy_max_z')
+    octomap_filter_speckles = LaunchConfiguration('octomap_filter_speckles')
 
     legacy_octomap_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(legacy_octomap_launch),
@@ -444,6 +475,11 @@ def generate_launch_description():
             'frame_id': octomap_frame,
             'resolution': octomap_resolution,
             'max_range': octomap_max_range,
+            'point_cloud_min_z': octomap_point_cloud_min_z,
+            'point_cloud_max_z': octomap_point_cloud_max_z,
+            'occupancy_min_z': octomap_occupancy_min_z,
+            'occupancy_max_z': octomap_occupancy_max_z,
+            'filter_speckles': octomap_filter_speckles,
         }.items(),
         condition=IfCondition(
             AndSubstitution(
@@ -505,6 +541,11 @@ def generate_launch_description():
             octomap_frame_arg,
             octomap_resolution_arg,
             octomap_max_range_arg,
+            octomap_point_cloud_min_z_arg,
+            octomap_point_cloud_max_z_arg,
+            octomap_occupancy_min_z_arg,
+            octomap_occupancy_max_z_arg,
+            octomap_filter_speckles_arg,
             OpaqueFunction(function=_resolve_controller_names),
             arm_group,
             collision_world_include,
