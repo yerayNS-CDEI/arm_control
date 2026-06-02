@@ -323,6 +323,8 @@ def launch_setup(context, *args, **kwargs):
                     "speed_scaling_state_broadcaster",
                     "tcp_pose_broadcaster",
                     "ur_configuration_controller",
+                    "column_position_controller",
+                    "sim_controller",
                 ]
             },
         ],
