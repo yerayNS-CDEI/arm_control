@@ -23,7 +23,7 @@ def generate_launch_description():
     )
     resolution_arg = DeclareLaunchArgument(
         'resolution',
-        default_value='0.1',
+        default_value='0.05',
         description='Octomap voxel resolution in meters.',
     )
     max_range_arg = DeclareLaunchArgument(
@@ -78,6 +78,8 @@ def generate_launch_description():
         executable='octomap_server_node',
         name='octomap_server',
         output='screen',
+        respawn=True,
+        respawn_delay=2.0,
         parameters=[
             {
                 'frame_id': frame_id,

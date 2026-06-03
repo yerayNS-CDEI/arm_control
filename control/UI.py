@@ -4633,7 +4633,15 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             else:
                 self._append_to_text_widget(
                     status_text_widget,
-                    f"<span style='color: #f85149;'>[Reset Octomap]</span> Command failed with exit code {exit_code}."
+                    (
+                        f"<span style='color: #d29922;'>[Reset Octomap]</span> "
+                        f"Reset command exited with code {exit_code}. "
+                        "If octomap_server restarted while handling the reset, wait a few seconds for the respawned node to come back up and then retry if needed."
+                    )
+                )
+                self._append_to_text_widget(
+                    status_text_widget,
+                    "<span style='color: #8b949e;'>[Reset Octomap]</span> Automatic respawn is enabled for octomap_server in the launch configuration."
                 )
             del self.process_map[process_key]
 
