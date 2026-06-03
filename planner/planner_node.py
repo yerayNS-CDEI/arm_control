@@ -11,7 +11,8 @@ import rclpy
 from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, Point
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import JointState, PointCloud2
+from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Bool, ColorRGBA
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from std_msgs.msg import Float64MultiArray
@@ -84,8 +85,18 @@ class PlannerNode(Node):
         self.hot_loop_info_logging = self.get_parameter('hot_loop_info_logging').get_parameter_value().bool_value
         self.declare_parameter('publish_replanning_visualization', False)
         self.publish_replanning_visualization = self.get_parameter('publish_replanning_visualization').get_parameter_value().bool_value
-        self.declare_parameter('visualize_dilated_grid', False)
+        self.declare_parameter('visualize_dilated_grid', True)
         self.visualize_dilated_grid = self.get_parameter('visualize_dilated_grid').get_parameter_value().bool_value
+        self.declare_parameter('integrate_octomap_into_grid', True)
+        self.integrate_octomap_into_grid = self.get_parameter('integrate_octomap_into_grid').get_parameter_value().bool_value
+        self.declare_parameter('octomap_voxel_topic', '/octomap_point_cloud_centers')
+        self.octomap_voxel_topic = self.get_parameter('octomap_voxel_topic').get_parameter_value().string_value
+        self.declare_parameter('octomap_voxel_target_frame', 'arm_base')
+        self.octomap_voxel_target_frame = self.get_parameter('octomap_voxel_target_frame').get_parameter_value().string_value
+        self.declare_parameter('octomap_voxel_transform_timeout_sec', 0.2)
+        self.octomap_voxel_transform_timeout_sec = (
+            self.get_parameter('octomap_voxel_transform_timeout_sec').get_parameter_value().double_value
+        )
         self.declare_parameter('validate_post_astar_tool0_path', False)
         self.validate_post_astar_tool0_path = self.get_parameter('validate_post_astar_tool0_path').get_parameter_value().bool_value
         self.declare_parameter('log_detailed_planning_diagnostics', False)
@@ -151,6 +162,8 @@ class PlannerNode(Node):
         self._planning_thread = None
         self._plan_generation = 0
         self._reset_plan_metrics()
+        self._octomap_grid_points = np.empty((0, 3), dtype=np.float64)
+        self._last_octomap_tf_warn_ns = 0
 
         # TF buffer and listener to query transforms dynamically
         self.tf_buffer = tf2_ros.Buffer()
@@ -234,6 +247,19 @@ class PlannerNode(Node):
         self.create_subscription(Bool, "/execution_status", self.execution_status_callback, 10)
         self.create_subscription(PoseStamped, "end_effector_pose", self.end_effector_pose_callback, 10)
         self.create_subscription(PoseStamped, "/end_effector_pose", self.end_effector_pose_callback, 10)
+        if self.integrate_octomap_into_grid:
+            self.octomap_voxel_sub = self.create_subscription(
+                PointCloud2,
+                self.octomap_voxel_topic,
+                self.octomap_voxel_callback,
+                qos,
+            )
+            self.get_logger().info(
+                f"Planner octomap grid integration enabled from {self.octomap_voxel_topic} "
+                f"into frame {self.octomap_voxel_target_frame}."
+            )
+        else:
+            self.octomap_voxel_sub = None
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
         self.reset_sub = self.create_subscription(Bool, "/planner/reset", self.reset_callback, 10)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
@@ -1339,7 +1365,7 @@ class PlannerNode(Node):
         
         return start_segment, goal_segment, gap_info
     
-    def _identify_obstacle(self, position, occupancy_grid, grid_idx):
+    def _identify_obstacle(self, position, occupancy_grid, octomap_occupancy_grid, grid_idx):
         """
         Identify which specific obstacle a position is inside.
         Returns a descriptive string naming the obstacle.
@@ -1385,7 +1411,11 @@ class PlannerNode(Node):
             if not obstacles:
                 obstacles.append("Unknown obstacle (present in occupancy grid)")
                 self.get_logger().info(f"  ✓ In occupancy grid!")
-        else:
+        if octomap_occupancy_grid[i, j, k] == 1:
+            obstacles.append("Octomap-derived obstacle")
+            self.get_logger().info(f"  ✓ In octomap occupancy grid!")
+
+        if occupancy_grid[i, j, k] != 1 and octomap_occupancy_grid[i, j, k] != 1:
             # Only in dilated grid, not in original
             if not obstacles:
                 obstacles.append("Dilated safety margin around obstacle")
@@ -1423,25 +1453,37 @@ class PlannerNode(Node):
         position,
         grid_idx,
         occupancy_grid,
+        octomap_occupancy_grid,
         occupancy_grid_dilated_base,
         occupancy_grid_dilated,
         collision_waypoints_to_avoid,
     ):
         i, j, k = (int(grid_idx[0]), int(grid_idx[1]), int(grid_idx[2]))
 
-        if occupancy_grid[i, j, k] == 1:
-            obstacle_name = self._identify_obstacle(position, occupancy_grid, grid_idx)
+        if occupancy_grid[i, j, k] == 1 or octomap_occupancy_grid[i, j, k] == 1:
+            obstacle_name = self._identify_obstacle(
+                position,
+                occupancy_grid,
+                octomap_occupancy_grid,
+                grid_idx,
+            )
+            if octomap_occupancy_grid[i, j, k] == 1 and occupancy_grid[i, j, k] == 1:
+                source = 'overlap of static and octomap occupancy grids'
+            elif octomap_occupancy_grid[i, j, k] == 1:
+                source = 'octomap occupancy grid'
+            else:
+                source = 'static environment occupancy grid'
             return {
-                'headline': 'is INSIDE STATIC ENVIRONMENT OBSTACLE',
+                'headline': 'is INSIDE ENVIRONMENT OBSTACLE',
                 'reason': obstacle_name,
-                'source': 'static environment occupancy grid',
+                'source': source,
             }
 
         if occupancy_grid_dilated_base[i, j, k] == 1:
             return {
-                'headline': 'is INSIDE STATIC DILATED SAFETY MARGIN',
-                'reason': 'Static dilated environment margin',
-                'source': 'static occupancy-grid dilation',
+                'headline': 'is INSIDE DILATED SAFETY MARGIN',
+                'reason': 'Dilated environment margin around static or octomap obstacles',
+                'source': 'combined occupancy-grid dilation',
             }
 
         if occupancy_grid_dilated[i, j, k] == 1:
@@ -1488,6 +1530,7 @@ class PlannerNode(Node):
         paired_position,
         grid_idx,
         occupancy_grid,
+        octomap_occupancy_grid,
         occupancy_grid_dilated_base,
         occupancy_grid_dilated,
         collision_waypoints_to_avoid,
@@ -1499,6 +1542,7 @@ class PlannerNode(Node):
             position,
             grid_idx,
             occupancy_grid,
+            octomap_occupancy_grid,
             occupancy_grid_dilated_base,
             occupancy_grid_dilated,
             collision_waypoints_to_avoid,
@@ -1587,6 +1631,110 @@ class PlannerNode(Node):
     def end_effector_pose_callback(self, msg):
         with self._state_lock:
             self.end_effector_pose = msg
+
+    def octomap_voxel_callback(self, msg: PointCloud2):
+        points = self._point_cloud_to_xyz_array(msg)
+        if points.size == 0:
+            with self._state_lock:
+                self._octomap_grid_points = np.empty((0, 3), dtype=np.float64)
+            return
+
+        transformed_points = self._transform_points_to_frame(
+            points,
+            msg.header.frame_id,
+            self.octomap_voxel_target_frame,
+        )
+        if transformed_points is None:
+            return
+
+        with self._state_lock:
+            self._octomap_grid_points = transformed_points
+
+    @staticmethod
+    def _point_cloud_to_xyz_array(msg: PointCloud2):
+        raw_points = list(point_cloud2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True))
+        if not raw_points:
+            return np.empty((0, 3), dtype=np.float64)
+
+        points = np.asarray(raw_points)
+        if points.dtype.names:
+            return np.column_stack((points['x'], points['y'], points['z'])).astype(np.float64, copy=False)
+
+        return np.asarray(raw_points, dtype=np.float64).reshape(-1, 3)
+
+    def _transform_points_to_frame(self, points, source_frame, target_frame):
+        if points.size == 0 or not source_frame or source_frame == target_frame:
+            return points
+
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                target_frame,
+                source_frame,
+                rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=self.octomap_voxel_transform_timeout_sec),
+            )
+        except (TransformException, tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as ex:
+            now_ns = self.get_clock().now().nanoseconds
+            if now_ns - self._last_octomap_tf_warn_ns > int(5e9):
+                self.get_logger().warn(
+                    f"Unable to transform octomap voxels from {source_frame} to {target_frame}: {ex}"
+                )
+                self._last_octomap_tf_warn_ns = now_ns
+            return None
+
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        rotation_matrix = R.from_quat([
+            rotation.x,
+            rotation.y,
+            rotation.z,
+            rotation.w,
+        ]).as_matrix()
+        translation_vector = np.array([translation.x, translation.y, translation.z], dtype=np.float64)
+        return points @ rotation_matrix.T + translation_vector
+
+    def _snapshot_octomap_grid_points(self):
+        with self._state_lock:
+            return self._octomap_grid_points.copy()
+
+    def _octomap_points_to_grid_indices(self, points):
+        if points.size == 0:
+            return np.empty((0, 3), dtype=np.int64)
+
+        x_step = float(self.x_vals[1] - self.x_vals[0]) if len(self.x_vals) > 1 else float(self.cart_step)
+        y_step = float(self.y_vals[1] - self.y_vals[0]) if len(self.y_vals) > 1 else float(self.cart_step)
+        z_step = float(self.z_vals[1] - self.z_vals[0]) if len(self.z_vals) > 1 else float(self.cart_step)
+
+        idx_x = np.rint((points[:, 0] - float(self.x_vals[0])) / x_step).astype(np.int64)
+        idx_y = np.rint((points[:, 1] - float(self.y_vals[0])) / y_step).astype(np.int64)
+        idx_z = np.rint((points[:, 2] - float(self.z_vals[0])) / z_step).astype(np.int64)
+
+        valid = (
+            (idx_x >= 0) & (idx_x < self.grid_shape[0]) &
+            (idx_y >= 0) & (idx_y < self.grid_shape[1]) &
+            (idx_z >= 0) & (idx_z < self.grid_shape[2])
+        )
+        if not np.any(valid):
+            return np.empty((0, 3), dtype=np.int64)
+
+        return np.column_stack((idx_x[valid], idx_y[valid], idx_z[valid]))
+
+    def _build_octomap_occupancy_grid(self):
+        octomap_occupancy_grid = np.zeros(self.grid_shape, dtype=np.uint8)
+        if not self.integrate_octomap_into_grid:
+            return octomap_occupancy_grid, 0
+
+        octomap_points = self._snapshot_octomap_grid_points()
+        octomap_indices = self._octomap_points_to_grid_indices(octomap_points)
+        if octomap_indices.size == 0:
+            return octomap_occupancy_grid, 0
+
+        octomap_occupancy_grid[
+            octomap_indices[:, 0],
+            octomap_indices[:, 1],
+            octomap_indices[:, 2],
+        ] = 1
+        return octomap_occupancy_grid, int(octomap_indices.shape[0])
 
     def execution_status_callback(self, msg: Bool):
         with self._state_lock:
@@ -2443,6 +2591,7 @@ class PlannerNode(Node):
 
         # Occupancy grid: all free (NEEDS TO be parameterized)
         occupancy_grid = np.zeros(self.grid_shape, dtype=np.uint8)
+        octomap_occupancy_grid = np.zeros(self.grid_shape, dtype=np.uint8)
         # Obstacles
         # 3D meshgrid of coordinates
         X, Y, Z = np.meshgrid(self.x_vals, self.y_vals, self.z_vals, indexing='ij')  # shape: (grid_size, grid_size, num_z)
@@ -2511,6 +2660,15 @@ class PlannerNode(Node):
             f"rotation_z={self.arm_mode_base_box_rotation_z_deg}°, "
             f"inflation={inflation}"
         )
+
+        octomap_occupancy_grid, octomap_voxel_count = self._build_octomap_occupancy_grid()
+        if octomap_voxel_count > 0:
+            occupancy_grid[octomap_occupancy_grid == 1] = 1
+            self.get_logger().info(
+                f"Integrated {octomap_voxel_count} octomap-derived occupied voxels into the planner grid."
+            )
+        elif self.integrate_octomap_into_grid:
+            self.get_logger().info("No octomap-derived occupied voxels available for planner grid integration.")
 
         if self._should_publish_planner_markers():
             # Publish obstacle markers for visualization
@@ -2703,6 +2861,7 @@ class PlannerNode(Node):
                             paired_position=start_pos,
                             grid_idx=start_idx,
                             occupancy_grid=occupancy_grid,
+                            octomap_occupancy_grid=octomap_occupancy_grid,
                             occupancy_grid_dilated_base=occupancy_grid_dilated_base,
                             occupancy_grid_dilated=occupancy_grid_dilated,
                             collision_waypoints_to_avoid=collision_waypoints_to_avoid,
@@ -2736,6 +2895,7 @@ class PlannerNode(Node):
                                 paired_position=start_pos_wrist3,
                                 grid_idx=start_tool0_idx,
                                 occupancy_grid=occupancy_grid,
+                                octomap_occupancy_grid=octomap_occupancy_grid,
                                 occupancy_grid_dilated_base=occupancy_grid_dilated_base,
                                 occupancy_grid_dilated=occupancy_grid_dilated,
                                 collision_waypoints_to_avoid=collision_waypoints_to_avoid,
@@ -2757,6 +2917,7 @@ class PlannerNode(Node):
                             paired_position=goal_pos,
                             grid_idx=goal_idx,
                             occupancy_grid=occupancy_grid,
+                            octomap_occupancy_grid=octomap_occupancy_grid,
                             occupancy_grid_dilated_base=occupancy_grid_dilated_base,
                             occupancy_grid_dilated=occupancy_grid_dilated,
                             collision_waypoints_to_avoid=collision_waypoints_to_avoid,
@@ -2780,6 +2941,7 @@ class PlannerNode(Node):
                                 paired_position=goal_pos_wrist3,
                                 grid_idx=goal_tool0_idx,
                                 occupancy_grid=occupancy_grid,
+                                octomap_occupancy_grid=octomap_occupancy_grid,
                                 occupancy_grid_dilated_base=occupancy_grid_dilated_base,
                                 occupancy_grid_dilated=occupancy_grid_dilated,
                                 collision_waypoints_to_avoid=collision_waypoints_to_avoid,
@@ -3045,7 +3207,12 @@ class PlannerNode(Node):
                             continue
 
                         if occupancy_grid_dilated[ti, tj, tk] == 1:
-                            obstacle_name = self._identify_obstacle(tool0_pos, occupancy_grid, tool0_grid_idx)
+                            obstacle_name = self._identify_obstacle(
+                                tool0_pos,
+                                occupancy_grid,
+                                octomap_occupancy_grid,
+                                tool0_grid_idx,
+                            )
 
                             if idx < len(pruned_path_grid_indices):
                                 grid_idx_for_waypoint = pruned_path_grid_indices[idx]
