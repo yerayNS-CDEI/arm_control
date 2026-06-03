@@ -429,6 +429,8 @@ class PathCollisionChecking : public rclcpp::Node
         // Whether to filter the robot's body from being considered in the octomap collision model or not
         bool filter_robot_;
         bool publish_tested_joint_states_;
+        bool publish_debug_octomap_occupied_voxels_;
+        bool log_detailed_collision_events_;
         bool short_circuit_env_on_self_collision_;
         bool log_collision_service_metrics_;
         int collision_service_metrics_interval_;

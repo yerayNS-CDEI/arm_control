@@ -289,6 +289,11 @@ class RobotControlUI(QMainWindow):
         self.btn_arm_reset_planner.clicked.connect(self.reset_planner_arm)
         self.btn_arm_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
         control_layout.addWidget(self.btn_arm_reset_planner)
+
+        self.btn_arm_reset_octomap = QPushButton("Reset Octomap")
+        self.btn_arm_reset_octomap.clicked.connect(self.reset_octomap_arm)
+        self.btn_arm_reset_octomap.setToolTip('ros2 service call /octomap_server/reset std_srvs/srv/Empty "{}"')
+        control_layout.addWidget(self.btn_arm_reset_octomap)
  
         # List Controllers button
         btn_list_controllers = QPushButton("List Controllers")
@@ -709,6 +714,11 @@ class RobotControlUI(QMainWindow):
         self.btn_joint_reset_planner.clicked.connect(self.reset_planner_joint)
         self.btn_joint_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
         button_layout.addWidget(self.btn_joint_reset_planner)
+
+        self.btn_joint_reset_octomap = QPushButton("Reset Octomap")
+        self.btn_joint_reset_octomap.clicked.connect(self.reset_octomap_joint)
+        self.btn_joint_reset_octomap.setToolTip('ros2 service call /octomap_server/reset std_srvs/srv/Empty "{}"')
+        button_layout.addWidget(self.btn_joint_reset_octomap)
         
         joint_control_layout.addLayout(button_layout)
         
@@ -933,6 +943,11 @@ class RobotControlUI(QMainWindow):
         self.btn_full_control_reset_planner.clicked.connect(self.reset_planner)
         self.btn_full_control_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
         full_control_mapping_layout.addWidget(self.btn_full_control_reset_planner)
+
+        self.btn_full_control_reset_octomap = QPushButton("Reset Octomap")
+        self.btn_full_control_reset_octomap.clicked.connect(self.reset_octomap)
+        self.btn_full_control_reset_octomap.setToolTip('ros2 service call /octomap_server/reset std_srvs/srv/Empty "{}"')
+        full_control_mapping_layout.addWidget(self.btn_full_control_reset_octomap)
 
         # Emergency stop button for Full Control tab
         full_control_mapping_layout.addWidget(QLabel(""))  # Spacer
@@ -4517,13 +4532,25 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         """Reset the planner from Arm Control tab"""
         self._reset_planner_generic('reset_planner_arm', self.status_text, self.handle_output)
 
+    def reset_octomap_arm(self):
+        """Reset the octomap from Arm Control tab"""
+        self._reset_octomap_generic('reset_octomap_arm', self.status_text, self.handle_output)
+
     def reset_planner(self):
         """Reset the planner from Full Control tab"""
         self._reset_planner_generic('reset_planner_full', self.full_control_status_text, self.handle_full_control_output)
 
+    def reset_octomap(self):
+        """Reset the octomap from Full Control tab"""
+        self._reset_octomap_generic('reset_octomap_full', self.full_control_status_text, self.handle_full_control_output)
+
     def reset_planner_joint(self):
         """Reset the planner from Joint Control tab"""
         self._reset_planner_generic('reset_planner_joint', self.joint_status_text, self.handle_joint_output)
+
+    def reset_octomap_joint(self):
+        """Reset the octomap from Joint Control tab"""
+        self._reset_octomap_generic('reset_octomap_joint', self.joint_status_text, self.handle_joint_output)
     
     def _reset_planner_generic(self, process_key, status_text_widget, output_handler):
         """Generic method to reset the planner by publishing to /planner/reset topic"""
@@ -4567,6 +4594,54 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 self._append_to_text_widget(
                     status_text_widget,
                     f"<span style='color: #f85149;'>[Reset Planner]</span> Command failed with exit code {exit_code}."
+                )
+            del self.process_map[process_key]
+
+    def _reset_octomap_generic(self, process_key, status_text_widget, output_handler):
+        """Generic method to reset octomap_server by calling its reset service"""
+        if process_key in self.process_map:
+            existing_process = self.process_map[process_key]
+            if existing_process.state() == QProcess.Running:
+                existing_process.kill()
+                existing_process.waitForFinished(1000)
+            del self.process_map[process_key]
+
+        process = QProcess()
+        command = 'ros2'
+        args = ['service', 'call', '/octomap_server/reset', 'std_srvs/srv/Empty', '{}']
+
+        cmd_str = command + ' ' + ' '.join(args)
+        self._log_append(status_text_widget, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
+        process.readyReadStandardOutput.connect(lambda: output_handler(process))
+        process.readyReadStandardError.connect(lambda: output_handler(process))
+        process.finished.connect(lambda: self._cleanup_reset_octomap(process_key, status_text_widget))
+
+        process.start(command, args)
+        self.process_map[process_key] = process
+
+    def _cleanup_reset_octomap(self, process_key, status_text_widget):
+        """Clean up reset octomap process"""
+        if process_key in self.process_map:
+            process = self.process_map[process_key]
+            exit_code = process.exitCode()
+            if exit_code == 0:
+                self._append_to_text_widget(
+                    status_text_widget,
+                    f"<span style='color: #3fb950;'>[Reset Octomap]</span> Successfully reset octomap."
+                )
+            else:
+                self._append_to_text_widget(
+                    status_text_widget,
+                    (
+                        f"<span style='color: #d29922;'>[Reset Octomap]</span> "
+                        f"Reset command exited with code {exit_code}. "
+                        "If octomap_server restarted while handling the reset, wait a few seconds for the respawned node to come back up and then retry if needed."
+                    )
+                )
+                self._append_to_text_widget(
+                    status_text_widget,
+                    "<span style='color: #8b949e;'>[Reset Octomap]</span> Automatic respawn is enabled for octomap_server in the launch configuration."
                 )
             del self.process_map[process_key]
 

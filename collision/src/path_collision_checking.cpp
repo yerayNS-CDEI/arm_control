@@ -97,6 +97,94 @@ inline bool endsWith(const std::string& value, const std::string& suffix)
     return value.size() >= suffix.size() &&
            value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
+
+std::unique_ptr<octomap::OcTree> buildDilatedOctomap(
+    const octomap::OcTree& source_tree,
+    const double dilation_radius)
+{
+    auto dilated_tree = std::make_unique<octomap::OcTree>(source_tree.getResolution());
+    const double resolution = source_tree.getResolution();
+    const int max_offset_steps = static_cast<int>(std::ceil(dilation_radius / resolution));
+    const double dilation_radius_sq = dilation_radius * dilation_radius;
+
+    for (auto it = source_tree.begin_leafs(), end = source_tree.end_leafs(); it != end; ++it)
+    {
+        if (!source_tree.isNodeOccupied(*it))
+        {
+            continue;
+        }
+
+        for (int dx = -max_offset_steps; dx <= max_offset_steps; ++dx)
+        {
+            const double offset_x = static_cast<double>(dx) * resolution;
+            for (int dy = -max_offset_steps; dy <= max_offset_steps; ++dy)
+            {
+                const double offset_y = static_cast<double>(dy) * resolution;
+                for (int dz = -max_offset_steps; dz <= max_offset_steps; ++dz)
+                {
+                    const double offset_z = static_cast<double>(dz) * resolution;
+                    const double offset_distance_sq = offset_x * offset_x + offset_y * offset_y + offset_z * offset_z;
+                    if (offset_distance_sq > dilation_radius_sq)
+                    {
+                        continue;
+                    }
+
+                    dilated_tree->updateNode(
+                        octomap::point3d(it.getX() + offset_x, it.getY() + offset_y, it.getZ() + offset_z),
+                        true);
+                }
+            }
+        }
+    }
+
+    dilated_tree->updateInnerOccupancy();
+    return dilated_tree;
+}
+
+void populateOccupiedVoxelCloud(
+    const octomap::OcTree& occupancy_tree,
+    const builtin_interfaces::msg::Time& stamp,
+    const std::string& target_frame,
+    const Eigen::Affine3d& octomap_pose_wrt_base,
+    sensor_msgs::msg::PointCloud2& occupied_voxel_cloud)
+{
+    std::size_t occupied_voxel_count = 0;
+    for (auto it = occupancy_tree.begin_leafs(), end = occupancy_tree.end_leafs(); it != end; ++it)
+    {
+        if (occupancy_tree.isNodeOccupied(*it))
+        {
+            ++occupied_voxel_count;
+        }
+    }
+
+    occupied_voxel_cloud.header.stamp = stamp;
+    occupied_voxel_cloud.header.frame_id = target_frame;
+
+    sensor_msgs::PointCloud2Modifier modifier(occupied_voxel_cloud);
+    modifier.setPointCloud2FieldsByString(1, "xyz");
+    modifier.resize(occupied_voxel_count);
+
+    sensor_msgs::PointCloud2Iterator<float> iter_x(occupied_voxel_cloud, "x");
+    sensor_msgs::PointCloud2Iterator<float> iter_y(occupied_voxel_cloud, "y");
+    sensor_msgs::PointCloud2Iterator<float> iter_z(occupied_voxel_cloud, "z");
+
+    for (auto it = occupancy_tree.begin_leafs(), end = occupancy_tree.end_leafs(); it != end; ++it)
+    {
+        if (!occupancy_tree.isNodeOccupied(*it))
+        {
+            continue;
+        }
+
+        const Eigen::Vector3d voxel_center_in_octomap_frame(it.getX(), it.getY(), it.getZ());
+        const Eigen::Vector3d voxel_center_in_base_frame = octomap_pose_wrt_base * voxel_center_in_octomap_frame;
+        *iter_x = static_cast<float>(voxel_center_in_base_frame.x());
+        *iter_y = static_cast<float>(voxel_center_in_base_frame.y());
+        *iter_z = static_cast<float>(voxel_center_in_base_frame.z());
+        ++iter_x;
+        ++iter_y;
+        ++iter_z;
+    }
+}
 }  // namespace
 
 PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options) : Node("path_collision_checking", options)
@@ -114,6 +202,9 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     simplified_collision_box_link_suffixes_ = this->declare_parameter<std::vector<std::string>>(
         "simplified_collision_box_link_suffixes",
         std::vector<std::string>{"plate_link"});
+    publish_debug_octomap_occupied_voxels_ = this->declare_parameter<bool>("publish_debug_octomap_occupied_voxels", true);
+    log_detailed_collision_events_ = this->declare_parameter<bool>("log_detailed_collision_events", false);
+    this->declare_parameter<double>("octomap_dilation_radius", 0.071);
     simplified_collision_skip_link_suffixes_ = this->declare_parameter<std::vector<std::string>>(
         "simplified_collision_skip_link_suffixes",
         std::vector<std::string>{"sensor_A_link", "sensor_B_link", "sensor_C_link", "ee_cylinder_link"});
@@ -183,7 +274,7 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     publish_tested_joint_states_ = this->declare_parameter<bool>("publish_tested_joint_states", false);
     short_circuit_env_on_self_collision_ = this->declare_parameter<bool>("short_circuit_env_on_self_collision", true);
     log_collision_service_metrics_ = this->declare_parameter<bool>("log_collision_service_metrics", true);
-    collision_service_metrics_interval_ = this->declare_parameter<int>("collision_service_metrics_interval", 5);
+    collision_service_metrics_interval_ = this->declare_parameter<int>("collision_service_metrics_interval", 20);
 
     // TF properties
     buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -1044,15 +1135,69 @@ void PathCollisionChecking::octomapCallback(const octomap_msgs::msg::Octomap::Sh
     }
 
     Eigen::Affine3d octomap_pose_wrt_base = tf2::transformToEigen(octomap_wrt_base.transform);
+    const double octomap_dilation_radius = this->get_parameter("octomap_dilation_radius").as_double();
+
+    sensor_msgs::msg::PointCloud2 occupied_voxel_cloud;
+    octomap_msgs::msg::Octomap effective_octomap_msg;
+    const octomap_msgs::msg::Octomap* effective_octomap = msg.get();
+
+    if (publish_debug_octomap_occupied_voxels_ || octomap_dilation_radius > 0.0)
+    {
+        std::unique_ptr<octomap::AbstractOcTree> octree(octomap_msgs::msgToMap(*msg));
+        const auto* occupancy_tree = dynamic_cast<const octomap::OcTree*>(octree.get());
+        if (occupancy_tree == nullptr)
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 5000,
+                "Received octomap message that could not be converted to octomap::OcTree for debug publishing/dilation.");
+        }
+        else
+        {
+            const octomap::OcTree* effective_tree = occupancy_tree;
+            std::unique_ptr<octomap::OcTree> dilated_tree;
+
+            if (octomap_dilation_radius > 0.0)
+            {
+                dilated_tree = buildDilatedOctomap(*occupancy_tree, octomap_dilation_radius);
+                if (octomap_msgs::binaryMapToMsg(*dilated_tree, effective_octomap_msg))
+                {
+                    effective_octomap_msg.header = msg->header;
+                    effective_octomap = &effective_octomap_msg;
+                    effective_tree = dilated_tree.get();
+                }
+                else
+                {
+                    RCLCPP_WARN_THROTTLE(
+                        this->get_logger(), *this->get_clock(), 5000,
+                        "Failed to serialize dilated octomap; falling back to the original octomap for collision checks.");
+                }
+            }
+
+            if (publish_debug_octomap_occupied_voxels_)
+            {
+                populateOccupiedVoxelCloud(
+                    *effective_tree,
+                    msg->header.stamp,
+                    visualization_frame_,
+                    octomap_pose_wrt_base,
+                    occupied_voxel_cloud);
+            }
+        }
+    }
 
     boost::mutex::scoped_lock lock(collision_world_mutex_);
     // Remove the old octomap from the world
     collision_world_->removeCollisionObject(OCTOMAP_ID);
     // Update with the new octomap
     robot_collision_checking::FCLObjectPtr octo_obj = std::make_shared<robot_collision_checking::FCLObject>(
-        *msg, robot_collision_checking::OCTOMAP, octomap_pose_wrt_base);
+        *effective_octomap, robot_collision_checking::OCTOMAP, octomap_pose_wrt_base);
     // Add the filtered octomap to the collision world
     collision_world_->addCollisionObject(octo_obj, OCTOMAP_ID);
+
+    if (publish_debug_octomap_occupied_voxels_)
+    {
+        occupied_voxels_pub_->publish(occupied_voxel_cloud);
+    }
 }
 
 /// Private member methods (excluding ROS callbacks)
@@ -1285,12 +1430,21 @@ bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::Joint
     for (int i = 0; i < num_shapes; i++)
     {
         std::vector<int> collision_object_ids;
+        const std::string& link_name = collision_link_names_[i];
 
         // In arm mode the base mount links (e.g. arm_base_link_inertia) physically sit inside
         // the mobile base box that was added as an environment object.  Their geometry always
         // touches/overlaps the top face of that box by construction, so checking them produces
         // permanent false positives.  Skip them – they cannot move away from the base.
-        if (mode_ == "arm" && endsWith(collision_link_names_[i], "base_link_inertia"))
+        if (mode_ == "arm" && endsWith(link_name, "base_link_inertia"))
+        {
+            continue;
+        }
+
+        // The simplified mobile-base anchor box is meant to protect the arm from hitting the
+        // robot base via self-collision checks, not to block motions against the octomap.
+        // Keep it in the self-collision model but exclude it from environment collision checks.
+        if (shouldUseSimplifiedMobileBaseGeometry(link_name))
         {
             continue;
         }
@@ -1304,8 +1458,11 @@ bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::Joint
         if (collision_world_->checkCollisionObject(robot_env_collision_objects_[i], collision_object_ids))
         {
             env_collision = true;
-            RCLCPP_WARN(this->get_logger(), "Environment collision detected for link %s with object IDs: %zu objects",
-                       collision_link_names_[i].c_str(), collision_object_ids.size());
+            if (log_detailed_collision_events_)
+            {
+                RCLCPP_WARN(this->get_logger(), "Environment collision detected for link %s with object IDs: %zu objects",
+                           link_name.c_str(), collision_object_ids.size());
+            }
             break;
         }
     }
@@ -1429,8 +1586,11 @@ bool PathCollisionChecking::checkSelfCollision(const GeometryInformation& geomet
                 std::string link_i_name = (i < n_names) ? collision_link_names_[i] : "link_" + std::to_string(i);
                 std::string link_j_name = (j < n_names) ? collision_link_names_[j] : "link_" + std::to_string(j);
 
-                RCLCPP_WARN(this->get_logger(), "Self-collision detected between '%s' (index %d) and '%s' (index %d)", 
-                            link_i_name.c_str(), i, link_j_name.c_str(), j);
+                if (log_detailed_collision_events_)
+                {
+                    RCLCPP_WARN(this->get_logger(), "Self-collision detected between '%s' (index %d) and '%s' (index %d)", 
+                                link_i_name.c_str(), i, link_j_name.c_str(), j);
+                }
                 return true;
             }
             else
@@ -1438,8 +1598,11 @@ bool PathCollisionChecking::checkSelfCollision(const GeometryInformation& geomet
                 std::string link_i_name = (i < n_names) ? collision_link_names_[i] : "link_" + std::to_string(i);
                 std::string link_j_name = (j < n_names) ? collision_link_names_[j] : "link_" + std::to_string(j);
 
-                RCLCPP_INFO(this->get_logger(), "Self-collision cleared between '%s' (index %d) and '%s' (index %d)", 
-                            link_i_name.c_str(), i, link_j_name.c_str(), j);
+                if (log_detailed_collision_events_)
+                {
+                    RCLCPP_INFO(this->get_logger(), "Self-collision cleared between '%s' (index %d) and '%s' (index %d)", 
+                                link_i_name.c_str(), i, link_j_name.c_str(), j);
+                }
             }
         }
 
@@ -1448,9 +1611,12 @@ bool PathCollisionChecking::checkSelfCollision(const GeometryInformation& geomet
             any_collision_active = true;
             std::string link_i_name = (i < n_names) ? collision_link_names_[i] : "link_" + std::to_string(i);
             std::string link_j_name = (j < n_names) ? collision_link_names_[j] : "link_" + std::to_string(j);
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-                "Active collision: '%s' (index %d) <-> '%s' (index %d)",
-                link_i_name.c_str(), i, link_j_name.c_str(), j);
+            if (log_detailed_collision_events_)
+            {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                    "Active collision: '%s' (index %d) <-> '%s' (index %d)",
+                    link_i_name.c_str(), i, link_j_name.c_str(), j);
+            }
         }
     }
 
