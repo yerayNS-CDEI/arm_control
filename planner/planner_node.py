@@ -11,7 +11,8 @@ import rclpy
 from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, Point
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import JointState, PointCloud2
+from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Bool, ColorRGBA
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from std_msgs.msg import Float64MultiArray
@@ -68,11 +69,11 @@ class PlannerNode(Node):
 
         # Collision validation visualization is expensive because each service call may trigger
         # marker publication and TF updates in the collision node. Keep it opt-in.
-        self.declare_parameter('visualize_collision_checks', False)
+        self.declare_parameter('visualize_collision_checks', True)
         self.visualize_collision_checks = self.get_parameter('visualize_collision_checks').get_parameter_value().bool_value
         self.declare_parameter('log_performance_metrics', True)
         self.log_performance_metrics = self.get_parameter('log_performance_metrics').get_parameter_value().bool_value
-        self.declare_parameter('collision_metrics_log_interval', 50)
+        self.declare_parameter('collision_metrics_log_interval', 150)
         self.collision_metrics_log_interval = self.get_parameter('collision_metrics_log_interval').get_parameter_value().integer_value
         self.declare_parameter('cache_collision_checks', True)
         self.cache_collision_checks = self.get_parameter('cache_collision_checks').get_parameter_value().bool_value
@@ -84,10 +85,22 @@ class PlannerNode(Node):
         self.hot_loop_info_logging = self.get_parameter('hot_loop_info_logging').get_parameter_value().bool_value
         self.declare_parameter('publish_replanning_visualization', False)
         self.publish_replanning_visualization = self.get_parameter('publish_replanning_visualization').get_parameter_value().bool_value
-        self.declare_parameter('visualize_dilated_grid', False)
+        self.declare_parameter('visualize_dilated_grid', True)
         self.visualize_dilated_grid = self.get_parameter('visualize_dilated_grid').get_parameter_value().bool_value
+        self.declare_parameter('integrate_octomap_into_grid', True)
+        self.integrate_octomap_into_grid = self.get_parameter('integrate_octomap_into_grid').get_parameter_value().bool_value
+        self.declare_parameter('octomap_voxel_topic', '/octomap_point_cloud_centers')
+        self.octomap_voxel_topic = self.get_parameter('octomap_voxel_topic').get_parameter_value().string_value
+        self.declare_parameter('octomap_voxel_target_frame', 'arm_base')
+        self.octomap_voxel_target_frame = self.get_parameter('octomap_voxel_target_frame').get_parameter_value().string_value
+        self.declare_parameter('octomap_voxel_transform_timeout_sec', 0.2)
+        self.octomap_voxel_transform_timeout_sec = (
+            self.get_parameter('octomap_voxel_transform_timeout_sec').get_parameter_value().double_value
+        )
         self.declare_parameter('validate_post_astar_tool0_path', False)
         self.validate_post_astar_tool0_path = self.get_parameter('validate_post_astar_tool0_path').get_parameter_value().bool_value
+        self.declare_parameter('log_detailed_planning_diagnostics', False)
+        self.log_detailed_planning_diagnostics = self.get_parameter('log_detailed_planning_diagnostics').get_parameter_value().bool_value
         self.declare_parameter('astar_collision_mode', 'dual')
         self.astar_collision_mode = self.get_parameter('astar_collision_mode').get_parameter_value().string_value
         if self.astar_collision_mode not in ['dual', 'wrist3', 'tool0_proxy']:
@@ -101,7 +114,7 @@ class PlannerNode(Node):
         # 0 = mark only the collision cell itself
         # 1 = mark the 6 axis-aligned neighbors plus the center cell
         # 2+ = mark the full cubic neighborhood with radius = num_layers
-        self.declare_parameter('collision_avoidance_neighbor_layers', 2)
+        self.declare_parameter('collision_avoidance_neighbor_layers', 1)
         self.collision_avoidance_neighbor_layers = self.get_parameter('collision_avoidance_neighbor_layers').get_parameter_value().integer_value
 
         # Mode parameter: 'arm' or 'full' — both use the same static oriented box from mobile_base_geometry.yaml
@@ -149,6 +162,8 @@ class PlannerNode(Node):
         self._planning_thread = None
         self._plan_generation = 0
         self._reset_plan_metrics()
+        self._octomap_grid_points = np.empty((0, 3), dtype=np.float64)
+        self._last_octomap_tf_warn_ns = 0
 
         # TF buffer and listener to query transforms dynamically
         self.tf_buffer = tf2_ros.Buffer()
@@ -232,6 +247,19 @@ class PlannerNode(Node):
         self.create_subscription(Bool, "/execution_status", self.execution_status_callback, 10)
         self.create_subscription(PoseStamped, "end_effector_pose", self.end_effector_pose_callback, 10)
         self.create_subscription(PoseStamped, "/end_effector_pose", self.end_effector_pose_callback, 10)
+        if self.integrate_octomap_into_grid:
+            self.octomap_voxel_sub = self.create_subscription(
+                PointCloud2,
+                self.octomap_voxel_topic,
+                self.octomap_voxel_callback,
+                qos,
+            )
+            self.get_logger().info(
+                f"Planner octomap grid integration enabled from {self.octomap_voxel_topic} "
+                f"into frame {self.octomap_voxel_target_frame}."
+            )
+        else:
+            self.octomap_voxel_sub = None
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
         self.reset_sub = self.create_subscription(Bool, "/planner/reset", self.reset_callback, 10)
         self.trajectory_pub = self.create_publisher(JointTrajectory, 'planned_trajectory', 10)
@@ -1176,7 +1204,7 @@ class PlannerNode(Node):
         goal_world,
         **stats,
     ):
-        if self.astar_collision_mode != 'wrist3':
+        if self.astar_collision_mode != 'wrist3' or not self.log_detailed_planning_diagnostics:
             return
 
         stat_parts = [f"{key}={value}" for key, value in stats.items()]
@@ -1337,7 +1365,7 @@ class PlannerNode(Node):
         
         return start_segment, goal_segment, gap_info
     
-    def _identify_obstacle(self, position, occupancy_grid, grid_idx):
+    def _identify_obstacle(self, position, occupancy_grid, octomap_occupancy_grid, grid_idx):
         """
         Identify which specific obstacle a position is inside.
         Returns a descriptive string naming the obstacle.
@@ -1383,7 +1411,11 @@ class PlannerNode(Node):
             if not obstacles:
                 obstacles.append("Unknown obstacle (present in occupancy grid)")
                 self.get_logger().info(f"  ✓ In occupancy grid!")
-        else:
+        if octomap_occupancy_grid[i, j, k] == 1:
+            obstacles.append("Octomap-derived obstacle")
+            self.get_logger().info(f"  ✓ In octomap occupancy grid!")
+
+        if occupancy_grid[i, j, k] != 1 and octomap_occupancy_grid[i, j, k] != 1:
             # Only in dilated grid, not in original
             if not obstacles:
                 obstacles.append("Dilated safety margin around obstacle")
@@ -1395,6 +1427,146 @@ class PlannerNode(Node):
             return " AND ".join(obstacles)
         else:
             return "Unknown (possibly dilation margin)"
+
+    def _find_replanning_overlay_contributors(self, grid_idx, collision_waypoints_to_avoid):
+        target_idx = tuple(int(v) for v in grid_idx)
+        contributors = []
+
+        for source_grid_idx, num_layers in collision_waypoints_to_avoid.items():
+            source_idx = tuple(int(v) for v in source_grid_idx)
+            offset = (
+                target_idx[0] - source_idx[0],
+                target_idx[1] - source_idx[1],
+                target_idx[2] - source_idx[2],
+            )
+            if offset in self._neighbor_offsets_for_layers(int(num_layers)):
+                contributors.append({
+                    'grid_idx': source_idx,
+                    'num_layers': int(num_layers),
+                    'offset': offset,
+                })
+
+        return contributors
+
+    def _describe_grid_blockage(
+        self,
+        position,
+        grid_idx,
+        occupancy_grid,
+        octomap_occupancy_grid,
+        occupancy_grid_dilated_base,
+        occupancy_grid_dilated,
+        collision_waypoints_to_avoid,
+    ):
+        i, j, k = (int(grid_idx[0]), int(grid_idx[1]), int(grid_idx[2]))
+
+        if occupancy_grid[i, j, k] == 1 or octomap_occupancy_grid[i, j, k] == 1:
+            obstacle_name = self._identify_obstacle(
+                position,
+                occupancy_grid,
+                octomap_occupancy_grid,
+                grid_idx,
+            )
+            if octomap_occupancy_grid[i, j, k] == 1 and occupancy_grid[i, j, k] == 1:
+                source = 'overlap of static and octomap occupancy grids'
+            elif octomap_occupancy_grid[i, j, k] == 1:
+                source = 'octomap occupancy grid'
+            else:
+                source = 'static environment occupancy grid'
+            return {
+                'headline': 'is INSIDE ENVIRONMENT OBSTACLE',
+                'reason': obstacle_name,
+                'source': source,
+            }
+
+        if occupancy_grid_dilated_base[i, j, k] == 1:
+            return {
+                'headline': 'is INSIDE DILATED SAFETY MARGIN',
+                'reason': 'Dilated environment margin around static or octomap obstacles',
+                'source': 'combined occupancy-grid dilation',
+            }
+
+        if occupancy_grid_dilated[i, j, k] == 1:
+            overlay_contributors = self._find_replanning_overlay_contributors(
+                grid_idx,
+                collision_waypoints_to_avoid,
+            )
+            if overlay_contributors:
+                contributor_preview = ', '.join(
+                    f"{item['grid_idx']} (layers={item['num_layers']}, offset={item['offset']})"
+                    for item in overlay_contributors[:3]
+                )
+                if any(item['offset'] == (0, 0, 0) for item in overlay_contributors):
+                    overlay_source = (
+                        'replanning exclusion overlay; the blocked cell is itself a tracked colliding waypoint '
+                        f"({contributor_preview})"
+                    )
+                else:
+                    overlay_source = (
+                        'replanning exclusion overlay; the blocked cell lies inside the neighbor exclusion region '
+                        f"of tracked collision waypoint(s) ({contributor_preview})"
+                    )
+            else:
+                overlay_source = 'replanning exclusion overlay from previously colliding waypoint(s)'
+
+            return {
+                'headline': 'is BLOCKED IN CURRENT REPLANNING GRID',
+                'reason': 'Replanning exclusion around previously colliding waypoint(s)',
+                'source': overlay_source,
+            }
+
+        return {
+            'headline': 'is BLOCKED FOR AN UNKNOWN GRID REASON',
+            'reason': 'Unknown grid blockage source',
+            'source': 'current planning grid state could not be classified',
+        }
+
+    def _format_endpoint_block_message(
+        self,
+        endpoint_scope,
+        frame_label,
+        position,
+        paired_frame_label,
+        paired_position,
+        grid_idx,
+        occupancy_grid,
+        octomap_occupancy_grid,
+        occupancy_grid_dilated_base,
+        occupancy_grid_dilated,
+        collision_waypoints_to_avoid,
+        replanning_attempt,
+        current_planning_start_grid=None,
+        current_planning_goal_grid=None,
+    ):
+        blockage = self._describe_grid_blockage(
+            position,
+            grid_idx,
+            occupancy_grid,
+            octomap_occupancy_grid,
+            occupancy_grid_dilated_base,
+            occupancy_grid_dilated,
+            collision_waypoints_to_avoid,
+        )
+
+        lines = [
+            f"❌ {endpoint_scope} {frame_label} position {blockage['headline']}: {blockage['reason']}",
+            f"  Scope: {endpoint_scope}",
+            f"  Position ({frame_label}): {[round(x, 3) for x in position]}",
+            f"  Position ({paired_frame_label}): {[round(x, 3) for x in paired_position]}",
+            f"  Grid index ({frame_label}): {grid_idx}",
+            f"  Blocking source: {blockage['source']}",
+        ]
+
+        if replanning_attempt > 0:
+            lines.append(
+                f"  Current replanning gap (wrist_3 grid): {current_planning_start_grid} -> {current_planning_goal_grid}"
+            )
+            lines.append(
+                '  Note: this check is being evaluated inside the replanning loop against the current replanning grid, not only against the original static environment grid.'
+            )
+
+        lines.append('  → Cannot continue planning from this blocked endpoint check.')
+        return '\n'.join(lines)
         
     def emergency_callback(self, msg):
         with self._state_lock:
@@ -1459,6 +1631,110 @@ class PlannerNode(Node):
     def end_effector_pose_callback(self, msg):
         with self._state_lock:
             self.end_effector_pose = msg
+
+    def octomap_voxel_callback(self, msg: PointCloud2):
+        points = self._point_cloud_to_xyz_array(msg)
+        if points.size == 0:
+            with self._state_lock:
+                self._octomap_grid_points = np.empty((0, 3), dtype=np.float64)
+            return
+
+        transformed_points = self._transform_points_to_frame(
+            points,
+            msg.header.frame_id,
+            self.octomap_voxel_target_frame,
+        )
+        if transformed_points is None:
+            return
+
+        with self._state_lock:
+            self._octomap_grid_points = transformed_points
+
+    @staticmethod
+    def _point_cloud_to_xyz_array(msg: PointCloud2):
+        raw_points = list(point_cloud2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True))
+        if not raw_points:
+            return np.empty((0, 3), dtype=np.float64)
+
+        points = np.asarray(raw_points)
+        if points.dtype.names:
+            return np.column_stack((points['x'], points['y'], points['z'])).astype(np.float64, copy=False)
+
+        return np.asarray(raw_points, dtype=np.float64).reshape(-1, 3)
+
+    def _transform_points_to_frame(self, points, source_frame, target_frame):
+        if points.size == 0 or not source_frame or source_frame == target_frame:
+            return points
+
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                target_frame,
+                source_frame,
+                rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=self.octomap_voxel_transform_timeout_sec),
+            )
+        except (TransformException, tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as ex:
+            now_ns = self.get_clock().now().nanoseconds
+            if now_ns - self._last_octomap_tf_warn_ns > int(5e9):
+                self.get_logger().warn(
+                    f"Unable to transform octomap voxels from {source_frame} to {target_frame}: {ex}"
+                )
+                self._last_octomap_tf_warn_ns = now_ns
+            return None
+
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        rotation_matrix = R.from_quat([
+            rotation.x,
+            rotation.y,
+            rotation.z,
+            rotation.w,
+        ]).as_matrix()
+        translation_vector = np.array([translation.x, translation.y, translation.z], dtype=np.float64)
+        return points @ rotation_matrix.T + translation_vector
+
+    def _snapshot_octomap_grid_points(self):
+        with self._state_lock:
+            return self._octomap_grid_points.copy()
+
+    def _octomap_points_to_grid_indices(self, points):
+        if points.size == 0:
+            return np.empty((0, 3), dtype=np.int64)
+
+        x_step = float(self.x_vals[1] - self.x_vals[0]) if len(self.x_vals) > 1 else float(self.cart_step)
+        y_step = float(self.y_vals[1] - self.y_vals[0]) if len(self.y_vals) > 1 else float(self.cart_step)
+        z_step = float(self.z_vals[1] - self.z_vals[0]) if len(self.z_vals) > 1 else float(self.cart_step)
+
+        idx_x = np.rint((points[:, 0] - float(self.x_vals[0])) / x_step).astype(np.int64)
+        idx_y = np.rint((points[:, 1] - float(self.y_vals[0])) / y_step).astype(np.int64)
+        idx_z = np.rint((points[:, 2] - float(self.z_vals[0])) / z_step).astype(np.int64)
+
+        valid = (
+            (idx_x >= 0) & (idx_x < self.grid_shape[0]) &
+            (idx_y >= 0) & (idx_y < self.grid_shape[1]) &
+            (idx_z >= 0) & (idx_z < self.grid_shape[2])
+        )
+        if not np.any(valid):
+            return np.empty((0, 3), dtype=np.int64)
+
+        return np.column_stack((idx_x[valid], idx_y[valid], idx_z[valid]))
+
+    def _build_octomap_occupancy_grid(self):
+        octomap_occupancy_grid = np.zeros(self.grid_shape, dtype=np.uint8)
+        if not self.integrate_octomap_into_grid:
+            return octomap_occupancy_grid, 0
+
+        octomap_points = self._snapshot_octomap_grid_points()
+        octomap_indices = self._octomap_points_to_grid_indices(octomap_points)
+        if octomap_indices.size == 0:
+            return octomap_occupancy_grid, 0
+
+        octomap_occupancy_grid[
+            octomap_indices[:, 0],
+            octomap_indices[:, 1],
+            octomap_indices[:, 2],
+        ] = 1
+        return octomap_occupancy_grid, int(octomap_indices.shape[0])
 
     def execution_status_callback(self, msg: Bool):
         with self._state_lock:
@@ -1720,6 +1996,14 @@ class PlannerNode(Node):
         
         return sorted_indices, sorted_distances
 
+    @staticmethod
+    def _format_ik_target_label(waypoint_idx):
+        if waypoint_idx == "GOAL":
+            return "Final goal pose"
+        if waypoint_idx is None:
+            return "IK target"
+        return f"Intermediate path waypoint {waypoint_idx}"
+
     def _get_ranked_ik_candidates(self, ik_solutions, q_current, waypoint_idx=None):
         """
         Return IK candidates ordered by proximity to the reference configuration.
@@ -1728,10 +2012,11 @@ class PlannerNode(Node):
         candidates are considered for both direct selection and collision fallback.
         """
         ik_solutions_array = np.asarray(ik_solutions, dtype=float)
+        target_label = self._format_ik_target_label(waypoint_idx)
         if ik_solutions_array.ndim == 1:
             if np.any(np.isnan(ik_solutions_array)):
-                if waypoint_idx is not None:
-                    self.get_logger().error(f"Waypoint {waypoint_idx}: No valid IK solutions found")
+                if waypoint_idx is not None and self.log_detailed_planning_diagnostics:
+                    self.get_logger().error(f"{target_label}: no valid IK solutions found")
                 return []
 
             delta = np.arctan2(np.sin(q_current - ik_solutions_array), np.cos(q_current - ik_solutions_array))
@@ -1741,8 +2026,8 @@ class PlannerNode(Node):
         sorted_indices, sorted_distances = self._sort_ik_solutions_by_distance(ik_solutions, q_current)
 
         if len(sorted_indices) == 0:
-            if waypoint_idx is not None:
-                self.get_logger().error(f"Waypoint {waypoint_idx}: No valid IK solutions found")
+            if waypoint_idx is not None and self.log_detailed_planning_diagnostics:
+                self.get_logger().error(f"{target_label}: no valid IK solutions found")
             return []
 
         if self.max_ik_solutions_to_test > 0:
@@ -1775,6 +2060,8 @@ class PlannerNode(Node):
         if not ranked_candidates:
             return None, IKSelectionOutcome.NO_VALID_SOLUTIONS
 
+        target_label = self._format_ik_target_label(waypoint_idx)
+
         if cancel_check is not None and cancel_check():
             return None, IKSelectionOutcome.CHECK_FAILED
 
@@ -1788,30 +2075,32 @@ class PlannerNode(Node):
             )
 
             if collision_status == CollisionCheckStatus.CHECK_FAILED:
-                self.get_logger().warn(
-                    f"Waypoint {waypoint_idx}: IK candidate {candidate_idx} could not be collision-validated "
-                    f"(rank {candidate_rank}, dist: {candidate_dist:.3f})"
-                )
+                if self.log_detailed_planning_diagnostics:
+                    self.get_logger().warn(
+                        f"{target_label}: IK candidate {candidate_idx} could not be collision-validated "
+                        f"(rank {candidate_rank}, dist: {candidate_dist:.3f})"
+                    )
                 return None, IKSelectionOutcome.CHECK_FAILED
 
             if collision_status == CollisionCheckStatus.FREE:
-                if candidate_rank == 1:
+                if candidate_rank == 1 and self.log_detailed_planning_diagnostics:
                     self._log_hot_loop_info(lambda: (
-                        f"Waypoint {waypoint_idx}: ✓ Closest solution {candidate_idx} collision-free "
+                        f"{target_label}: closest IK solution {candidate_idx} is collision-free "
                         f"(dist: {candidate_dist:.3f})"
                     ))
-                else:
+                elif self.log_detailed_planning_diagnostics:
                     self.get_logger().warn(
-                        f"Waypoint {waypoint_idx}: recovered with fallback IK solution {candidate_idx} "
+                        f"{target_label}: recovered with fallback IK solution {candidate_idx} "
                         f"(rank {candidate_rank}, dist: {candidate_dist:.3f}) after collisions in {collided_candidate_indices}"
                     )
                 return candidate_solution, IKSelectionOutcome.SUCCESS
 
             collided_candidate_indices.append(candidate_idx)
 
-        self.get_logger().warn(
-            f"Waypoint {waypoint_idx}: all tested IK solutions are in collision {collided_candidate_indices}"
-        )
+        if self.log_detailed_planning_diagnostics:
+            self.get_logger().warn(
+                f"{target_label}: all tested IK solutions are in collision {collided_candidate_indices}"
+            )
         return None, IKSelectionOutcome.ALL_IN_COLLISION
 
     def _check_collision_sync(
@@ -1855,7 +2144,12 @@ class PlannerNode(Node):
             self._collision_check_cache_misses += 1
 
         if not self.collision_check_client.service_is_ready():
-            return finish(CollisionCheckStatus.CHECK_FAILED)
+            wait_timeout = max(0.1, min(timeout_sec, 0.5))
+            if not self.collision_check_client.wait_for_service(timeout_sec=wait_timeout):
+                self.get_logger().warn(
+                    f"Collision check service '/collision/check_collision_pose' is not ready after waiting {wait_timeout:.2f}s."
+                )
+                return finish(CollisionCheckStatus.CHECK_FAILED)
         
         request = CheckCollisionPose.Request()
         request.joint_state = self._make_collision_request_joint_state(joint_values)
@@ -1986,6 +2280,14 @@ class PlannerNode(Node):
             or len(uncached_entries) == 1
             or not self.collision_check_batch_client.service_is_ready()
         ):
+            if len(uncached_entries) > 1 and not self.collision_check_batch_client.service_is_ready():
+                wait_timeout = max(0.1, min(timeout_sec, 0.5))
+                if self.collision_check_batch_client.wait_for_service(timeout_sec=wait_timeout):
+                    pass
+                else:
+                    self.get_logger().warn(
+                        f"Batch collision service '/collision/check_collision_poses' is not ready after waiting {wait_timeout:.2f}s; falling back to single checks."
+                    )
             return fallback_to_single_checks()
 
         request_entries = [entry for entry in uncached_entries if entry[3]] + [
@@ -2119,6 +2421,7 @@ class PlannerNode(Node):
             IKSelectionOutcome describing why the selection succeeded or failed
         """
         ranked_candidates = self._get_ranked_ik_candidates(ik_solutions, q_current, waypoint_idx=waypoint_idx)
+        target_label = self._format_ik_target_label(waypoint_idx)
 
         if not ranked_candidates:
             return None, IKSelectionOutcome.NO_VALID_SOLUTIONS
@@ -2126,16 +2429,18 @@ class PlannerNode(Node):
         single_service_ready = self.collision_check_client.service_is_ready()
         if not test_collision:
             best_idx, best_solution, best_dist = ranked_candidates[0]
-            self.get_logger().info(
-                f"Waypoint {waypoint_idx}: Using closest solution {best_idx} "
-                f"(dist: {best_dist:.3f}, collision checking disabled)"
-            )
+            if self.log_detailed_planning_diagnostics:
+                self.get_logger().info(
+                    f"{target_label}: using closest IK solution {best_idx} "
+                    f"(dist: {best_dist:.3f}, collision checking disabled)"
+                )
             return best_solution, IKSelectionOutcome.SUCCESS
 
         if not single_service_ready:
-            self.get_logger().error(
-                f"Waypoint {waypoint_idx}: collision checking requested but service is unavailable"
-            )
+            if self.log_detailed_planning_diagnostics:
+                self.get_logger().error(
+                    f"{target_label}: collision checking requested but the service is unavailable"
+                )
             return None, IKSelectionOutcome.CHECK_FAILED
 
         return self._select_collision_free_ranked_candidate(
@@ -2286,6 +2591,7 @@ class PlannerNode(Node):
 
         # Occupancy grid: all free (NEEDS TO be parameterized)
         occupancy_grid = np.zeros(self.grid_shape, dtype=np.uint8)
+        octomap_occupancy_grid = np.zeros(self.grid_shape, dtype=np.uint8)
         # Obstacles
         # 3D meshgrid of coordinates
         X, Y, Z = np.meshgrid(self.x_vals, self.y_vals, self.z_vals, indexing='ij')  # shape: (grid_size, grid_size, num_z)
@@ -2354,6 +2660,15 @@ class PlannerNode(Node):
             f"rotation_z={self.arm_mode_base_box_rotation_z_deg}°, "
             f"inflation={inflation}"
         )
+
+        octomap_occupancy_grid, octomap_voxel_count = self._build_octomap_occupancy_grid()
+        if octomap_voxel_count > 0:
+            occupancy_grid[octomap_occupancy_grid == 1] = 1
+            self.get_logger().info(
+                f"Integrated {octomap_voxel_count} octomap-derived occupied voxels into the planner grid."
+            )
+        elif self.integrate_octomap_into_grid:
+            self.get_logger().info("No octomap-derived occupied voxels available for planner grid integration.")
 
         if self._should_publish_planner_markers():
             # Publish obstacle markers for visualization
@@ -2536,16 +2851,24 @@ class PlannerNode(Node):
                 if occupancy_grid_dilated[start_i, start_j, start_k] == 1:
                     # Identify which obstacle
                     self._log_hot_loop_info("Start is inside obstacle! Identifying...")
-                    obstacle_name = self._identify_obstacle(start_pos_wrist3, occupancy_grid, start_idx)
-                    self.get_logger().error(f"Identified obstacle: {obstacle_name}")
                     self._log_hot_loop_info("Calling _fail_current_goal...")
                     self._fail_current_goal(
-                        f"❌ Start wrist_3 position is INSIDE OBSTACLE: {obstacle_name}\n"
-                        f"  Start pos (wrist_3): {[round(x, 3) for x in start_pos_wrist3]}\n"
-                        f"  Start pos (tool0): {[round(x, 3) for x in start_pos]}\n"
-                        f"  Grid index (wrist_3): {start_idx}\n"
-                        f"  Obstacle detection: dilated grid shows occupied voxel.\n"
-                        f"  → Cannot plan path - start wrist_3 is in collision!"
+                        self._format_endpoint_block_message(
+                            endpoint_scope="Global request start",
+                            frame_label="wrist_3",
+                            position=start_pos_wrist3,
+                            paired_frame_label="tool0",
+                            paired_position=start_pos,
+                            grid_idx=start_idx,
+                            occupancy_grid=occupancy_grid,
+                            octomap_occupancy_grid=octomap_occupancy_grid,
+                            occupancy_grid_dilated_base=occupancy_grid_dilated_base,
+                            occupancy_grid_dilated=occupancy_grid_dilated,
+                            collision_waypoints_to_avoid=collision_waypoints_to_avoid,
+                            replanning_attempt=replanning_attempt,
+                            current_planning_start_grid=current_planning_start_grid,
+                            current_planning_goal_grid=current_planning_goal_grid,
+                        )
                     )
                     self._log_hot_loop_info("_fail_current_goal returned, exiting callback")
                     return
@@ -2555,47 +2878,83 @@ class PlannerNode(Node):
                     f"(robot is already at start position)"
                 ))
             
-            # Check if start tool0 is inside an obstacle (if within grid bounds)
-            if start_tool0_in_bounds:
-                st_i, st_j, st_k = start_tool0_idx
-                if occupancy_grid_dilated[st_i, st_j, st_k] == 1:
-                    obstacle_name = self._identify_obstacle(start_pos, occupancy_grid, start_tool0_idx)
-                    self._fail_current_goal(
-                        f"❌ Start tool0 position is INSIDE OBSTACLE: {obstacle_name}\n"
-                        f"  Start pos (tool0): {[round(x, 3) for x in start_pos]}\n"
-                        f"  Start pos (wrist_3): {[round(x, 3) for x in start_pos_wrist3]}\n"
-                        f"  Grid index (tool0): {start_tool0_idx}\n"
-                        f"  → Cannot plan path - tool is in collision!"
-                    )
-                    return
+            # IMPORTANT: Global request endpoint checks should only run on the first iteration.
+            # During replanning, the grid includes waypoint-exclusion overlays that can legitimately
+            # cover the original request endpoints without meaning the real start/goal is invalid.
+            if replanning_attempt == 0:
+                # Check if start tool0 is inside an obstacle (if within grid bounds)
+                if start_tool0_in_bounds:
+                    st_i, st_j, st_k = start_tool0_idx
+                    if occupancy_grid_dilated[st_i, st_j, st_k] == 1:
+                        self._fail_current_goal(
+                            self._format_endpoint_block_message(
+                                endpoint_scope="Global request start",
+                                frame_label="tool0",
+                                position=start_pos,
+                                paired_frame_label="wrist_3",
+                                paired_position=start_pos_wrist3,
+                                grid_idx=start_tool0_idx,
+                                occupancy_grid=occupancy_grid,
+                                octomap_occupancy_grid=octomap_occupancy_grid,
+                                occupancy_grid_dilated_base=occupancy_grid_dilated_base,
+                                occupancy_grid_dilated=occupancy_grid_dilated,
+                                collision_waypoints_to_avoid=collision_waypoints_to_avoid,
+                                replanning_attempt=replanning_attempt,
+                                current_planning_start_grid=current_planning_start_grid,
+                                current_planning_goal_grid=current_planning_goal_grid,
+                            )
+                        )
+                        return
 
-            # Check if goal wrist_3 is inside an obstacle
-            if occupancy_grid_dilated[goal_i, goal_j, goal_k] == 1:
-                # Identify which obstacle
-                obstacle_name = self._identify_obstacle(goal_pos_wrist3, occupancy_grid, goal_idx)
-                self._fail_current_goal(
-                    f"❌ Goal wrist_3 position is INSIDE OBSTACLE: {obstacle_name}\n"
-                    f"  Goal pos (wrist_3): {[round(x, 3) for x in goal_pos_wrist3]}\n"
-                    f"  Goal pos (tool0): {[round(x, 3) for x in goal_pos]}\n"
-                    f"  Grid index (wrist_3): {goal_idx}\n"
-                    f"  Obstacle detection: dilated grid shows occupied voxel.\n"
-                    f"  → Cannot plan path - goal wrist_3 is in collision!"
-                )
-                return
-            
-            # Check if goal tool0 is inside an obstacle (if within grid bounds)
-            if goal_tool0_in_bounds:
-                gt_i, gt_j, gt_k = goal_tool0_idx
-                if occupancy_grid_dilated[gt_i, gt_j, gt_k] == 1:
-                    obstacle_name = self._identify_obstacle(goal_pos, occupancy_grid, goal_tool0_idx)
+                # Check if goal wrist_3 is inside an obstacle
+                if occupancy_grid_dilated[goal_i, goal_j, goal_k] == 1:
                     self._fail_current_goal(
-                        f"❌ Goal tool0 position is INSIDE OBSTACLE: {obstacle_name}\n"
-                        f"  Goal pos (tool0): {[round(x, 3) for x in goal_pos]}\n"
-                        f"  Goal pos (wrist_3): {[round(x, 3) for x in goal_pos_wrist3]}\n"
-                        f"  Grid index (tool0): {goal_tool0_idx}\n"
-                        f"  → Cannot plan path - tool is in collision!"
+                        self._format_endpoint_block_message(
+                            endpoint_scope="Global request goal",
+                            frame_label="wrist_3",
+                            position=goal_pos_wrist3,
+                            paired_frame_label="tool0",
+                            paired_position=goal_pos,
+                            grid_idx=goal_idx,
+                            occupancy_grid=occupancy_grid,
+                            octomap_occupancy_grid=octomap_occupancy_grid,
+                            occupancy_grid_dilated_base=occupancy_grid_dilated_base,
+                            occupancy_grid_dilated=occupancy_grid_dilated,
+                            collision_waypoints_to_avoid=collision_waypoints_to_avoid,
+                            replanning_attempt=replanning_attempt,
+                            current_planning_start_grid=current_planning_start_grid,
+                            current_planning_goal_grid=current_planning_goal_grid,
+                        )
                     )
                     return
+                
+                # Check if goal tool0 is inside an obstacle (if within grid bounds)
+                if goal_tool0_in_bounds:
+                    gt_i, gt_j, gt_k = goal_tool0_idx
+                    if occupancy_grid_dilated[gt_i, gt_j, gt_k] == 1:
+                        self._fail_current_goal(
+                            self._format_endpoint_block_message(
+                                endpoint_scope="Global request goal",
+                                frame_label="tool0",
+                                position=goal_pos,
+                                paired_frame_label="wrist_3",
+                                paired_position=goal_pos_wrist3,
+                                grid_idx=goal_tool0_idx,
+                                occupancy_grid=occupancy_grid,
+                                octomap_occupancy_grid=octomap_occupancy_grid,
+                                occupancy_grid_dilated_base=occupancy_grid_dilated_base,
+                                occupancy_grid_dilated=occupancy_grid_dilated,
+                                collision_waypoints_to_avoid=collision_waypoints_to_avoid,
+                                replanning_attempt=replanning_attempt,
+                                current_planning_start_grid=current_planning_start_grid,
+                                current_planning_goal_grid=current_planning_goal_grid,
+                            )
+                        )
+                        return
+            else:
+                self._log_hot_loop_info(
+                    "Skipping global request endpoint obstacle checks during replanning because the current planning grid includes waypoint-exclusion overlays."
+                )
 
             # Run A* with DUAL-FRAME collision checking (both wrist_3 AND tool0)
             # Plan between current planning boundaries (may be full path or just a gap)
@@ -2848,7 +3207,12 @@ class PlannerNode(Node):
                             continue
 
                         if occupancy_grid_dilated[ti, tj, tk] == 1:
-                            obstacle_name = self._identify_obstacle(tool0_pos, occupancy_grid, tool0_grid_idx)
+                            obstacle_name = self._identify_obstacle(
+                                tool0_pos,
+                                occupancy_grid,
+                                octomap_occupancy_grid,
+                                tool0_grid_idx,
+                            )
 
                             if idx < len(pruned_path_grid_indices):
                                 grid_idx_for_waypoint = pruned_path_grid_indices[idx]
@@ -2952,6 +3316,12 @@ class PlannerNode(Node):
             
             all_joint_values_print.append(q_current)
 
+            waypoint_validation_scope = (
+                'full-path candidate'
+                if validated_start_segment is None and validated_goal_segment is None
+                else 'replanning-gap candidate'
+            )
+
             selected_waypoint_candidates = []
             provisional_q_current = q_current.copy()
             committed_q_current = q_current.copy()
@@ -2978,7 +3348,7 @@ class PlannerNode(Node):
 
                 if not ranked_candidates:
                     self.get_logger().error(
-                        f"Waypoint {i} at {path_world[i]} has no valid IK solution. "
+                        f"{waypoint_validation_scope.capitalize()} waypoint {i} at {path_world[i]} has no valid IK solution. "
                         f"Grid index: {grid_idx if grid_idx is not None else 'unknown'}"
                     )
                     waypoints_requiring_replan.append(
@@ -3036,7 +3406,7 @@ class PlannerNode(Node):
 
                         if not ranked_candidates:
                             self.get_logger().error(
-                                f"Waypoint {waypoint_idx} at {path_world[waypoint_idx]} has no valid IK solution. "
+                                f"{waypoint_validation_scope.capitalize()} waypoint {waypoint_idx} at {path_world[waypoint_idx]} has no valid IK solution. "
                                 f"Grid index: {grid_idx if grid_idx is not None else 'unknown'}"
                             )
                             waypoints_requiring_replan.append(
@@ -3062,7 +3432,8 @@ class PlannerNode(Node):
 
                     if collision_status == CollisionCheckStatus.CHECK_FAILED:
                         self._fail_current_goal(
-                            f"Waypoint {waypoint_idx} could not be collision-validated. Aborting instead of replanning on uncertain data."
+                            f"{waypoint_validation_scope.capitalize()} waypoint {waypoint_idx} could not be collision-validated. "
+                            f"Aborting instead of replanning on uncertain data."
                         )
                         return
 
@@ -3076,7 +3447,8 @@ class PlannerNode(Node):
                             )
                             if fallback_outcome == IKSelectionOutcome.CHECK_FAILED:
                                 self._fail_current_goal(
-                                    f"Waypoint {waypoint_idx} fallback IK solution could not be collision-validated. Aborting instead of replanning on uncertain data."
+                                    f"{waypoint_validation_scope.capitalize()} waypoint {waypoint_idx} fallback IK solution could not be collision-validated. "
+                                    f"Aborting instead of replanning on uncertain data."
                                 )
                                 return
                             if fallback_solution is not None:
@@ -3090,10 +3462,11 @@ class PlannerNode(Node):
                                     rerank_remaining_waypoints = True
                                 continue
 
-                        self.get_logger().error(
-                            f"Waypoint {waypoint_idx} at {path_world[waypoint_idx]} has closest IK solution {closest_idx} in collision. "
-                            f"Grid index: {grid_idx if grid_idx is not None else 'unknown'}"
-                        )
+                        if self.log_detailed_planning_diagnostics:
+                            self.get_logger().error(
+                                f"{waypoint_validation_scope.capitalize()} waypoint {waypoint_idx} at {path_world[waypoint_idx]} has closest IK solution {closest_idx} in collision. "
+                                f"Grid index: {grid_idx if grid_idx is not None else 'unknown'}"
+                            )
                         waypoints_requiring_replan.append(
                             (
                                 waypoint_idx,
@@ -3445,10 +3818,11 @@ class PlannerNode(Node):
             
             # Check if we need to continue replanning
             if waypoints_requiring_replan:
-                self.get_logger().warn(
-                    f"⚠️  Detected {len(waypoints_requiring_replan)} waypoint(s) in collision. "
-                    f"Tracking {len(collision_waypoints_to_avoid)} blocked waypoint cell(s) for the next iteration."
-                )
+                if self.log_detailed_planning_diagnostics:
+                    self.get_logger().warn(
+                        f"⚠️  Detected {len(waypoints_requiring_replan)} waypoint(s) in collision. "
+                        f"Tracking {len(collision_waypoints_to_avoid)} blocked waypoint cell(s) for the next iteration."
+                    )
                 
                 replanning_attempt += 1
                 if replanning_attempt >= MAX_REPLANNING_ATTEMPTS:

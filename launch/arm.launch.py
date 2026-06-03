@@ -119,6 +119,7 @@ def generate_launch_description():
     ur_sim_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_sim_control.launch.py'])
     ur_control_launch = PathJoinSubstitution([ur_pkg, 'launch', 'ur_control.launch.py'])
     abstract_ur_launch = PathJoinSubstitution([ur_pkg, 'launch', 'abstract_ur.launch.py'])
+    legacy_octomap_launch = PathJoinSubstitution([ur_pkg, 'launch', 'legacy_octomap.launch.py'])
     publisher_launch = PathJoinSubstitution(
         [ur_pkg, 'launch', 'test_scaled_joint_trajectory_planned.launch.py']
     )
@@ -267,7 +268,53 @@ def generate_launch_description():
     enable_octomap_arg = DeclareLaunchArgument(
         'enable_octomap',
         default_value='true',
-        description='Enable LiDAR pointcloud OctoMap integration in MoveIt (mode:=full only)',
+        description='Enable LiDAR pointcloud OctoMap integration for the selected planner backend.',
+    )
+    octomap_point_cloud_topic_arg = DeclareLaunchArgument(
+        'octomap_point_cloud_topic',
+        default_value='/combined_cloud_filtered',
+        description='Robot-free fused PointCloud2 topic used to build the octomap.',
+    )
+    octomap_frame_arg = DeclareLaunchArgument(
+        'octomap_frame',
+        default_value='odom',
+        description='Fixed frame used by the octomap server.',
+    )
+    octomap_resolution_arg = DeclareLaunchArgument(
+        'octomap_resolution',
+        default_value='0.05',
+        description='Octomap voxel resolution in meters.',
+    )
+    octomap_max_range_arg = DeclareLaunchArgument(
+        'octomap_max_range',
+        default_value='3.0',
+        description='Maximum range integrated from the fused point cloud.',
+    )
+    octomap_point_cloud_min_z_arg = DeclareLaunchArgument(
+        'octomap_point_cloud_min_z',
+        default_value='-0.02',
+        description='Discard fused cloud points below this height before octomap integration.',
+    )
+    octomap_point_cloud_max_z_arg = DeclareLaunchArgument(
+        'octomap_point_cloud_max_z',
+        default_value='2.5',
+        description='Discard fused cloud points above this height before octomap integration.',
+    )
+    octomap_occupancy_min_z_arg = DeclareLaunchArgument(
+        'octomap_occupancy_min_z',
+        default_value='0.0',
+        description='Do not create occupied voxels below this height.',
+    )
+    octomap_occupancy_max_z_arg = DeclareLaunchArgument(
+        'octomap_occupancy_max_z',
+        default_value='2.5',
+        description='Do not create occupied voxels above this height.',
+    )
+    octomap_filter_speckles_arg = DeclareLaunchArgument(
+        'octomap_filter_speckles',
+        default_value='true',
+        description='Drop isolated occupied voxels created by point-cloud noise.',
+        choices=['true', 'false'],
     )
     robot_ip = LaunchConfiguration('robot_ip')
     use_fake_hardware = LaunchConfiguration('use_fake_hardware')
@@ -410,6 +457,37 @@ def generate_launch_description():
     )
     
     enable_octomap = LaunchConfiguration('enable_octomap')
+    octomap_point_cloud_topic = LaunchConfiguration('octomap_point_cloud_topic')
+    octomap_frame = LaunchConfiguration('octomap_frame')
+    octomap_resolution = LaunchConfiguration('octomap_resolution')
+    octomap_max_range = LaunchConfiguration('octomap_max_range')
+    octomap_point_cloud_min_z = LaunchConfiguration('octomap_point_cloud_min_z')
+    octomap_point_cloud_max_z = LaunchConfiguration('octomap_point_cloud_max_z')
+    octomap_occupancy_min_z = LaunchConfiguration('octomap_occupancy_min_z')
+    octomap_occupancy_max_z = LaunchConfiguration('octomap_occupancy_max_z')
+    octomap_filter_speckles = LaunchConfiguration('octomap_filter_speckles')
+
+    legacy_octomap_include = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(legacy_octomap_launch),
+        launch_arguments={
+            'mode': mode,
+            'point_cloud_topic': octomap_point_cloud_topic,
+            'frame_id': octomap_frame,
+            'resolution': octomap_resolution,
+            'max_range': octomap_max_range,
+            'point_cloud_min_z': octomap_point_cloud_min_z,
+            'point_cloud_max_z': octomap_point_cloud_max_z,
+            'occupancy_min_z': octomap_occupancy_min_z,
+            'occupancy_max_z': octomap_occupancy_max_z,
+            'filter_speckles': octomap_filter_speckles,
+        }.items(),
+        condition=IfCondition(
+            AndSubstitution(
+                PythonExpression(["'", planner_backend, "' == 'legacy'"]),
+                enable_octomap,
+            )
+        ),
+    )
 
     moveit_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(moveit_launch),
@@ -459,9 +537,19 @@ def generate_launch_description():
             astar_collision_mode_arg,
             enable_wall_scene_sync_arg,
             enable_octomap_arg,
+            octomap_point_cloud_topic_arg,
+            octomap_frame_arg,
+            octomap_resolution_arg,
+            octomap_max_range_arg,
+            octomap_point_cloud_min_z_arg,
+            octomap_point_cloud_max_z_arg,
+            octomap_occupancy_min_z_arg,
+            octomap_occupancy_max_z_arg,
+            octomap_filter_speckles_arg,
             OpaqueFunction(function=_resolve_controller_names),
             arm_group,
             collision_world_include,
+            legacy_octomap_include,
             moveit_include,
             moveit_planner_node_opaque,
         ]

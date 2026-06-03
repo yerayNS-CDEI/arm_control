@@ -58,6 +58,7 @@
   <!-- Collision package dependencies -->
   <depend>octomap_filter_interfaces</depend>
   <depend>robot_collision_checking</depend>
+  <exec_depend>octomap_server</exec_depend>
 
   <depend>ur_description</depend>
   <depend>ros_gz_bridge</depend>
