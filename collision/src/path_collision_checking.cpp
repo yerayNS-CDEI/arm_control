@@ -1430,12 +1430,21 @@ bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::Joint
     for (int i = 0; i < num_shapes; i++)
     {
         std::vector<int> collision_object_ids;
+        const std::string& link_name = collision_link_names_[i];
 
         // In arm mode the base mount links (e.g. arm_base_link_inertia) physically sit inside
         // the mobile base box that was added as an environment object.  Their geometry always
         // touches/overlaps the top face of that box by construction, so checking them produces
         // permanent false positives.  Skip them – they cannot move away from the base.
-        if (mode_ == "arm" && endsWith(collision_link_names_[i], "base_link_inertia"))
+        if (mode_ == "arm" && endsWith(link_name, "base_link_inertia"))
+        {
+            continue;
+        }
+
+        // The simplified mobile-base anchor box is meant to protect the arm from hitting the
+        // robot base via self-collision checks, not to block motions against the octomap.
+        // Keep it in the self-collision model but exclude it from environment collision checks.
+        if (shouldUseSimplifiedMobileBaseGeometry(link_name))
         {
             continue;
         }
@@ -1452,7 +1461,7 @@ bool PathCollisionChecking::evaluateCollisionState(const sensor_msgs::msg::Joint
             if (log_detailed_collision_events_)
             {
                 RCLCPP_WARN(this->get_logger(), "Environment collision detected for link %s with object IDs: %zu objects",
-                           collision_link_names_[i].c_str(), collision_object_ids.size());
+                           link_name.c_str(), collision_object_ids.size());
             }
             break;
         }
