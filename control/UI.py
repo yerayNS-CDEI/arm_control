@@ -13,7 +13,7 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from PyQt5.QtWidgets import *
-from PyQt5.QtCore import QTimer, QProcess, Qt
+from PyQt5.QtCore import QEvent, QTimer, QProcess, Qt
 from PyQt5.QtGui import QFontMetrics, QIcon, QPixmap, QPalette, QColor, QIntValidator
 from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
@@ -2878,6 +2878,25 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         gpr_tab_layout.addLayout(gpr_status_header)
         gpr_tab_layout.addWidget(self.gpr_status_text, 1)
+
+        sensors_input_row = QHBoxLayout()
+        sensors_input_row.addWidget(QLabel("Send input:"))
+        self.sensors_stdin_input = QLineEdit()
+        self.sensors_stdin_input.setPlaceholderText(
+            "Type input for a running hyperspectral process and press Enter (leave blank to send Enter)..."
+        )
+        self.sensors_stdin_input.setEnabled(False)
+        self.sensors_stdin_input.returnPressed.connect(self._send_sensors_input)
+        self.sensors_stdin_input.installEventFilter(self)
+        sensors_input_row.addWidget(self.sensors_stdin_input)
+
+        self.btn_sensors_send_input = QPushButton("Send")
+        self.btn_sensors_send_input.setMaximumWidth(70)
+        self.btn_sensors_send_input.setEnabled(False)
+        self.btn_sensors_send_input.clicked.connect(self._send_sensors_input)
+        sensors_input_row.addWidget(self.btn_sensors_send_input)
+        gpr_tab_layout.addLayout(sensors_input_row)
+
         return gpr_tab
 
     def _create_gpr_group_box(self, group_key, title):
@@ -2918,9 +2937,12 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
             if process_key in self.process_map:
                 del self.process_map[process_key]
+            self._remove_sensors_process_key(process_key)
+            process.deleteLater()
 
             button.setStyleSheet("")
             self._log_append(self.gpr_status_text, f"⏹ Stopped {name}")
+            self._sensors_set_input_enabled(self._get_active_sensors_input_process() is not None)
             return
 
         process = QProcess(self)
@@ -2935,7 +2957,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         process.start(program, args)
         self.process_map[process_key] = process
+        self._remember_sensors_process_key(process_key)
         button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self._sensors_set_input_enabled(True)
 
     def _handle_sensors_output(self, process):
         """Append Sensors-tab process output to the shared status pane."""
@@ -2949,9 +2973,74 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
     def _on_sensors_process_finished(self, process_key, button, name):
         """Reset Sensors-tab process button state when a process exits."""
         if process_key in self.process_map:
-            del self.process_map[process_key]
+            process = self.process_map.pop(process_key)
+            self._remove_sensors_process_key(process_key)
             button.setStyleSheet("")
             self._log_append(self.gpr_status_text, f"⚠ {name} exited")
+            process.deleteLater()
+            self._sensors_set_input_enabled(self._get_active_sensors_input_process() is not None)
+
+    def _remember_sensors_process_key(self, process_key):
+        """Track Sensors-tab process start order for stdin routing."""
+        if not hasattr(self, '_sensors_process_order'):
+            self._sensors_process_order = []
+        self._remove_sensors_process_key(process_key)
+        self._sensors_process_order.append(process_key)
+
+    def _remove_sensors_process_key(self, process_key):
+        """Drop a Sensors-tab process key from the stdin routing order."""
+        if not hasattr(self, '_sensors_process_order'):
+            return
+        self._sensors_process_order = [key for key in self._sensors_process_order if key != process_key]
+
+    def _get_active_sensors_input_process(self):
+        """Return the most recent running Sensors-tab process that can receive stdin."""
+        candidate_keys = getattr(self, '_sensors_process_order', [])
+        for process_key in reversed(candidate_keys):
+            process = self.process_map.get(process_key)
+            if process is not None and process.state() == QProcess.Running:
+                return process
+        return None
+
+    def _sensors_set_input_enabled(self, enabled: bool):
+        """Enable or disable the Sensors-tab stdin controls."""
+        if hasattr(self, 'sensors_stdin_input'):
+            self.sensors_stdin_input.setEnabled(enabled)
+            if not enabled:
+                self.sensors_stdin_input.clear()
+        if hasattr(self, 'btn_sensors_send_input'):
+            self.btn_sensors_send_input.setEnabled(enabled)
+
+    def _send_sensors_input(self):
+        """Send user input to the active Sensors-tab process, allowing blank Enter sends."""
+        target = self._get_active_sensors_input_process()
+        if target is None:
+            self._log_append(
+                self.gpr_status_text,
+                "<span style='color: #f47067;'>⚠ No running hyperspectral process to send input to</span>",
+            )
+            self._sensors_set_input_enabled(False)
+            return
+
+        text = self.sensors_stdin_input.text()
+        target.write((text + '\n').encode())
+        display_text = text if text else '<ENTER>'
+        self._log_append(
+            self.gpr_status_text,
+            f"<span style='color: #76e3ea;'>▷ {html.escape(display_text)}</span>",
+        )
+        self.sensors_stdin_input.clear()
+
+    def eventFilter(self, obj, event):
+        """Handle Enter/Return explicitly for the Sensors stdin field."""
+        if (
+            obj is getattr(self, 'sensors_stdin_input', None)
+            and event.type() == QEvent.KeyPress
+            and event.key() in (Qt.Key_Return, Qt.Key_Enter)
+        ):
+            self._send_sensors_input()
+            return True
+        return super().eventFilter(obj, event)
 
     def _get_focus_speed_value(self):
         """Return the currently selected focus speed for the inspection manager focus test."""
