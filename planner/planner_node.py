@@ -1170,6 +1170,32 @@ class PlannerNode(Node):
             return pw, start_trim, end_trim
         return pw
 
+    def _prune_joint_cartesian_waypoints(self, cartesian_waypoints, joint_values, current_pos, goal_pos, tol_m=0.02, log=True):
+        """
+        Prune intermediate cartesian waypoints once the full path has been assembled,
+        keeping the joint-space waypoint list aligned with the surviving cartesian waypoints.
+        """
+        if not cartesian_waypoints:
+            return [], [], 0, 0
+
+        path_world = [tuple(waypoint[0]) for waypoint in cartesian_waypoints]
+        pruned_path_world, start_trim, end_trim = self._prune_path_endpoints(
+            path_world,
+            current_pos,
+            goal_pos,
+            tol_m=tol_m,
+            log=log,
+            return_trim=True,
+        )
+
+        if not pruned_path_world:
+            return [], [], start_trim, end_trim
+
+        end_index = len(cartesian_waypoints) - end_trim if end_trim > 0 else len(cartesian_waypoints)
+        pruned_cartesian_waypoints = list(cartesian_waypoints[start_trim:end_index])
+        pruned_joint_values = list(joint_values[start_trim:end_index])
+        return pruned_cartesian_waypoints, pruned_joint_values, start_trim, end_trim
+
     @staticmethod
     def _neighbor_offsets_for_layers(num_layers):
         if num_layers <= 0:
@@ -3121,18 +3147,8 @@ class PlannerNode(Node):
                     sphere_diam=0.03             # bigger
                 )
 
-            # Prune path endpoints
-            path_world, path_trim_start, path_trim_end = self._prune_path_endpoints(
-                path_world_raw,
-                start_pos_wrist3,
-                goal_pos_wrist3,
-                tol_m=0.02,
-                log=self.hot_loop_info_logging,
-                return_trim=True,
-            )
+            path_world = list(path_world_raw)
             path_len = len(path_world)
-            if path_len == 0:
-                self.get_logger().warn("Path pruned to empty. Falling back to direct goal IK.")
 
             # Interpolate orientations along the (possibly pruned) path (wrist_3 orientations)
             # CRITICAL: Use DISTANCE-BASED interpolation to match A* orientation computation
@@ -3155,19 +3171,17 @@ class PlannerNode(Node):
                 orientation = slerp([progress])[0].as_matrix()
                 unpruned_orientations.append(orientation)
 
-            # Match pruned waypoints to their unpruned counterparts to get consistent orientations
             if path_len == 0:
                 # No waypoint orientations needed; we will only use the goal orientation
                 interp_rot_matrices = np.array([R.from_matrix(current_planning_goal_orientation).as_matrix()])
                 pruned_path_grid_indices = []
             else:
-                pruned_end_index = len(path_grid_indices) - path_trim_end if path_trim_end > 0 else len(path_grid_indices)
-                pruned_path_grid_indices = list(path_grid_indices[path_trim_start:pruned_end_index])
-                interp_rot_matrices = np.array(unpruned_orientations[path_trim_start:pruned_end_index])
+                pruned_path_grid_indices = list(path_grid_indices)
+                interp_rot_matrices = np.array(unpruned_orientations)
 
                 self._log_hot_loop_info(lambda: (
-                    f"Orientation interpolation: using {len(interp_rot_matrices)} orientations "
-                    f"from unpruned path (A*-consistent) for {path_len} pruned waypoints"
+                    f"Orientation interpolation: using {len(interp_rot_matrices)} A*-consistent orientations "
+                    f"for {path_len} raw path waypoints"
                 ))
 
             validate_tool0_path_post_astar = self.validate_post_astar_tool0_path
@@ -3850,9 +3864,10 @@ class PlannerNode(Node):
                 # Build full joint trajectory from preserved segments
                 all_joint_values = validated_start_segment['joint_solutions'] + validated_goal_segment['joint_solutions']
                 all_joint_values_print = validated_start_segment['joint_solutions'] + validated_goal_segment['joint_solutions']
-                
-                # Build complete waypoint list for visualization
-                all_waypoints = [wp[0] for wp in validated_start_segment['waypoints']] + [wp[0] for wp in validated_goal_segment['waypoints']]
+                all_cartesian_waypoints = [
+                    (wp[0], wp[1])
+                    for wp in validated_start_segment['waypoints'] + validated_goal_segment['waypoints']
+                ]
                 
                 self._log_hot_loop_info(lambda: (
                     f"Final path statistics:\n"
@@ -3863,7 +3878,28 @@ class PlannerNode(Node):
             else:
                 # First iteration with no collisions - use all validated waypoints
                 all_joint_values_print = all_joint_values
+                all_cartesian_waypoints = list(zip(path_world, interp_rot_matrices))
                 self._log_hot_loop_info(lambda: f"🎉 Path validated with {len(all_joint_values)} collision-free waypoints!")
+
+            all_cartesian_waypoints, all_joint_values, final_path_trim_start, final_path_trim_end = self._prune_joint_cartesian_waypoints(
+                all_cartesian_waypoints,
+                all_joint_values,
+                start_pos_wrist3,
+                goal_pos_wrist3,
+                tol_m=0.02,
+                log=self.hot_loop_info_logging,
+            )
+            all_joint_values_print = list(all_joint_values)
+            if final_path_trim_start > 0 or final_path_trim_end > 0:
+                self._log_hot_loop_info(lambda: (
+                    f"Final path pruning removed {final_path_trim_start} start and {final_path_trim_end} end waypoint(s); "
+                    f"{len(all_joint_values)} intermediate waypoint(s) remain before precise goal IK"
+                ))
+
+            if all_joint_values:
+                q_current = np.array(all_joint_values[-1], dtype=float)
+            else:
+                q_current = q_current_initial.copy()
             
             # Break out of replanning loop - we have a valid path!
             pos = goal_pos_wrist3
@@ -3910,6 +3946,7 @@ class PlannerNode(Node):
 
             all_joint_values_print.append(precise_goal_joint_values)
             all_joint_values.append(precise_goal_joint_values)
+            all_cartesian_waypoints.append((goal_pos_wrist3, goal_orientation_wrist3.as_matrix()))
             
             # Path planning successful - break out of replanning loop
             if replanning_attempt > 0:
@@ -3989,6 +4026,25 @@ class PlannerNode(Node):
             point.time_from_start.nanosec = int((time_from_start % 1.0) * 1e9)
             traj_msg.points.append(point)
             time_from_start += 3.0  # 3 seconds per waypoint for slow, smooth motion
+
+        if self.log_detailed_planning_diagnostics and traj_msg.points:
+            waypoint_lines = []
+            for idx, (point, cartesian_waypoint) in enumerate(zip(traj_msg.points, all_cartesian_waypoints)):
+                point_time = point.time_from_start.sec + point.time_from_start.nanosec / 1e9
+                wrist3_position, wrist3_orientation = cartesian_waypoint
+                wrist3_orientation_quat = R.from_matrix(wrist3_orientation).as_quat()
+                formatted_joint_positions = [f'{position:.4f}' for position in point.positions]
+                waypoint_lines.append(
+                    f"  waypoint {idx:02d} @ {point_time:.2f}s: "
+                    f"wrist3_pos={[f'{value:.4f}' for value in wrist3_position]}, "
+                    f"wrist3_quat_xyzw={[f'{value:.4f}' for value in wrist3_orientation_quat]}, "
+                    f"joints={formatted_joint_positions}"
+                )
+            self.get_logger().warn(
+                "Planned trajectory waypoints:\n"
+                f"  joint_names: {traj_msg.joint_names}\n"
+                + "\n".join(waypoint_lines)
+            )
 
         self.trajectory_pub.publish(traj_msg)
         self.publish_planner_goal_failed(False)
