@@ -112,7 +112,18 @@ class RobotControlUI(QMainWindow):
             lambda msg: self._on_joint_states(msg, '/arm/joint_states'),
             10,
         )
- 
+
+        # Latched parking-active flag from the base controller. Used to wait for the
+        # chassis-parking maneuver to finish before shutting down the base robot.
+        self._parking_active = False
+        parking_active_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.parking_active_subscriber = self.node.create_subscription(
+            Bool,
+            '/sim_controller/parking_active',
+            self._on_parking_active,
+            parking_active_qos,
+        )
+
         # Track processes and their associated buttons
         self.process_map = {}
         self.button_map = {}
@@ -1581,6 +1592,10 @@ class RobotControlUI(QMainWindow):
                 rclpy.spin_once(self.node, timeout_sec=0)
         except Exception:
             pass  # Ignore errors if context is shutting down
+
+    def _on_parking_active(self, msg):
+        """Cache the controller's parking-active flag (true while parking is running)."""
+        self._parking_active = bool(msg.data)
 
     def _on_joint_states(self, msg, source_topic=None):
         """Update live joint sliders in Arm and Full Control tabs from joint states topics."""
@@ -3647,6 +3662,82 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             button.setText(f"Stop {name}")
             button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
  
+    def _park_chassis_before_stop(self, process_key, status_text):
+        """Call the chassis-parking service and wait for alignment before stopping the
+        base-robot bringup, so the launch shuts down with the chassis aligned to the
+        turret. This is the safe, deterministic alternative to parking on Ctrl+C: the
+        maneuver runs while the control loop is alive and nothing is tearing it down.
+
+        Best-effort: if the service is unavailable (e.g. diff controller, or the
+        controller is not up) it skips quickly and lets normal shutdown proceed.
+        """
+        # Bringups that run the base controller and should park the chassis before
+        # shutdown. Base Control tab: Launch Base Robot, Start Mapping, Start
+        # Localization. Full Control tab: Launch Full Robot, Start Mapping, Start
+        # Localization. (The full-robot base controller is also /sim_controller; if it
+        # were ever named differently, the service-list check below skips gracefully.)
+        if process_key not in (
+            'mobile_platform', 'mapping', 'localization',
+            'full_mobile_manipulator', 'full_mapping', 'full_localization',
+        ):
+            return
+
+        service = '/sim_controller/park_now'
+
+        # Fast availability check so diff-mode / no-controller stops don't block on a
+        # service call that would otherwise wait for a service that never appears.
+        try:
+            listed = subprocess.run(
+                ['ros2', 'service', 'list'],
+                capture_output=True, text=True, timeout=5)
+            if service not in (listed.stdout or ''):
+                return  # not present (e.g. diff controller) -> skip silently
+        except Exception:
+            return
+
+        self._log_append(status_text, "🅿 Parking chassis before shutdown...")
+
+        try:
+            result = subprocess.run(
+                ['ros2', 'service', 'call', service, 'std_srvs/srv/Trigger'],
+                capture_output=True, text=True, timeout=8)
+        except Exception as e:
+            self._log_append(status_text, f"⚠ Park service call failed ({e}); proceeding to shutdown.")
+            return
+        if result.returncode != 0 or 'success=True' not in (result.stdout or ''):
+            self._log_append(status_text, "⚠ Park service call did not succeed; proceeding to shutdown.")
+            return
+
+        # Wait on the controller's /sim_controller/parking_active flag: it is true while
+        # the maneuver runs and false when the chassis is aligned. We keep waiting for as
+        # long as the flag stays active (so large-angle parks, which can take ~30 s near a
+        # half turn, are never cut short), and finish the instant it goes back to false.
+        # If it never goes active within a short grace (robot already aligned, nothing to
+        # do), we proceed. A generous absolute ceiling guards against a hung controller so
+        # the UI can never block indefinitely.
+        absolute_deadline = time.time() + 120.0
+        first_active_grace = time.time() + 3.0
+        saw_active = False
+        while time.time() < absolute_deadline:
+            try:
+                if rclpy.ok():
+                    rclpy.spin_once(self.node, timeout_sec=0)
+            except Exception:
+                pass
+            QApplication.processEvents()
+            if self._parking_active:
+                saw_active = True
+            elif saw_active:
+                # active -> inactive transition: parking finished.
+                self._log_append(status_text, "✓ Chassis aligned; proceeding to shutdown.")
+                return
+            elif time.time() > first_active_grace:
+                # never went active: already aligned / nothing to park.
+                self._log_append(status_text, "✓ Chassis already aligned; proceeding to shutdown.")
+                return
+            time.sleep(0.05)
+        self._log_append(status_text, "⚠ Parking did not confirm in time; proceeding to shutdown.")
+
     def _toggle_base_process(self, process_key, button, name, program, args):
         # Decide status widget
         status_text = self.full_control_status_text if process_key.startswith('full') else self.base_status_text
@@ -3654,6 +3745,10 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         if process_key in self.process_map:
             # ===== STOP PROCESS =====
             process = self.process_map[process_key]
+
+            # Align the chassis with the turret before shutting down the base robot, so
+            # the launch stops with the robot parked. Best-effort and bounded.
+            self._park_chassis_before_stop(process_key, status_text)
 
             # Disconnect finished to avoid double cleanup
             try:
