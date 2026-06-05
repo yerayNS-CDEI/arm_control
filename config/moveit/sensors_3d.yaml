@@ -4,7 +4,7 @@ sensors:
 
 dome_lidar:
   sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
-  point_cloud_topic: /front/points
+  point_cloud_topic: /dome/points
   max_range: 3.0
   point_subsample: 1
   padding_offset: 0.2
