@@ -34,13 +34,13 @@ class SimulatedSensorNode(Node):
         
         # Subscribe to simulated ultrasonic sensors (A, B, C)
         self.create_subscription(
-            LaserScan, '/distance_sensors/A', 
+            LaserScan, '/distance_sensors/sensor_A', 
             lambda msg: self.sensor_callback(msg, 1), sensor_qos)
         self.create_subscription(
-            LaserScan, '/distance_sensors/B', 
+            LaserScan, '/distance_sensors/sensor_B', 
             lambda msg: self.sensor_callback(msg, 2), sensor_qos)
         self.create_subscription(
-            LaserScan, '/distance_sensors/C', 
+            LaserScan, '/distance_sensors/sensor_C', 
             lambda msg: self.sensor_callback(msg, 0), sensor_qos)
         
           # Publishers (matching Arduino node)
