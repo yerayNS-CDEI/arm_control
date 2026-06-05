@@ -29,7 +29,7 @@ class SensorsOrientation(Node):
 
         # Node Variables
         self.end_effector_pose = None
-        self.ideal_distance = 20.0  # cm
+        self.ideal_distance = 50.0  # cm
         # 3 sensors: A left, B right, C top 
         # Positions on the plate 
         # Define the positions of the sensors
