@@ -369,7 +369,16 @@ class RobotControlUI(QMainWindow):
             "Click again to stop freedrive and restore joint_trajectory_controller."
         )
         init_layout.addWidget(self.btn_arm_freedrive)
- 
+
+        init_layout.addWidget(QLabel("Robot Screen:"))
+        self.btn_arm_vnc = QPushButton("Start Robot Screen")
+        self.btn_arm_vnc.clicked.connect(lambda: self.toggle_vnc_viewer(context='arm'))
+        self.btn_arm_vnc.setToolTip(
+            "vncviewer 192.168.1.102\n"
+            "Shows the teach pendant screen. Only available when simulation=false."
+        )
+        init_layout.addWidget(self.btn_arm_vnc)
+
         init_layout.addStretch()
         boxes_layout.addWidget(init_box)
  
@@ -876,6 +885,15 @@ class RobotControlUI(QMainWindow):
         )
         full_control_init_layout.addWidget(self.btn_full_control_freedrive)
 
+        full_control_init_layout.addWidget(QLabel("Robot Screen:"))
+        self.btn_full_control_vnc = QPushButton("Start Robot Screen")
+        self.btn_full_control_vnc.clicked.connect(lambda: self.toggle_vnc_viewer(context='full'))
+        self.btn_full_control_vnc.setToolTip(
+            "vncviewer 192.168.1.102\n"
+            "Shows the teach pendant screen. Only available when simulation=false."
+        )
+        full_control_init_layout.addWidget(self.btn_full_control_vnc)
+
         full_control_init_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_init_box)
         self.full_control_init_box = full_control_init_box
@@ -1263,6 +1281,10 @@ class RobotControlUI(QMainWindow):
     def _update_full_control_sim_mode(self):
         """Refresh Full Control state when its simulation mode changes."""
         self._update_full_control_planner_constraints()
+        if hasattr(self, "btn_full_control_vnc"):
+            self.btn_full_control_vnc.setEnabled(
+                self.full_control_sim_mode_combo.currentText() == 'false'
+            )
 
     def _on_full_control_hybrid_changed(self):
         """Refresh dependent UI elements when Full Control hybrid_sim changes."""
@@ -1571,6 +1593,8 @@ class RobotControlUI(QMainWindow):
         hybrid_mode = self.arm_hybrid_sim_combo.currentText() if hasattr(self, "arm_hybrid_sim_combo") else 'false'
         should_disable = (sim_mode == 'true' and hybrid_mode == 'false')
         self.init_box.setEnabled(not should_disable)
+        if hasattr(self, "btn_arm_vnc"):
+            self.btn_arm_vnc.setEnabled(sim_mode == 'false')
 
     def _update_tab_states_for_arm(self):
         """Update tab states based on arm control processes"""
@@ -3080,6 +3104,31 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             self._toggle_process('arduino_sensors', self.btn_arduino_sensors, 'Arduino Sensors',
                             'ros2', ['run', 'arm_control', 'arduino_sensors'])
  
+    def toggle_vnc_viewer(self, context='arm'):
+        """Toggle the VNC viewer showing the robot teach pendant screen."""
+        button = self.btn_arm_vnc if context == 'arm' else self.btn_full_control_vnc
+        self._toggle_process('vnc_viewer', button, 'Robot Screen',
+                            'vncviewer', ['192.168.1.102'])
+        process = self.process_map.get('vnc_viewer')
+        if process is not None:
+            # Keep both tabs' buttons in sync if the viewer window is closed directly
+            process.finished.connect(self._sync_vnc_buttons)
+        self._sync_vnc_buttons()
+
+    def _sync_vnc_buttons(self):
+        """Mirror the shared vnc_viewer process state on both Robot Screen buttons."""
+        running = 'vnc_viewer' in self.process_map
+        for button in (getattr(self, 'btn_arm_vnc', None),
+                       getattr(self, 'btn_full_control_vnc', None)):
+            if button is None:
+                continue
+            if running:
+                button.setText("Stop Robot Screen")
+                button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+            else:
+                button.setText("Start Robot Screen")
+                button.setStyleSheet("")
+
     def toggle_align_ee_to_wall(self):
         self._toggle_process('align_ee_to_wall', self.btn_align_ee_to_wall, 'Align EE to Wall',
                             'ros2', ['run', 'arm_control', 'align_ee_to_wall'])
