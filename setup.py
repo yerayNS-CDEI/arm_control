@@ -55,6 +55,7 @@ setup(
             'arduino_sensors = sensors.arduino_sensors:main',
             'test_hyperspectral_client = sensors.test_hyperspectral_client:main',
             'arduino_sensors_sim = sensors.arduino_sensors_sim:main',
+            'wall_parallel_controller = sensors.wall_parallel_controller:main',
         ],
     },
 )
