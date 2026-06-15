@@ -137,6 +137,7 @@ install(CODE "
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/align_ee_to_wall.py \${LIB_DIR}/align_ee_to_wall)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/arduino_sensors.py \${LIB_DIR}/arduino_sensors)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/arduino_sensors_sim.py \${LIB_DIR}/arduino_sensors_sim)
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/wall_parallel_controller.py \${LIB_DIR}/wall_parallel_controller)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/test_hyperspectral_client.py \${LIB_DIR}/test_hyperspectral_client)
 ")
 

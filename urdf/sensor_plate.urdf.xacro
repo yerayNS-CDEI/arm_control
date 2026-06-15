@@ -68,6 +68,67 @@
     </gazebo>
   </xacro:macro>
 
+  <!-- Macro for single ToF sensor (VL6180x). Modeled as a narrow, low-noise,
+       short-range gpu_lidar ray, since Gz Sim has no native ToF type. -->
+  <xacro:macro name="tof_sensor" params="parent_link tf_prefix sensor_name *origin">
+    <link name="${tf_prefix}${sensor_name}_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="-1.57 1.57 0"/>
+        <geometry>
+          <mesh filename="package://navi_wall/navi_wall_description/meshes/ultrasonic.STL" scale="0.0008 0.0008 0.0008"/>
+        </geometry>
+        <material name="tof_red">
+          <color rgba="0.9 0.1 0.1 0.8"/>
+        </material>
+      </visual>
+
+      <inertial>
+        <mass value="0.003"/>
+        <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+      </inertial>
+    </link>
+
+    <joint name="${tf_prefix}${sensor_name}_joint" type="fixed">
+      <parent link="${parent_link}"/>
+      <child link="${tf_prefix}${sensor_name}_link"/>
+      <xacro:insert_block name="origin"/>
+    </joint>
+
+    <gazebo reference="${tf_prefix}${sensor_name}_link">
+      <sensor name="${sensor_name}_sensor" type="gpu_lidar">
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <visualize>true</visualize>
+        <topic>/distance_sensors/${sensor_name}</topic>
+        <gz_frame_id>${tf_prefix}${sensor_name}_link</gz_frame_id>
+        <lidar>
+          <scan>
+            <horizontal>
+              <samples>1</samples>
+              <min_angle>-0.0175</min_angle>
+              <max_angle>0.0175</max_angle>
+            </horizontal>
+            <vertical>
+              <samples>1</samples>
+              <min_angle>0</min_angle>
+              <max_angle>0</max_angle>
+            </vertical>
+          </scan>
+          <range>
+            <min>0.01</min>
+            <max>0.18</max>
+            <resolution>0.001</resolution>
+          </range>
+          <noise type="gaussian">
+            <mean>0.0</mean>
+            <stddev>0.002</stddev>
+          </noise>
+        </lidar>
+      </sensor>
+      <self_collide>false</self_collide>
+    </gazebo>
+  </xacro:macro>
+
   <xacro:macro name="sensor_plate" params="parent_link tf_prefix:='' ee_cylinder_length:=0.15">
     <link name="${tf_prefix}plate_link">
       <visual>
@@ -110,6 +171,19 @@
     <xacro:ultrasonic_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_C">
       <origin xyz="0 0.15 0.02" rpy="0 -1.5708 0"/>
     </xacro:ultrasonic_sensor>
+
+    <!-- Three ToF sensors (VL6180x): two top corners + one bottom-middle edge -->
+    <xacro:tof_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_D">
+      <origin xyz="0.15 0.15 0.02" rpy="0 -1.5708 0"/>
+    </xacro:tof_sensor>
+
+    <xacro:tof_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_E">
+      <origin xyz="-0.15 0.15 0.02" rpy="0 -1.5708 0"/>
+    </xacro:tof_sensor>
+
+    <xacro:tof_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_F">
+      <origin xyz="0 -0.15 0.02" rpy="0 -1.5708 0"/>
+    </xacro:tof_sensor>
   </xacro:macro>
 
 </robot>

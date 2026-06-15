@@ -34,21 +34,32 @@ class SimulatedSensorNode(Node):
         
         # Subscribe to simulated ultrasonic sensors (A, B, C)
         self.create_subscription(
-            LaserScan, '/distance_sensors/sensor_A', 
+            LaserScan, '/distance_sensors/sensor_A',
             lambda msg: self.sensor_callback(msg, 1), sensor_qos)
         self.create_subscription(
-            LaserScan, '/distance_sensors/sensor_B', 
+            LaserScan, '/distance_sensors/sensor_B',
             lambda msg: self.sensor_callback(msg, 2), sensor_qos)
         self.create_subscription(
-            LaserScan, '/distance_sensors/sensor_C', 
+            LaserScan, '/distance_sensors/sensor_C',
             lambda msg: self.sensor_callback(msg, 0), sensor_qos)
+
+        # Subscribe to simulated ToF sensors (D, E, F -> vl buffer 0, 1, 2)
+        self.create_subscription(
+            LaserScan, '/distance_sensors/sensor_D',
+            lambda msg: self.tof_callback(msg, 0), sensor_qos)
+        self.create_subscription(
+            LaserScan, '/distance_sensors/sensor_E',
+            lambda msg: self.tof_callback(msg, 1), sensor_qos)
+        self.create_subscription(
+            LaserScan, '/distance_sensors/sensor_F',
+            lambda msg: self.tof_callback(msg, 2), sensor_qos)
         
           # Publishers (matching Arduino node)
         self.pub_s1 = self.create_publisher(Range, 'hcsr04/sensor1', 10)
         self.pub_s2 = self.create_publisher(Range, 'hcsr04/sensor2', 10)
         self.pub_s3 = self.create_publisher(Range, 'hcsr04/sensor3', 10)
         
-        # ToF sensor publishers (hardcoded values for now)
+        # ToF sensor publishers (bridged from Gazebo sensors D, E, F)
         self.pub_s4 = self.create_publisher(Range, 'vl6180/sensor1', 10)
         self.pub_s5 = self.create_publisher(Range, 'vl6180/sensor2', 10)
         self.pub_s6 = self.create_publisher(Range, 'vl6180/sensor3', 10)
@@ -69,14 +80,9 @@ class SimulatedSensorNode(Node):
         
         # Keyboard listener thread
         threading.Thread(target=self.listen_for_key, daemon=True).start()
-        
-        # Hardcoded ToF values (not used in scanning)
-        self.tof_hardcoded = [0.10, 0.10, 0.10]  # 10cm default
-        for i in range(3):
-            self.buffer_vl[i].append(self.tof_hardcoded[i] * 1000.0)  # Convert to mm
-        
+
         self.get_logger().info(f"Simulated sensor node initialized (batch_size={self.batch_size}, calc_type={self.calc_type}, autostart={autostart})")
-        self.get_logger().info("ToF sensors hardcoded to 0.10m (not used in scanning)")
+        self.get_logger().info("ToF sensors D/E/F bridged from Gazebo (max range 0.18m)")
         if autostart:
             self.get_logger().info("Autostart enabled: continuous publishing started")
         else:
@@ -117,6 +123,20 @@ class SimulatedSensorNode(Node):
         except Exception as e:
             self.get_logger().error(f'Sensor {sensor_idx} callback error: {e}')
     
+    def tof_callback(self, msg, sensor_idx):
+        """Store incoming LaserScan messages from Gazebo ToF sensors D, E, F.
+        Buffer is kept in mm to match the existing publish path (/1000)."""
+        try:
+            r = msg.ranges[0]
+            if not math.isfinite(r) or r < msg.range_min or r > msg.range_max:
+                # Out of ToF range (>0.18m or invalid) -> store saturated max.
+                # The parallelism controller treats near-max ToF as low-confidence.
+                self.buffer_vl[sensor_idx].append(msg.range_max * 1000.0)
+            else:
+                self.buffer_vl[sensor_idx].append(r * 1000.0)
+        except Exception as e:
+            self.get_logger().error(f'ToF {sensor_idx} callback error: {e}')
+
     def create_range_msg_ultrasonic(self, frame_id, distance_m):
         """Create Range message for ultrasonic sensors"""
         msg = Range()
@@ -148,8 +168,8 @@ class SimulatedSensorNode(Node):
         if not self.publish_now:
             return
         
-        # Check if enough data in buffers
-        if any(len(buf) < 1 for buf in self.buffer_ultra):
+        # Check if enough data in buffers (ultrasonic + ToF)
+        if any(len(buf) < 1 for buf in self.buffer_ultra + self.buffer_vl):
             self.get_logger().warn("Waiting for sensor data...", throttle_duration_sec=2.0)
             return
         
@@ -170,7 +190,7 @@ class SimulatedSensorNode(Node):
             getattr(self, f'pub_s{i+1}').publish(msg)
             sensor_ranges.append(f"HCSR04-{i+1}: {msg.range:.3f}m")
         
-        # Publish ToF sensors (hardcoded)
+        # Publish ToF sensors (D, E, F from Gazebo)
         for i in range(3):
             if self.calc_type == 0:
                 avg_mm = median(self.buffer_vl[i])
@@ -180,7 +200,7 @@ class SimulatedSensorNode(Node):
             avg_m = avg_mm / 1000.0
             msg = self.create_range_msg_tof(f"vl6180_sensor{i+1}", avg_m)
             getattr(self, f'pub_s{i+4}').publish(msg)
-            sensor_ranges.append(f"VL6180-{i+1}: {msg.range:.3f}m (hardcoded)")
+            sensor_ranges.append(f"VL6180-{i+1}: {msg.range:.3f}m")
         
         # Publish combined array (matches Arduino format)
         distances_array = Float32MultiArray()
