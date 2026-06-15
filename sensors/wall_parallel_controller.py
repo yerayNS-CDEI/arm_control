@@ -40,20 +40,28 @@ class WallParallelController(Node):
         self.declare_parameter('compute_distance_correction', False)  # Z left to force_mode
         self.declare_parameter('kp', 0.7)                   # proportional gain on tilt error
         self.declare_parameter('ema_alpha', 0.3)            # normal low-pass (0..1, lower=smoother)
-        self.declare_parameter('deadband_deg', 1.5)         # below this tilt -> no correction
+        self.declare_parameter('deadband_deg', 1.0)         # below this tilt -> no correction
         self.declare_parameter('max_step_deg', 3.0)         # per-cycle slew limit on each angle
         self.declare_parameter('huber_k', 1.5)              # robust threshold (in robust sigmas)
         # Goal horizon. Keep close to the control period so each streamed goal executes
         # almost fully before the next replaces it (long horizons make the arm crawl
         # through only the ease-in of each mini-trajectory).
-        self.declare_parameter('traj_time', 0.12)           # s, JointTrajectory point time
-        # Output mode:
-        #  'position'   -> stream raw joint positions to forward_position_controller
-        #                  (no trajectory ease-in -> immediate, responsive tracking).
-        #  'trajectory' -> JointTrajectory to joint_trajectory_controller (laggier).
-        self.declare_parameter('output_mode', 'position')
+        self.declare_parameter('traj_time', 0.3)            # s, JointTrajectory point time
+        # Output mode (pick to match the active ros2_control controller):
+        #  'position'    -> Float64MultiArray of raw joint positions to the
+        #                   forward_position_controller. Use in Gazebo simulation
+        #                   (no trajectory ease-in -> immediate, responsive tracking).
+        #  'passthrough' -> JointTrajectory to the 'planned_trajectory' topic. The
+        #                   publisher_joint_trajectory_planned bridge node forwards it
+        #                   as a FollowJointTrajectory goal to the
+        #                   passthrough_trajectory_controller (UR onboard executor,
+        #                   respects speed scaling). Use on the REAL robot. Mirrors how
+        #                   align_ee_to_wall.py drives the PTC, so the bridge node must
+        #                   be running (its 'controller_name' set to
+        #                   passthrough_trajectory_controller).
+        self.declare_parameter('output_mode', 'passthrough')
         self.declare_parameter('position_command_topic', '/forward_position_controller/commands')
-        self.declare_parameter('output_topic', '/joint_trajectory_controller/joint_trajectory')
+        self.declare_parameter('trajectory_topic', 'planned_trajectory')
         # The current pose is base_frame->tool0 (the plate TCP) from TF, but the analytic IK
         # solves for its own DH end-frame, which differs from tool0 by a fixed rigid
         # transform (a 0.3 m offset + a 120 deg rotation here). We calibrate that constant
@@ -61,6 +69,16 @@ class WallParallelController(Node):
         # have to guess flange/tool0/DH conventions.
         self.declare_parameter('tool0_frame', 'arm_tool0')
         self.declare_parameter('base_frame', 'arm_base')   # IK base frame (UR DH base)
+        # Physical ToF layout. The distance_sensors array slots [3,4,5] are filled by
+        # different hardware in sim vs on the robot:
+        #   'sim'  -> Gazebo sensors D,E,F (sensor_plate.urdf.xacro): S1@(+.15,+.15),
+        #             S2@(-.15,+.15), S3@(0,-.15). Internally consistent with the sim.
+        #   'real' -> physical vl6180_1/2/3. On the real plate S1 and S2 are mounted
+        #             swapped in X relative to the sim (matches the ToF layout declared
+        #             in align_ee_to_wall.py): S1@(-.15,+.15), S2@(+.15,+.15), S3@(0,-.15).
+        # Using the wrong layout flips the sign of the ToF-derived tilt -> the pitch
+        # correction drives the WRONG way once close enough for the ToF to be valid.
+        self.declare_parameter('tof_layout', 'real')
 
         self.control_rate = self.get_parameter('control_rate').value
         self.ideal_distance = self.get_parameter('ideal_distance').value
@@ -73,22 +91,41 @@ class WallParallelController(Node):
         self.traj_time = self.get_parameter('traj_time').value
         self.output_mode = self.get_parameter('output_mode').value
         self.position_command_topic = self.get_parameter('position_command_topic').value
-        self.output_topic = self.get_parameter('output_topic').value
+        self.trajectory_topic = self.get_parameter('trajectory_topic').value
+        if self.output_mode not in ('position', 'passthrough'):
+            raise ValueError(
+                f"output_mode must be 'position' (sim/FPC) or 'passthrough' (real/PTC), "
+                f"got '{self.output_mode}'")
         self.tool0_frame = self.get_parameter('tool0_frame').value
         self.base_frame = self.get_parameter('base_frame').value
+        self.tof_layout = self.get_parameter('tof_layout').value
+        if self.tof_layout not in ('sim', 'real'):
+            raise ValueError(f"tof_layout must be 'sim' or 'real', got '{self.tof_layout}'")
 
         # --- Sensor geometry (plate frame, metres) and noise model ----------
-        # index -> (x, y) in plate frame
-        self.pos = np.array([
+        # index -> (x, y) in plate frame. Ultrasonic slots [0,1,2] are identical in
+        # sim and on the robot; only the ToF slots [3,4,5] differ (see 'tof_layout').
+        self.sensor_names = ['C/U1', 'A/U2', 'B/U3', 'S1', 'S2', 'S3']
+        ultrasonic = [
             [0.00,  0.15],   # 0: C ultrasonic (top-mid)
             [-0.15, -0.15],  # 1: A ultrasonic (bottom-left)
             [0.15,  -0.15],  # 2: B ultrasonic (bottom-right)
-            [0.15,  0.15],   # 3: D ToF (top-right)
-            [-0.15, 0.15],   # 4: E ToF (top-left)
-            [0.00,  -0.15],  # 5: F ToF (bottom-mid)
-        ])
+        ]
+        if self.tof_layout == 'sim':
+            tof = [
+                [0.15,  0.15],   # 3: D / S1 (top-right)
+                [-0.15, 0.15],   # 4: E / S2 (top-left)
+                [0.00,  -0.15],  # 5: F / S3 (bottom-mid)
+            ]
+        else:  # 'real' -> S1 and S2 swapped in X (physical vl6180 mounting)
+            tof = [
+                [-0.15, 0.15],   # 3: S1 (top-left)
+                [0.15,  0.15],   # 4: S2 (top-right)
+                [0.00,  -0.15],  # 5: S3 (bottom-mid)
+            ]
+        self.pos = np.array(ultrasonic + tof)
         # per-sensor stddev (m): ToF is far more precise than ultrasonic
-        self.sigma = np.array([0.010, 0.010, 0.010, 0.002, 0.002, 0.002])
+        self.sigma = np.array([0.010, 0.010, 0.010, 0.010, 0.010, 0.010])
         # validity window (m): drop saturated / invalid readings
         self.valid_lo = np.array([0.02, 0.02, 0.02, 0.011, 0.011, 0.011])
         self.valid_hi = np.array([3.90, 3.90, 3.90, 0.175, 0.175, 0.175])
@@ -112,16 +149,17 @@ class WallParallelController(Node):
         if self.output_mode == 'position':
             self.cmd_pub = self.create_publisher(Float64MultiArray, self.position_command_topic, 10)
             out = self.position_command_topic
-        else:
-            self.cmd_pub = self.create_publisher(JointTrajectory, self.output_topic, 10)
-            out = self.output_topic
+        else:  # 'passthrough' -> bridge node forwards to passthrough_trajectory_controller
+            self.cmd_pub = self.create_publisher(JointTrajectory, self.trajectory_topic, 10)
+            out = self.trajectory_topic
         self.create_subscription(Float32MultiArray, 'distance_sensors', self.distance_cb, 10)
         self.create_subscription(JointState, 'joint_states', self.joint_cb, 10)
 
         self.timer = self.create_timer(1.0 / self.control_rate, self.control_step)
         self.get_logger().info(
-            f"WallParallelController up: mode={self.output_mode} rate={self.control_rate}Hz "
-            f"kp={self.kp} ema={self.ema_alpha} deadband={np.rad2deg(self.deadband):.2f}deg "
+            f"WallParallelController up: mode={self.output_mode} tof_layout={self.tof_layout} "
+            f"rate={self.control_rate}Hz kp={self.kp} ema={self.ema_alpha} "
+            f"deadband={np.rad2deg(self.deadband):.2f}deg "
             f"max_step={np.rad2deg(self.max_step):.2f}deg -> {out}")
 
     # --- Callbacks ----------------------------------------------------------
@@ -249,6 +287,18 @@ class WallParallelController(Node):
             return
         curr_rot, p_current = cur
 
+        # Per-sensor diagnostic table: name, plate (x,y), distance, valid?
+        # Tilt the plate a known way on the bench and watch which sensor reads
+        # closest -> confirms 'tof_layout' is correct (the near corner's sensor
+        # must be the one whose (x,y) is on that side).
+        d = self.distances
+        valid = np.isfinite(d) & (d > self.valid_lo) & (d < self.valid_hi)
+        table = "  ".join(
+            f"{self.sensor_names[i]}@({self.pos[i,0]:+.2f},{self.pos[i,1]:+.2f})="
+            f"{d[i]*100:5.1f}cm{'' if valid[i] else '(x)'}"
+            for i in range(6))
+        self.get_logger().info(f"[{self.tof_layout}] {table}", throttle_duration_sec=1.0)
+
         nw, mean_d, n_valid = self.fit_wall_normal(self.distances)
         if nw is None:
             self.get_logger().warn(f"Too few valid sensors ({n_valid}/6) for plane fit",
@@ -318,6 +368,9 @@ class WallParallelController(Node):
             # Direct joint-position setpoint -> forward_position_controller (no ease-in)
             self.cmd_pub.publish(Float64MultiArray(data=joint_values.tolist()))
         else:
+            # JointTrajectory -> 'planned_trajectory'; the bridge node re-times it and
+            # sends it to the passthrough_trajectory_controller action. (The bridge
+            # recomputes time_from_start, so traj_time here is only a placeholder.)
             traj = JointTrajectory()
             traj.joint_names = self.expected_joint_names
             pt = JointTrajectoryPoint()

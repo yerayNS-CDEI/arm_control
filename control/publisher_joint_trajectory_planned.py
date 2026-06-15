@@ -130,7 +130,14 @@ class PublisherJointTrajectoryActionClient(Node):
             self.status_pub.publish(status_msg)
             self.prev_status = self.execution_complete
 
-        if self.trajectory_received and self.starting_point_ok:
+        # Only dispatch a goal when the previous one has finished. The
+        # passthrough_trajectory_controller executes a trajectory atomically and
+        # rejects any goal received mid-execution ("A trajectory is already
+        # executing."). Streaming nodes (e.g. wall_parallel_controller) publish a
+        # fresh trajectory many times per second; trajectory_callback keeps only the
+        # latest, so when a slot opens we always send the freshest target instead of
+        # spamming the controller with goals that just get rejected.
+        if self.trajectory_received and self.starting_point_ok and self.execution_complete:
             self.send_trajectory_goal()
             self.trajectory_received = False
             self.execution_complete = False
@@ -168,8 +175,8 @@ class PublisherJointTrajectoryActionClient(Node):
         # Timing: each segment is sized so that the peak joint velocity during the
         # cubic segment stays at or below max_joint_speed.  For a zero-velocity
         # cubic, peak velocity ≈ 1.5 * (delta / T), so T = 1.5 * delta / max_joint_speed.
-        max_joint_speed  = 0.1   # rad/s — intentionally slow for smooth, safe motion
-        min_segment_time = 0.9  # seconds — floor for very small moves
+        max_joint_speed  = 0.4   # rad/s — intentionally slow for smooth, safe motion
+        min_segment_time = 0.5  # seconds — floor for very small moves
 
         n = len(trajectory.points)
 

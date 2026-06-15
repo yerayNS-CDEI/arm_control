@@ -26,7 +26,7 @@ class MultiSensorNode(Node):
         self.pub_sensors = self.create_publisher(Float32MultiArray, 'distance_sensors', 10)
 
         # Timer
-        self.timer = self.create_timer(3.0, self.read_serial)
+        self.timer = self.create_timer(0.2, self.read_serial)
 
         # Almacenamiento de últimos datos
         self.last_data = None
@@ -75,7 +75,7 @@ class MultiSensorNode(Node):
             # Extracting data from message
             match = re.match(r'U1:(\d+)cm U2:(\d+)cm U3:(\d+)cm S1:(\d+)mm S2:(\d+)mm S3:(\d+)mm', line)
             if match:
-                du1, du2, du3, d1, d3, d2 = map(int, match.groups())
+                du1, du2, du3, d1, d2, d3 = map(int, match.groups())
                 self.last_data = (du1, du2, du3, d1, d2, d3)
 
                 # Checking for invalid values

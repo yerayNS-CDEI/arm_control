@@ -29,7 +29,7 @@ class SensorsOrientation(Node):
 
         # Node Variables
         self.end_effector_pose = None
-        self.ideal_distance = 50.0  # cm
+        self.ideal_distance = 42.0  # cm
         # 3 sensors: A left, B right, C top 
         # Positions on the plate 
         # Define the positions of the sensors
@@ -37,7 +37,7 @@ class SensorsOrientation(Node):
         xA, yA = -15, -15 # Position of sensor A 
         xB, yB = 15, -15 # Position of sensor B 
         xC, yC = 0.0, 15 # Position of sensor C 
-        # VL6180X ToF
+        # # VL6180X ToF
         # xA, yA = 15, 15 # Position of sensor A 
         # xB, yB = -15, 15 # Position of sensor B 
         # xC, yC = 0.0, -15 # Position of sensor C 
@@ -91,9 +91,9 @@ class SensorsOrientation(Node):
         if len(msg.data) == 6 and  all(v > 0.0 for v in msg.data) and all(v < 255.0 for v in msg.data):
             ultra1, ultra2, ultra3 = msg.data[0:3]
             s1, s2, s3 = msg.data[3:6]
-            # self.dA = s1*1000
-            # self.dB = s2*1000
-            # self.dC = s3*1000
+            # self.dA = s2*100
+            # self.dB = s1*100
+            # self.dC = s3*100
             self.dA = ultra2*100    
             self.dB = ultra3*100
             self.dC = ultra1*100
@@ -210,7 +210,7 @@ class SensorsOrientation(Node):
             # Publish GoalPose
             traj_msg = JointTrajectory()
             traj_msg.joint_names = self.expected_joint_names
-            time_from_start = 0.5
+            time_from_start = 0.3
             goal_pose = JointTrajectoryPoint()
             goal_pose.positions = joint_values.tolist()
             # goal_pose.positions[5] += (0.7854+1.5708)

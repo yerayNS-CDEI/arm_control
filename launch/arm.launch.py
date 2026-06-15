@@ -442,7 +442,8 @@ def generate_launch_description():
                 output='screen',
                 parameters=[{'planner_backend': planner_backend}],
             ),
-            OpaqueFunction(function=launch_ee_jacobian_node)
+            # OpaqueFunction(function=launch_ee_jacobian_node)
+            
         ]
     )
 
