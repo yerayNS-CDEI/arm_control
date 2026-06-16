@@ -59,6 +59,7 @@ def generate_launch_description():
             'ur_type': ur_type,
             'tf_prefix': 'arm_',
             'mode': mode,
+            'launch_rviz': 'false',
         }.items(),
     )
 

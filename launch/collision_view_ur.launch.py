@@ -123,6 +123,15 @@ def generate_launch_description():
             choices=["arm", "full"],
         )
     )
+    # Whether to spawn RViz for the collision robot (off by default for headless runs)
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "launch_rviz",
+            default_value="false",
+            description="Launch RViz to visualize the collision robot.",
+            choices=["true", "false"],
+        )
+    )
 
     # Initialize Arguments
     ur_type = LaunchConfiguration("ur_type")
@@ -226,10 +235,11 @@ def generate_launch_description():
             arguments=['-d', rviz_config_file],
         )
 
-        nodes_to_start = [
-            robot_state_publisher_node,
-            rviz_node,
-        ]
+        launch_rviz_value = LaunchConfiguration('launch_rviz').perform(context)
+
+        nodes_to_start = [robot_state_publisher_node]
+        if launch_rviz_value.lower() == 'true':
+            nodes_to_start.append(rviz_node)
         return nodes_to_start
 
     return LaunchDescription(declared_arguments + [OpaqueFunction(function=launch_setup)])
