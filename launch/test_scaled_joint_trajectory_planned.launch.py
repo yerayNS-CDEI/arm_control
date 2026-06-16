@@ -39,6 +39,7 @@ def generate_launch_description():
                      "use_sim_time": LaunchConfiguration("use_sim_time")}
                 ],
                 output="screen",
+                arguments=["--ros-args", "--log-level", "publisher_joint_trajectory_planned:=WARN"],
             )
         ]
     )
