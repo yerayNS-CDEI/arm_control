@@ -69,16 +69,6 @@ class WallParallelController(Node):
         # have to guess flange/tool0/DH conventions.
         self.declare_parameter('tool0_frame', 'arm_tool0')
         self.declare_parameter('base_frame', 'arm_base')   # IK base frame (UR DH base)
-        # Physical ToF layout. The distance_sensors array slots [3,4,5] are filled by
-        # different hardware in sim vs on the robot:
-        #   'sim'  -> Gazebo sensors D,E,F (sensor_plate.urdf.xacro): S1@(+.15,+.15),
-        #             S2@(-.15,+.15), S3@(0,-.15). Internally consistent with the sim.
-        #   'real' -> physical vl6180_1/2/3. On the real plate S1 and S2 are mounted
-        #             swapped in X relative to the sim (matches the ToF layout declared
-        #             in align_ee_to_wall.py): S1@(-.15,+.15), S2@(+.15,+.15), S3@(0,-.15).
-        # Using the wrong layout flips the sign of the ToF-derived tilt -> the pitch
-        # correction drives the WRONG way once close enough for the ToF to be valid.
-        self.declare_parameter('tof_layout', 'real')
 
         self.control_rate = self.get_parameter('control_rate').value
         self.ideal_distance = self.get_parameter('ideal_distance').value
@@ -98,30 +88,20 @@ class WallParallelController(Node):
                 f"got '{self.output_mode}'")
         self.tool0_frame = self.get_parameter('tool0_frame').value
         self.base_frame = self.get_parameter('base_frame').value
-        self.tof_layout = self.get_parameter('tof_layout').value
-        if self.tof_layout not in ('sim', 'real'):
-            raise ValueError(f"tof_layout must be 'sim' or 'real', got '{self.tof_layout}'")
 
         # --- Sensor geometry (plate frame, metres) and noise model ----------
-        # index -> (x, y) in plate frame. Ultrasonic slots [0,1,2] are identical in
-        # sim and on the robot; only the ToF slots [3,4,5] differ (see 'tof_layout').
+        # index -> (x, y) in plate frame. Layout matches both sim (sensor_plate.urdf.xacro
+        # D/E/F poses) and the real plate (vl6180 mounting): S1 top-left, S2 top-right.
         self.sensor_names = ['C/U1', 'A/U2', 'B/U3', 'S1', 'S2', 'S3']
         ultrasonic = [
             [0.00,  0.172],   # 0: C ultrasonic (top-mid)
             [-0.155, -0.17],  # 1: A ultrasonic (bottom-left)
             [0.155,  -0.17],  # 2: B ultrasonic (bottom-right)
         ]
-        if self.tof_layout == 'sim':
-            tof = [
-                [0.152,  0.17],   # 3: D / S1 (top-right)
-                [-0.152, 0.17],   # 4: E / S2 (top-left)
-                [0.00,  -0.172],  # 5: F / S3 (bottom-mid)
-            ]
-        else:  # 'real' -> S1 and S2 swapped in X (physical vl6180 mounting)
-            tof = [
-                [-0.152, 0.17],   # 3: S1 (top-left)
-                [0.152,  0.17],   # 4: S2 (top-right)
-                [0.00,  -0.172],  # 5: S3 (bottom-mid)
+        tof = [
+            [-0.152, 0.17],   # 3: S1 (top-left)
+            [0.152,  0.17],   # 4: S2 (top-right)
+            [0.00,  -0.172],  # 5: S3 (bottom-mid)
             ]
         self.pos = np.array(ultrasonic + tof)
         # per-sensor stddev (m): ToF is far more precise than ultrasonic
@@ -157,7 +137,7 @@ class WallParallelController(Node):
 
         self.timer = self.create_timer(1.0 / self.control_rate, self.control_step)
         self.get_logger().info(
-            f"WallParallelController up: mode={self.output_mode} tof_layout={self.tof_layout} "
+            f"WallParallelController up: mode={self.output_mode} "
             f"rate={self.control_rate}Hz kp={self.kp} ema={self.ema_alpha} "
             f"deadband={np.rad2deg(self.deadband):.2f}deg "
             f"max_step={np.rad2deg(self.max_step):.2f}deg -> {out}")
@@ -289,7 +269,7 @@ class WallParallelController(Node):
 
         # Per-sensor diagnostic table: name, plate (x,y), distance, valid?
         # Tilt the plate a known way on the bench and watch which sensor reads
-        # closest -> confirms 'tof_layout' is correct (the near corner's sensor
+        # closest -> confirms the layout is correct (the near corner's sensor
         # must be the one whose (x,y) is on that side).
         d = self.distances
         valid = np.isfinite(d) & (d > self.valid_lo) & (d < self.valid_hi)
@@ -297,7 +277,7 @@ class WallParallelController(Node):
             f"{self.sensor_names[i]}@({self.pos[i,0]:+.2f},{self.pos[i,1]:+.2f})="
             f"{d[i]*100:5.1f}cm{'' if valid[i] else '(x)'}"
             for i in range(6))
-        self.get_logger().info(f"[{self.tof_layout}] {table}", throttle_duration_sec=1.0)
+        self.get_logger().info(table, throttle_duration_sec=1.0)
 
         nw, mean_d, n_valid = self.fit_wall_normal(self.distances)
         if nw is None:

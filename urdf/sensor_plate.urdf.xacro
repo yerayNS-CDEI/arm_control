@@ -174,11 +174,11 @@
 
     <!-- Three ToF sensors (VL6180x): two top corners + one bottom-middle edge -->
     <xacro:tof_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_D">
-      <origin xyz="0.152 0.17 0.02" rpy="0 -1.5708 0"/>
+      <origin xyz="-0.152 0.17 0.02" rpy="0 -1.5708 0"/>
     </xacro:tof_sensor>
 
     <xacro:tof_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_E">
-      <origin xyz="-0.152 0.17 0.02" rpy="0 -1.5708 0"/>
+      <origin xyz="0.152 0.17 0.02" rpy="0 -1.5708 0"/>
     </xacro:tof_sensor>
 
     <xacro:tof_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_F">
