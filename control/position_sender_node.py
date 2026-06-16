@@ -146,29 +146,45 @@ class PositionSenderNode(Node):
             },
             
             # FSM positions
-            'folded_fsm': {
-                'joints': (),
-                'pose': (-0.36937, 0.38604, 0.00443, 0.6934, 0.6887, 0.1682, -0.1285)  # Raised Z from 0.401 to 0.550
-            },
+            # 'folded_fsm': {
+            #     'joints': (-3.619, -1.298, -2.243, -1.177, 1.564, -4.373),
+            #     'pose': (-0.345, 0.378, 0.132, 0.918, -0.396, 0.002, -0.005)
+            # },
+            # 'unfolded_fsm': {
+            #     'joints': (3.291, -2.169, -1.523, -2.790, -0.367, 0.167),
+            #     'pose': (-0.95542, 0.28237, 0.25232, -0.193, 0.706, 0.661, -0.166)
+            # },
             'unfolded_fsm': {
-                # Joints copied from 'custom' — a known-IK-valid forward-facing
-                # configuration that produces an EE pose at ~(0.561, -0.173, 0.851)
-                # with the same orientation as the target pose below.
-                #
-                # WHY JOINT VALUES: pose-goal planning to this target from a
-                # behind-the-robot start (shoulder_pan ≈ π) requires APS to
-                # find a ~180° shoulder swing through the column + plate +
-                # camera + lidar mount workspace, which random sampling cannot
-                # find in 30s.  Joint-space planning bypasses the seeded-IK
-                # step entirely so APS gets an unambiguous goal and is far more
-                # likely to find a clear corridor.
-                #
-                # SIDE-EFFECT: the final EE position is ~0.15m off the original
-                # (0.411, -0.273, 0.850) target, but ExhaustiveScan re-positions
-                # the arm during pre-approach so this offset is benign.
-                'joints': (0.0, -1.104, -2.034, 0.0, 1.57, 2.8),
-                'pose': (0.411, -0.273, 0.850, 0.406, 0.577, 0.408, 0.580)
-            }
+                'joints': (2.832, -1.289, -1.887, -3.032, 0.474, 4.637),
+                'pose': (-0.044, 0.586, 0.616, -0.279, 0.663, 0.264, 0.642)
+            },
+            'folded_fsm': {
+                'joints': (-3.619, -1.298, -2.243, -1.177, 1.564, -4.373),
+                'pose': (-0.345, 0.378, 0.132, 0.918, -0.396, 0.002, -0.005)
+            },
+            # 'folded_fsm': {
+            #     'joints': (),
+            #     'pose': (-0.36937, 0.38604, 0.00443, 0.6934, 0.6887, 0.1682, -0.1285)  # Raised Z from 0.401 to 0.550
+            # },
+            # 'unfolded_fsm': {
+            #     # Joints copied from 'custom' — a known-IK-valid forward-facing
+            #     # configuration that produces an EE pose at ~(0.561, -0.173, 0.851)
+            #     # with the same orientation as the target pose below.
+            #     #
+            #     # WHY JOINT VALUES: pose-goal planning to this target from a
+            #     # behind-the-robot start (shoulder_pan ≈ π) requires APS to
+            #     # find a ~180° shoulder swing through the column + plate +
+            #     # camera + lidar mount workspace, which random sampling cannot
+            #     # find in 30s.  Joint-space planning bypasses the seeded-IK
+            #     # step entirely so APS gets an unambiguous goal and is far more
+            #     # likely to find a clear corridor.
+            #     #
+            #     # SIDE-EFFECT: the final EE position is ~0.15m off the original
+            #     # (0.411, -0.273, 0.850) target, but ExhaustiveScan re-positions
+            #     # the arm during pre-approach so this offset is benign.
+            #     'joints': (0.0, -1.104, -2.034, 0.0, 1.57, 2.8),
+            #     'pose': (0.411, -0.273, 0.850, 0.406, 0.577, 0.408, 0.580)
+            # }
         }
         
         # State variables
