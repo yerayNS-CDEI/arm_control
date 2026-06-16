@@ -107,21 +107,21 @@ class WallParallelController(Node):
         # sim and on the robot; only the ToF slots [3,4,5] differ (see 'tof_layout').
         self.sensor_names = ['C/U1', 'A/U2', 'B/U3', 'S1', 'S2', 'S3']
         ultrasonic = [
-            [0.00,  0.15],   # 0: C ultrasonic (top-mid)
-            [-0.15, -0.15],  # 1: A ultrasonic (bottom-left)
-            [0.15,  -0.15],  # 2: B ultrasonic (bottom-right)
+            [0.00,  0.172],   # 0: C ultrasonic (top-mid)
+            [-0.155, -0.17],  # 1: A ultrasonic (bottom-left)
+            [0.155,  -0.17],  # 2: B ultrasonic (bottom-right)
         ]
         if self.tof_layout == 'sim':
             tof = [
-                [0.15,  0.15],   # 3: D / S1 (top-right)
-                [-0.15, 0.15],   # 4: E / S2 (top-left)
-                [0.00,  -0.15],  # 5: F / S3 (bottom-mid)
+                [0.152,  0.17],   # 3: D / S1 (top-right)
+                [-0.152, 0.17],   # 4: E / S2 (top-left)
+                [0.00,  -0.172],  # 5: F / S3 (bottom-mid)
             ]
         else:  # 'real' -> S1 and S2 swapped in X (physical vl6180 mounting)
             tof = [
-                [-0.15, 0.15],   # 3: S1 (top-left)
-                [0.15,  0.15],   # 4: S2 (top-right)
-                [0.00,  -0.15],  # 5: S3 (bottom-mid)
+                [-0.152, 0.17],   # 3: S1 (top-left)
+                [0.152,  0.17],   # 4: S2 (top-right)
+                [0.00,  -0.172],  # 5: S3 (bottom-mid)
             ]
         self.pos = np.array(ultrasonic + tof)
         # per-sensor stddev (m): ToF is far more precise than ultrasonic
