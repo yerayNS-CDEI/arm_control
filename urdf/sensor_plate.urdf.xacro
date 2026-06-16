@@ -161,28 +161,28 @@
 
     <!-- Three ultrasonic sensors -->
     <xacro:ultrasonic_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_A">
-      <origin xyz="-0.15 -0.15 0.02" rpy="0 -1.5708 0"/>
+      <origin xyz="-0.155 -0.17 0.02" rpy="0 -1.5708 0"/>
     </xacro:ultrasonic_sensor>
     
     <xacro:ultrasonic_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_B">
-      <origin xyz="0.15 -0.15 0.02" rpy="0 -1.5708 0"/>
+      <origin xyz="0.155 -0.17 0.02" rpy="0 -1.5708 0"/>
     </xacro:ultrasonic_sensor>
     
     <xacro:ultrasonic_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_C">
-      <origin xyz="0 0.15 0.02" rpy="0 -1.5708 0"/>
+      <origin xyz="0 0.172 0.02" rpy="0 -1.5708 0"/>
     </xacro:ultrasonic_sensor>
 
     <!-- Three ToF sensors (VL6180x): two top corners + one bottom-middle edge -->
     <xacro:tof_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_D">
-      <origin xyz="0.15 0.15 0.02" rpy="0 -1.5708 0"/>
+      <origin xyz="0.152 0.17 0.02" rpy="0 -1.5708 0"/>
     </xacro:tof_sensor>
 
     <xacro:tof_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_E">
-      <origin xyz="-0.15 0.15 0.02" rpy="0 -1.5708 0"/>
+      <origin xyz="-0.152 0.17 0.02" rpy="0 -1.5708 0"/>
     </xacro:tof_sensor>
 
     <xacro:tof_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_F">
-      <origin xyz="0 -0.15 0.02" rpy="0 -1.5708 0"/>
+      <origin xyz="0 -0.172 0.02" rpy="0 -1.5708 0"/>
     </xacro:tof_sensor>
   </xacro:macro>
 
