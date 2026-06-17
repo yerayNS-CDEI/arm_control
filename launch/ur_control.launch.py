@@ -371,13 +371,13 @@ def launch_setup(context, *args, **kwargs):
         "force_torque_sensor_broadcaster",
         "tcp_pose_broadcaster",
         "ur_configuration_controller",
+        "force_mode_controller",
     ]
     controllers_inactive = [
         "scaled_joint_trajectory_controller",
         "joint_trajectory_controller",
         "forward_velocity_controller",
         "forward_position_controller",
-        "force_mode_controller",
         "passthrough_trajectory_controller",
         "freedrive_mode_controller",
     ]

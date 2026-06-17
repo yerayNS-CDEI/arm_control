@@ -152,6 +152,7 @@ class RobotControlUI(QMainWindow):
         self.freedrive_transition_in_progress = False
         self.freedrive_transition_target_active = False
         self.freedrive_trajectory_controller = None
+        self.freedrive_controller_manager = '/controller_manager'
  
         # Robot dashboard connection
         self.robot_socket = None
@@ -1922,6 +1923,16 @@ class RobotControlUI(QMainWindow):
             'trajectory controller restore switch',
         )
 
+    def _freedrive_namespace_prefix(self):
+        """Namespace prefix derived from the active controller_manager (e.g. '/arm' or '')."""
+        cm = self.freedrive_controller_manager or '/controller_manager'
+        suffix = '/controller_manager'
+        return cm[:-len(suffix)] if cm.endswith(suffix) else ''
+
+    def _freedrive_enable_topic(self):
+        """Enable/keepalive topic for the freedrive controller, namespaced to its controller_manager."""
+        return f"{self._freedrive_namespace_prefix()}/freedrive_mode_controller/enable_freedrive_mode"
+
     def _start_freedrive_publisher(self, status_text):
         """Start the persistent freedrive keepalive publisher."""
         process_key = 'freedrive_enable_publisher'
@@ -1930,7 +1941,7 @@ class RobotControlUI(QMainWindow):
             'pub',
             '--rate',
             '2',
-            '/freedrive_mode_controller/enable_freedrive_mode',
+            self._freedrive_enable_topic(),
             'std_msgs/msg/Bool',
             '{data: true}',
         ]
@@ -1987,15 +1998,51 @@ class RobotControlUI(QMainWindow):
             self.btn_full_control_freedrive.setStyleSheet(style)
             self.btn_full_control_freedrive.setEnabled(True)
 
-    def _get_freedrive_controller_check_command(self):
+    def _detect_freedrive_controller_manager(self):
+        """Find the controller_manager node that hosts freedrive_mode_controller.
+
+        The arm stack can run under the /arm namespace (Full Control hybrid sim),
+        in which case its controllers live on /arm/controller_manager rather than
+        the root /controller_manager. Falls back to /controller_manager.
+        """
+        try:
+            nodes = subprocess.run(
+                ['bash', '-lc', "ros2 node list 2>/dev/null | grep -E '(^|/)controller_manager$' | sort -u"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except Exception:
+            return '/controller_manager'
+
+        candidates = [line.strip() for line in nodes.stdout.splitlines() if line.strip()]
+        for cm in candidates:
+            try:
+                result = subprocess.run(
+                    ['bash', '-lc', f"ros2 control list_controllers -c {cm} 2>/dev/null"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+            except Exception:
+                continue
+            if 'freedrive_mode_controller' in result.stdout:
+                return cm
+
+        return '/controller_manager'
+
+    def _get_freedrive_controller_check_command(self, controller_manager='/controller_manager'):
         """Return the shell command used to detect freedrive-related controllers."""
-        return "ros2 control list_controllers -c /controller_manager | grep -E 'freedrive|trajectory_controller'"
+        return f"ros2 control list_controllers -c {controller_manager} | grep -E 'freedrive|trajectory_controller'"
 
     def _get_controller_states(self, status_text=None):
         """Return freedrive-related controller states parsed from the direct shell command output."""
+        controller_manager = self._detect_freedrive_controller_manager()
+        self.freedrive_controller_manager = controller_manager
+        check_command = self._get_freedrive_controller_check_command(controller_manager)
         try:
             result = subprocess.run(
-                ['bash', '-lc', self._get_freedrive_controller_check_command()],
+                ['bash', '-lc', check_command],
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -2019,7 +2066,7 @@ class RobotControlUI(QMainWindow):
         controller_states = {}
 
         if status_text is not None:
-            cmd_str = self._get_freedrive_controller_check_command()
+            cmd_str = check_command
             self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {html.escape(cmd_str)}</b>")
             stripped_output = controller_output.strip()
             if stripped_output:
@@ -2139,8 +2186,11 @@ class RobotControlUI(QMainWindow):
             [
                 'control',
                 'switch_controllers',
+                '-c',
+                self.freedrive_controller_manager,
                 '--deactivate',
                 trajectory_controller,
+                'force_mode_controller',
                 '--activate',
                 'freedrive_mode_controller',
             ],
@@ -2175,7 +2225,7 @@ class RobotControlUI(QMainWindow):
                 'topic',
                 'pub',
                 '--once',
-                '/freedrive_mode_controller/enable_freedrive_mode',
+                self._freedrive_enable_topic(),
                 'std_msgs/msg/Bool',
                 '{data: false}',
             ],
@@ -2204,10 +2254,13 @@ class RobotControlUI(QMainWindow):
             [
                 'control',
                 'switch_controllers',
+                '-c',
+                self.freedrive_controller_manager,
                 '--deactivate',
                 'freedrive_mode_controller',
                 '--activate',
                 trajectory_controller,
+                'force_mode_controller',
             ],
             status_text,
             self._on_freedrive_stop_switch_finished,
