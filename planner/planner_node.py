@@ -288,9 +288,11 @@ class PlannerNode(Node):
         # Collision service retry logic (handles race conditions with robot_description loading)
         self._collision_service_available = False
         self._collision_service_check_count = 0
-        self._collision_service_max_retries = 15  # 15 attempts * 2 seconds = 30 seconds max wait
-        self._collision_service_check_interval = 2.0  # seconds between checks
-        
+        self._collision_service_max_retries = 15  # 15 attempts * 2s = 30s startup window before slow polling
+        self._collision_service_check_interval = 2.0  # seconds between checks during the startup window
+        self._collision_service_slow_interval = 5.0  # seconds between checks after the startup window
+        self._collision_service_warned = False  # whether the "not available yet" warning was emitted
+
         if self.enable_collision_checking:
             self._collision_check_timer = self.create_timer(
                 self._collision_service_check_interval, 
@@ -308,53 +310,84 @@ class PlannerNode(Node):
     def _check_collision_service_periodic(self):
         """
         Periodically check collision service availability with retries.
-        Handles race conditions where collision node starts after planner.
+        Handles race conditions where the collision node starts after the planner
+        (e.g. while it is still loading robot_description / building its KDL chain).
+
+        The planner never gives up permanently: after the initial startup window it
+        keeps polling at a slower cadence, so it auto-connects whenever the collision
+        node finishes coming up instead of degrading until the sim is restarted.
         """
         if self._collision_service_available:
-            # Already connected, cancel timer
+            # Already connected (possibly via the late-connection path during a call).
+            # Make sure the polling timer is stopped.
+            if self._collision_check_timer is not None and not self._collision_check_timer.is_canceled():
+                self._collision_check_timer.cancel()
             return
-        
+
         self._collision_service_check_count += 1
-        
+
         if self.collision_check_client.service_is_ready():
             # Service is now available!
             self._collision_service_available = True
             self._collision_check_timer.cancel()
-            self.get_logger().info(
-                f"✅ Collision checking service connected: /collision/check_collision_pose "
-                f"(found after {self._collision_service_check_count} attempts, "
-                f"{self._collision_service_check_count * self._collision_service_check_interval:.1f}s)"
-            )
-        else:
-            # Service not yet available
-            if self._collision_service_check_count <= 3:
-                # Be quiet for first few attempts (normal startup)
-                self.get_logger().debug(
-                    f"Waiting for collision service... (attempt {self._collision_service_check_count}/"
-                    f"{self._collision_service_max_retries})"
-                )
-            elif self._collision_service_check_count >= self._collision_service_max_retries:
-                # Max retries reached - give up and warn user
-                self._collision_check_timer.cancel()
-                self.get_logger().warn(
-                    f"⚠️  Collision checking service NOT available at /collision/check_collision_pose\n"
-                    f"   Waited {self._collision_service_check_count * self._collision_service_check_interval:.1f}s "
-                    f"({self._collision_service_check_count} attempts) but service not found.\n"
-                    f"   Planner will use closest IK solutions without collision validation.\n"
-                    f"   \n"
-                    f"   To enable collision checking, launch:\n"
-                    f"     ros2 launch arm_control abstract_robot.launch.py\n"
-                    f"   or\n"
-                    f"     ros2 launch arm_control collision_view_ur.launch.py ur_type:=ur10e tf_prefix:=collision_"
+            if self._collision_service_warned:
+                self.get_logger().info(
+                    "✅ Collision checking service connected (late): "
+                    "/collision/check_collision_pose is now available; collision validation is active."
                 )
             else:
-                # Still waiting, log periodically
-                if self._collision_service_check_count % 5 == 0:
-                    self.get_logger().info(
-                        f"Still waiting for collision service... (attempt {self._collision_service_check_count}/"
-                        f"{self._collision_service_max_retries}, elapsed: "
-                        f"{self._collision_service_check_count * self._collision_service_check_interval:.1f}s)"
-                    )
+                self.get_logger().info(
+                    f"✅ Collision checking service connected: /collision/check_collision_pose "
+                    f"(found after {self._collision_service_check_count} attempts, "
+                    f"{self._collision_service_check_count * self._collision_service_check_interval:.1f}s)"
+                )
+            return
+
+        # Service not yet available.
+        if not self._collision_service_warned and self._collision_service_check_count <= 3:
+            # Be quiet for first few attempts (normal startup)
+            self.get_logger().debug(
+                f"Waiting for collision service... (attempt {self._collision_service_check_count}/"
+                f"{self._collision_service_max_retries})"
+            )
+        elif not self._collision_service_warned and \
+                self._collision_service_check_count >= self._collision_service_max_retries:
+            # Startup window elapsed - warn once, then keep polling slowly instead of
+            # giving up, so a slow collision node still connects without a restart.
+            self._collision_service_warned = True
+            self._collision_check_timer.cancel()
+            self._collision_check_timer = self.create_timer(
+                self._collision_service_slow_interval,
+                self._check_collision_service_periodic
+            )
+            self.get_logger().warn(
+                f"⚠️  Collision checking service NOT available yet at /collision/check_collision_pose\n"
+                f"   Waited {self._collision_service_check_count * self._collision_service_check_interval:.1f}s "
+                f"({self._collision_service_check_count} attempts) but service not found.\n"
+                f"   Planner will use closest IK solutions without collision validation until it connects.\n"
+                f"   Still polling every {self._collision_service_slow_interval:.0f}s; it will connect "
+                f"automatically once the collision node is up (no restart required).\n"
+                f"   \n"
+                f"   To enable collision checking, launch:\n"
+                f"     ros2 launch arm_control abstract_robot.launch.py\n"
+                f"   or\n"
+                f"     ros2 launch arm_control collision_view_ur.launch.py ur_type:=ur10e tf_prefix:=collision_"
+            )
+        elif not self._collision_service_warned:
+            # Still within the startup window, log periodically
+            if self._collision_service_check_count % 5 == 0:
+                self.get_logger().info(
+                    f"Still waiting for collision service... (attempt {self._collision_service_check_count}/"
+                    f"{self._collision_service_max_retries}, elapsed: "
+                    f"{self._collision_service_check_count * self._collision_service_check_interval:.1f}s)"
+                )
+        else:
+            # Past the startup window: keep polling quietly with an occasional reminder.
+            if self._collision_service_check_count % 12 == 0:
+                self.get_logger().info(
+                    "Still polling for collision service /collision/check_collision_pose "
+                    "(will connect automatically when available)..."
+                )
 
     def _update_wrist3_tool0_transform(self):
         """
