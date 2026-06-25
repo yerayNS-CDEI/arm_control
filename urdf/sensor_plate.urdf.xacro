@@ -1,5 +1,6 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:include filename="$(find depthai_descriptions_v3)/urdf/include/depthai_macro.urdf.xacro"/>
 
   <!-- Macro for single ultrasonic sensor -->
   <xacro:macro name="ultrasonic_sensor" params="parent_link tf_prefix sensor_name *origin">
@@ -129,7 +130,18 @@
     </gazebo>
   </xacro:macro>
 
-  <xacro:macro name="sensor_plate" params="parent_link tf_prefix:='' ee_cylinder_length:=0.15">
+  <xacro:macro name="sensor_plate" params="
+      parent_link
+      tf_prefix:=''
+      ee_cylinder_length:=0.15
+      oak_camera_name:='oak'
+      oak_camera_model:='OAK-D-PRO'
+      oak_cam_pos_x:=0.075
+      oak_cam_pos_y:=0.0
+      oak_cam_pos_z:=0.125
+      oak_cam_roll:=0.0
+      oak_cam_pitch:=-1.5708
+      oak_cam_yaw:=3.14159">
     <link name="${tf_prefix}plate_link">
       <visual>
         <origin xyz="0 0 0" rpy="-1.57 0 3.14159"/>
@@ -184,6 +196,18 @@
     <xacro:tof_sensor parent_link="${tf_prefix}plate_link" tf_prefix="${tf_prefix}" sensor_name="sensor_F">
       <origin xyz="0 -0.172 0.02" rpy="0 -1.5708 0"/>
     </xacro:tof_sensor>
+
+    <xacro:depthai_camera
+        camera_name="${oak_camera_name}"
+        camera_model="${oak_camera_model}"
+        parent="${tf_prefix}plate_link"
+        base_frame="${tf_prefix}oak_mount_link"
+        cam_pos_x="${oak_cam_pos_x}"
+        cam_pos_y="${oak_cam_pos_y}"
+        cam_pos_z="${oak_cam_pos_z}"
+        cam_roll="${oak_cam_roll}"
+        cam_pitch="${oak_cam_pitch}"
+        cam_yaw="${oak_cam_yaw}"/>
   </xacro:macro>
 
 </robot>

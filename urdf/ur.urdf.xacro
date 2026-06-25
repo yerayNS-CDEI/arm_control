@@ -54,6 +54,14 @@
    <xacro:arg name="ee_cylinder_length" default="0.15"/>
    <xacro:arg name="ee_cylinder_radius" default="0.035"/>
    <xacro:arg name="sensors_offset" default="0.15"/>
+   <xacro:arg name="oak_camera_name" default="oak"/>
+   <xacro:arg name="oak_camera_model" default="OAK-D-PRO"/>
+   <xacro:arg name="oak_cam_pos_x" default="0.075"/>
+   <xacro:arg name="oak_cam_pos_y" default="0.0"/>
+   <xacro:arg name="oak_cam_pos_z" default="0.125"/>
+   <xacro:arg name="oak_cam_roll" default="0.0"/>
+   <xacro:arg name="oak_cam_pitch" default="-1.5708"/>
+   <xacro:arg name="oak_cam_yaw" default="3.14159"/>
 
    <!-- initial position for simulations (Fake Hardware, Gazebo, Ignition) -->
    <xacro:arg name="initial_positions_file" default="$(find arm_control)/config/initial_positions.yaml"/>
@@ -140,7 +148,15 @@
    <xacro:sensor_plate
      parent_link="$(arg tf_prefix)ee_cylinder_link"
      tf_prefix="$(arg tf_prefix)"
-     ee_cylinder_length="$(arg ee_cylinder_length)"/>
+     ee_cylinder_length="$(arg ee_cylinder_length)"
+     oak_camera_name="$(arg oak_camera_name)"
+     oak_camera_model="$(arg oak_camera_model)"
+     oak_cam_pos_x="$(arg oak_cam_pos_x)"
+     oak_cam_pos_y="$(arg oak_cam_pos_y)"
+     oak_cam_pos_z="$(arg oak_cam_pos_z)"
+     oak_cam_roll="$(arg oak_cam_roll)"
+     oak_cam_pitch="$(arg oak_cam_pitch)"
+     oak_cam_yaw="$(arg oak_cam_yaw)"/>
 
    <xacro:if value="$(arg sim_gazebo)">
     <!-- Gazebo Ignition/Gazebo Sim plugins (sim_gazebo now uses Gazebo Ignition, not Classic) -->
