@@ -108,9 +108,19 @@ class HyperspectralNode(Node):
             callback_group=self.hardware_cb_group,
         )
 
-        # Connexió als sensors
+        # Pas 0: l'usuari tria l'MTI SENSE connexió oberta als sensors.
+        # Els sensors tanquen la connexió si no reben comandos reals durant >5s;
+        # PNGs sols no són suficients per mantenir-los vius durant l'espera interactiva.
+        self.vis = None
+        self.nir = None
+        if self.auto_configure:
+            self.get_logger().info("Auto-Configurador ACTIU → executant Pas 0 (MTI Bracketing)...")
+            self._auto_calibrate_mti()
+
+        # Connexió als sensors: ara que l'MTI ja està triat, connectem immediatament
+        # i passem a configurar sense deixar temps als sensors de fer timeout.
         self.get_logger().info("Connectant als sensors VIS i NIR...")
-        self.vis = LenzClient(vis_ip, timeout=20.0)  # VIS: marge extra per latència de xarxa
+        self.vis = LenzClient(vis_ip, timeout=20.0)
         self.nir = LenzClient(nir_ip, timeout=15.0)
 
         try:
@@ -172,20 +182,25 @@ class HyperspectralNode(Node):
         try:
             results_dict[label] = client.read_frame()
         except Exception as e:
+            client._dbg(f"_read_sensor_into ERROR ({label}): {type(e).__name__}: {e}")
             results_dict[label] = f"ERROR: {e}"
 
     # ----------------------------------------------------------
     # Helper: Validació estricta de trama (hardware-level)
     # ----------------------------------------------------------
-    def _is_valid_frame(self, sensor_dict, sensor_name):
+    def _is_valid_frame(self, sensor_dict, sensor_name, allow_dark_current=False):
         """
         Comprova les condicions mínimes d'una trama vàlida:
           - Ha de ser un dict amb clau 'spectrum' de 256 punts
           - Tots els valors han de ser finits
           - NIR: menys del 10% de zeros absoluts (buffer TCP incomplet)
-          - Intensitat mitjana > 100 counts (sub-exposició severa)
+          - Intensitat mitjana > 100 counts, excepte per GDS (allow_dark_current=True)
         """
         if not isinstance(sensor_dict, dict) or "spectrum" not in sensor_dict:
+            self.get_logger().warning(
+                f"{sensor_name} trama invàlida: {type(sensor_dict).__name__} → "
+                f"{str(sensor_dict)[:120]}"
+            )
             return False
 
         arr = np.array(sensor_dict["spectrum"], dtype=np.float64)
@@ -206,7 +221,7 @@ class HyperspectralNode(Node):
                 )
                 return False
 
-        if np.mean(arr) < 100.0:
+        if not allow_dark_current and np.mean(arr) < 100.0:
             self.get_logger().warning(
                 f"{sensor_name} sub-exposat: mean={np.mean(arr):.1f} < 100 counts"
             )
@@ -219,26 +234,29 @@ class HyperspectralNode(Node):
     # ----------------------------------------------------------
     def _prepare_capture_window(self):
         """
-        Obre una finestra d'adquisició sincronitzada:
-          - VIS: keepalive SEMPRE actiu; sincronitzar post-ping per no col·lidir
-          - NIR: pausar keepalive ABANS de la comanda; el sensor es talla si rep PNGs durant captura
+        Obre una finestra d'adquisició sincronitzada.
+        El keepalive PNG segueix actiu durant la captura (el sensor ho accepta).
+        Sincronitzem perquè la comanda de mesura no col·lisioni amb un PNG en trànsit.
         """
         self.vis.flush_buffer()
         self.nir.flush_buffer()
         time.sleep(0.1)
         self.vis.wait_after_ping(0.5)
-        self.nir.pause_keepalive()
         self.nir.wait_after_ping(0.5)
 
     def _close_capture_window(self):
-        """Restaura el keepalive NIR i neteja els buffers residuals."""
-        try:
-            self.nir.resume_keepalive()
-        except Exception as e:
-            self.get_logger().warning(f"No s'ha pogut restaurar keepalive NIR: {e}")
+        """Neteja els buffers residuals post-captura.
+        Els sensors Lenz envien FIN just després de transmetre l'espectre
+        (protocol request-response-close). La ConnectionError a flush és normal."""
         time.sleep(0.1)
-        self.vis.flush_buffer()
-        self.nir.flush_buffer()
+        try:
+            self.vis.flush_buffer()
+        except ConnectionError:
+            pass  # VIS tanca després d'enviar l'espectre: comportament normal
+        try:
+            self.nir.flush_buffer()
+        except ConnectionError:
+            pass  # NIR tanca després d'enviar l'espectre: comportament normal
 
     # ----------------------------------------------------------
     # Helper: Enviar comanda de configuració (protocol TCP segur)
@@ -276,18 +294,50 @@ class HyperspectralNode(Node):
     # Helper: Configurar sensors
     # ----------------------------------------------------------
     def _configure_sensors(self, vis_mtr, vis_mti, nir_mtr, nir_mti):
-        """Envia MTR, MTI i THP a ambdós sensors i actualitza l'estat intern."""
+        """Envia MTR, MTI (i THP per VIS) als sensors i actualitza l'estat intern."""
         self._send_config_safe("VIS", self.vis, "MTR", vis_mtr)
         self._send_config_safe("VIS", self.vis, "MTI", vis_mti)
         self._send_config_safe("VIS", self.vis, "THP", 1)
-        self._send_config_safe("NIR", self.nir, "MTR", nir_mtr)
-        self._send_config_safe("NIR", self.nir, "MTI", nir_mti)
-        self._send_config_safe("NIR", self.nir, "THP", 1)
+
+        # NIR: una sola pausa per als comandos consecutius.
+        self.nir.flush_buffer()
+        time.sleep(0.1)
+        self.nir.pause_keepalive()
+        try:
+            self.nir.wait_after_ping(0.5)
+            # MTR s'omet per NIR: no reconegut (provocava disconnect amb format antic)
+            self.nir.send_config("MTI", nir_mti); time.sleep(0.2); self.nir.flush_buffer()
+            self.nir.send_config("THP", 1);       time.sleep(0.2); self.nir.flush_buffer()
+        finally:
+            self.nir.resume_keepalive()
+
         self.vis_mtr = vis_mtr
         self.vis_mti = vis_mti
         self.nir_mtr = nir_mtr
         self.nir_mti = nir_mti
         time.sleep(1.5)  # Estabilització del hardware post-configuració
+
+    # ----------------------------------------------------------
+    # Helper: Reconnexió i reconfiguració ràpida
+    # ----------------------------------------------------------
+    def _reconnect_and_configure(self):
+        """Tanca i restableix la connexió TCP als sensors i els reconfigura.
+        Els sensors Lenz tanquen la connexió per inactivitat (~2-3s sense comandos
+        reals) mentre l'usuari prepara la càmera. S'usa entre prompts interactius."""
+        vis_ip, nir_ip = self.vis.ip, self.nir.ip
+        vis_dbg, nir_dbg = self.vis.debug, self.nir.debug
+
+        for client in [self.vis, self.nir]:
+            try: client.close()
+            except Exception: pass
+
+        self.get_logger().info("Reconnectant als sensors...")
+        self.vis = LenzClient(vis_ip, timeout=20.0, debug=vis_dbg)
+        self.nir = LenzClient(nir_ip, timeout=15.0, debug=nir_dbg)
+        self.vis.connect()
+        self.nir.connect()
+        time.sleep(1.0)
+        self._configure_sensors(self.vis_mtr, self.vis_mti, self.nir_mtr, self.nir_mti)
 
     # ----------------------------------------------------------
     # Helper: Seqüència de calibratge obligatòria amb retry
@@ -298,10 +348,8 @@ class HyperspectralNode(Node):
         Si cap intent retorna una trama vàlida, llança RuntimeError
         per evitar que el node arrenqui amb calibracions nul·les.
         """
-        if self.auto_configure:
-            self.get_logger().info("Auto-Configurador ACTIU → executant Pas 0 (MTI Bracketing)...")
-            self._auto_calibrate_mti()
-        else:
+        # _auto_calibrate_mti ja s'ha executat a __init__ abans de _configure_sensors.
+        if not self.auto_configure:
             self.get_logger().warning(
                 f"Auto-Configurador DESACTIVAT: "
                 f"MTI_VIS={self.vis_mti} µs, MTI_NIR={self.nir_mti} µs (manuals)."
@@ -314,20 +362,27 @@ class HyperspectralNode(Node):
 
         for cmd, instruction in sequence:
             input(f"\n>>> {instruction}\n    Prem ENTER quan estiguis a punt...")
+            # Els sensors tanquen la connexió durant l'espera interactiva.
+            # Reconnectem i reconfigurem immediatament després de l'ENTER,
+            # quan la càmera ja està preparada, per mesurar de seguida.
+            self._reconnect_and_configure()
             self.get_logger().info(f"Capturant {cmd}...")
-
-            # Temps d'integració adaptatiu: max(MTI) en µs → segons + marge de xarxa
-            acq_wait = max(self.vis_mti, self.nir_mti) / 1_000_000.0 + 0.5
 
             success = False
             for attempt in range(3):
+                if attempt > 0:
+                    # Sensors tanquen la connexió post-espectre: reconnectem abans del reintent
+                    self._reconnect_and_configure()
                 results = {}
                 try:
                     self._prepare_capture_window()
                     self.vis.send_simple(cmd)
                     self.nir.send_simple(cmd)
+                    # Deixar temps al sensor per integrar i posar la resposta al buffer TCP.
+                    # L'exemple original usa 1.2s; usem el temps d'integració + marge.
+                    acq_wait = max(self.vis_mti, self.nir_mti) / 1_000_000.0 + 0.8
+                    self.get_logger().info(f"Esperant {acq_wait:.2f}s (integració + marge)...")
                     time.sleep(acq_wait)
-
                     t_vis = threading.Thread(
                         target=self._read_sensor_into, args=(self.vis, "VIS", results)
                     )
@@ -339,8 +394,9 @@ class HyperspectralNode(Node):
                 finally:
                     self._close_capture_window()
 
-                if (self._is_valid_frame(results.get("VIS"), "VIS") and
-                        self._is_valid_frame(results.get("NIR"), "NIR")):
+                is_dark = (cmd == "GDS")
+                if (self._is_valid_frame(results.get("VIS"), "VIS", allow_dark_current=is_dark) and
+                        self._is_valid_frame(results.get("NIR"), "NIR", allow_dark_current=is_dark)):
                     self.calibration_data[cmd] = {
                         "vis":       list(results["VIS"]["spectrum"]),
                         "nir":       list(results["NIR"]["spectrum"]),
@@ -390,17 +446,16 @@ class HyperspectralNode(Node):
 
         new_mti_nir = 23750  # Sweet spot NIR: lineal, independent de la temperatura
 
-        self._send_config_safe("VIS", self.vis, "MTI", new_mti_vis)
-        self._send_config_safe("NIR", self.nir, "MTI", new_mti_nir)
-
+        # NO enviem al sensor aquí: _configure_sensors ho farà amb tots els paràmetres
+        # d'una sola passada, evitant la doble configuració que trencava la connexió VIS.
         self.vis_mti = new_mti_vis
         self.nir_mti = new_mti_nir
 
         self.get_logger().info(
-            f"✓ MTI fixat → VIS: {new_mti_vis} µs ({new_mti_vis/1000:.1f} ms) | "
-            f"NIR: {new_mti_nir} µs ({new_mti_nir/1000:.2f} ms)"
+            f"✓ MTI seleccionat → VIS: {new_mti_vis} µs ({new_mti_vis/1000:.1f} ms) | "
+            f"NIR: {new_mti_nir} µs ({new_mti_nir/1000:.2f} ms) "
+            f"(s'aplicarà a _configure_sensors)"
         )
-        time.sleep(1.0)  # Estabilització tèrmica post-configuració
 
     # ----------------------------------------------------------
     # SERVICE: Configuració d'un sensor
