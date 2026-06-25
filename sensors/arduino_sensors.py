@@ -138,9 +138,9 @@ class MultiSensorNode(Node):
                     # Publishing data into topic
                     distances_array = Float32MultiArray()
                     if self.calc_type == 0:
-                        distances_array.data = [median(self.buffer_ultra[i]) / 100.0 for i in range(3)] + [median(self.buffer_vl[i]) / 1000.0 for i in range(3)]
+                        distances_array.data = [median(self.buffer_ultra[i]) / 100.0 for i in range(3)] + [(median(self.buffer_vl[i]) / 1000.0)+0.083 for i in range(3)]
                     elif self.calc_type == 1:
-                        distances_array.data = [sum(self.buffer_ultra[i]) / len(self.buffer_ultra[i]) / 100.0 for i in range(3)] + [sum(self.buffer_vl[i]) / len(self.buffer_vl[i]) / 1000.0 for i in range(3)]
+                        distances_array.data = [sum(self.buffer_ultra[i]) / len(self.buffer_ultra[i]) / 100.0 for i in range(3)] + [(sum(self.buffer_vl[i]) / len(self.buffer_vl[i]) / 1000.0)+0.083 for i in range(3)]
                     else:
                         self.get_logger().error("Wrong computation type selected.")
                     

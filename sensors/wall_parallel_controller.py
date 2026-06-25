@@ -108,7 +108,7 @@ class WallParallelController(Node):
         self.sigma = np.array([0.010, 0.010, 0.010, 0.010, 0.010, 0.010])
         # validity window (m): drop saturated / invalid readings
         self.valid_lo = np.array([0.02, 0.02, 0.02, 0.011, 0.011, 0.011])
-        self.valid_hi = np.array([3.90, 3.90, 3.90, 0.175, 0.175, 0.175])
+        self.valid_hi = np.array([3.90, 3.90, 3.90, 0.258, 0.258, 0.258])
 
         # --- State ----------------------------------------------------------
         self.distances = None
