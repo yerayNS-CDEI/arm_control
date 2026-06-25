@@ -5436,7 +5436,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         controls_row.addWidget(QLabel("Initial State:"))
         self.fsm_state_combo = QComboBox()
         self.fsm_state_combo.addItems([
-            "ScanWall", "CreateMap", "ScanFloor",
+            "ScanWall", "CreateMap", "ObjectID", "ScanFloor",
             "Armfolding", "ArmUnfolding", "NavigateToPose",
         ])
         controls_row.addWidget(self.fsm_state_combo)
