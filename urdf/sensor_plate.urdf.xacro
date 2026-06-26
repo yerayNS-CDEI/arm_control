@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
-  <xacro:include filename="$(find depthai_descriptions_v3)/urdf/include/depthai_macro.urdf.xacro"/>
+  <xacro:include filename="$(find depthai_descriptions)/urdf/include/depthai_macro.urdf.xacro"/>
 
   <!-- Macro for single ultrasonic sensor -->
   <xacro:macro name="ultrasonic_sensor" params="parent_link tf_prefix sensor_name *origin">
