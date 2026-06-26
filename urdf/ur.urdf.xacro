@@ -61,7 +61,7 @@
    <xacro:arg name="oak_cam_pos_z" default="0.125"/>
    <xacro:arg name="oak_cam_roll" default="0.0"/>
    <xacro:arg name="oak_cam_pitch" default="-1.5708"/>
-   <xacro:arg name="oak_cam_yaw" default="3.14159"/>
+   <xacro:arg name="oak_cam_yaw" default="0"/>
 
    <!-- initial position for simulations (Fake Hardware, Gazebo, Ignition) -->
    <xacro:arg name="initial_positions_file" default="$(find arm_control)/config/initial_positions.yaml"/>

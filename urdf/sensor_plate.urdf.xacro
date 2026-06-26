@@ -141,10 +141,10 @@
       oak_cam_pos_z:=0.125
       oak_cam_roll:=0.0
       oak_cam_pitch:=-1.5708
-      oak_cam_yaw:=3.14159">
+      oak_cam_yaw:=0">
     <link name="${tf_prefix}plate_link">
       <visual>
-        <origin xyz="0 0 0" rpy="-1.57 0 3.14159"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
           <mesh filename="package://navi_wall/navi_wall_description/meshes/sensor_plate.STL" scale="0.001 0.001 0.001"/>
         </geometry>
@@ -153,7 +153,7 @@
         </material>
       </visual>
       <collision>
-        <origin xyz="0 0 0" rpy="-1.57 0 3.14159"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
           <mesh filename="package://navi_wall/navi_wall_description/meshes/sensor_plate.STL" scale="0.001 0.001 0.001"/>
         </geometry>
