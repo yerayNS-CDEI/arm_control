@@ -231,7 +231,9 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # SIGINT (how the FSM stops this node) already shuts the context down via
+        # rclpy's signal handler; a second shutdown() raises RCLError -> exit 1.
+        rclpy.try_shutdown()
 
 if __name__ == '__main__':
     main()

@@ -254,6 +254,12 @@ class WallParallelController(Node):
     # --- Control ------------------------------------------------------------
     def control_step(self):
         if self.distances is None:
+            # Loud on purpose: a starved controller silently leaves the plate in
+            # whatever pose pre-approach parked it (e.g. sensors out of range ->
+            # arduino_sensors never publishes the combined array).
+            self.get_logger().warn(
+                "No distance_sensors data — plate is NOT aligning to the wall.",
+                throttle_duration_sec=5.0)
             return
         if self.current_joint_state is None or self.joint_indices is None:
             self.get_logger().warn("Waiting for joint_states...", throttle_duration_sec=2.0)
@@ -375,7 +381,9 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # SIGINT (how the FSM stops this node) already shuts the context down via
+        # rclpy's signal handler; a second shutdown() raises RCLError -> exit 1.
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':
