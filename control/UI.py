@@ -5567,6 +5567,75 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         proc_node.start('ros2', node_args)
         self.fsm_node_process = proc_node
 
+    def _rtabmap_slam_pids(self):
+        """PIDs of the running rtabmap SLAM node(s).
+
+        Matches on ``rtabmap_slam`` in the command line -- the SLAM node executes
+        from ``.../rtabmap_slam/lib/rtabmap_slam/rtabmap`` -- the same pattern the
+        FSM's ``graceful_rtabmap_save`` uses. The odometry/sync/viz helpers live in
+        ``rtabmap_odom``/``rtabmap_sync``/``rtabmap_viz`` and are intentionally not
+        matched.
+        """
+        try:
+            r = subprocess.run(['pgrep', '-f', 'rtabmap_slam'],
+                               capture_output=True, text=True, timeout=2)
+            return {int(x) for x in r.stdout.split()}
+        except Exception:
+            return set()
+
+    def _wait_for_rtabmap_db_save(self, timeout=180.0):
+        """SIGINT the rtabmap SLAM node and wait (UI-responsive) for it to exit.
+
+        rtabmap only writes its visual-word dictionary + optimized graph to
+        rtabmap.db on a clean SIGINT shutdown; SIGKILLing it mid-save leaves a
+        database with 0 words (``VWDictionary ... dict size=0`` on reload). On a
+        large (>1 GB) map that flush can take well over a minute -- far longer than
+        the 3 s grace in ``_stop_fsm`` -- so we block here until the SLAM process
+        actually disappears (our proof the save finished) before the caller hard-
+        kills the rest of the tree. Pumps the Qt event loop so the UI stays alive.
+
+        Returns the SLAM pids seen at entry, so the caller can exclude them from
+        its SIGKILL sweep and never tear the node down before the save completes.
+        """
+        initial = self._rtabmap_slam_pids()
+        if not initial:
+            return set()
+
+        # Belt-and-suspenders: make sure a SIGINT reaches the SLAM node even if the
+        # FSM's own signal handler missed it (e.g. it was mid-transition).
+        for pid in initial:
+            try:
+                os.kill(pid, signal.SIGINT)
+            except Exception:
+                pass
+
+        self._fsm_append_log(
+            "<span style='color: #58a6ff;'>💾 Saving mapping database (waiting for rtabmap to flush)...</span>",
+            "💾 Saving mapping database (waiting for rtabmap to flush)...",
+        )
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self._rtabmap_slam_pids():
+                self._fsm_append_log(
+                    "<span style='color: #57ab5a;'>✓ rtabmap database saved.</span>",
+                    "✓ rtabmap database saved.",
+                )
+                return initial
+            QApplication.processEvents()
+            try:
+                if rclpy.ok():
+                    rclpy.spin_once(self.node, timeout_sec=0)
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+        self._fsm_append_log(
+            f"<span style='color: #e3b341;'>⚠ rtabmap still saving after {timeout:.0f}s; "
+            f"proceeding with shutdown (database may be incomplete).</span>",
+            f"⚠ rtabmap still saving after {timeout:.0f}s; proceeding with shutdown.",
+        )
+        return initial
+
     def _stop_fsm(self):
         """Stop both FSM processes and their entire spawned process trees."""
 
@@ -5604,18 +5673,30 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             if pid:
                 all_descendants.extend(_collect_descendants(pid))
 
-        # ── Phase 2: graceful SIGINT to parent processes.
+        # ── Phase 2: graceful SIGINT to parent processes so the FSM runs its own
+        # clean teardown (which SIGINTs rtabmap to save the map database).
         for pid in proc_pids:
             if pid:
                 try:
                     os.kill(pid, signal.SIGINT)
                 except Exception:
                     pass
+
+        # ── Phase 2b: let rtabmap finish writing rtabmap.db BEFORE the Phase 3
+        # SIGKILL below. Without this the SLAM node is hard-killed mid-save on a
+        # large map, leaving a 0-word database ("VWDictionary dict size=0"). The
+        # returned pids are excluded from the SIGKILL sweep so we never tear the
+        # SLAM node down before its save completes.
+        rtabmap_pids = self._wait_for_rtabmap_db_save()
+
         for proc in procs:
             proc.waitForFinished(3000)
 
-        # ── Phase 3: SIGKILL every collected descendant.
+        # ── Phase 3: SIGKILL every collected descendant, except the rtabmap SLAM
+        # node (it has already exited after saving; never hard-killed here).
         for dpid in all_descendants:
+            if dpid in rtabmap_pids:
+                continue
             try:
                 os.kill(dpid, signal.SIGKILL)
             except Exception:
