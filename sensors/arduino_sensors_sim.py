@@ -159,7 +159,7 @@ class SimulatedSensorNode(Node):
         msg.radiation_type = Range.INFRARED
         msg.field_of_view = 0.0349  # ~2 degrees
         msg.min_range = 0.01
-        msg.max_range = 0.18
+        msg.max_range = 0.18 + 0.083
         msg.range = min(max(distance_m, msg.min_range), msg.max_range)
         return msg
     

@@ -168,6 +168,19 @@ def launch_setup(context, *args, **kwargs):
 
     world = LaunchConfiguration('world_file')
 
+    # Per-world spawn pose, mirroring navi_wall/launch/sim.launch.py base mode.
+    # The default (2,-2) is open floor in most worlds, but lands inside furniture
+    # in the AWS worlds; use canonical interior waypoints for those. z matches the
+    # base platform spawn height so the mobile manipulator drops onto the floor.
+    world_name = context.perform_substitution(LaunchConfiguration('world')).strip()
+    if world_name == 'bookstore':
+        spawn_x, spawn_y = '-1.04', '5.24'
+    elif world_name == 'small_house':
+        spawn_x, spawn_y = '0.0', '0.0'
+    else:
+        spawn_x, spawn_y = '2.0', '-2.0'
+    spawn_z = '0.22'
+
 
     # Gazebo nodes
     gazebo = IncludeLaunchDescription(
@@ -191,10 +204,10 @@ def launch_setup(context, *args, **kwargs):
         package="ros_gz_sim",
         executable="create",
         name="spawn_ur",
-        arguments=[ "-topic", "robot_description", 
-                   '-x', '2.5',
-                   '-y', '-2.0',
-                   '-z', '2.0',
+        arguments=[ "-topic", "robot_description",
+                   '-x', spawn_x,
+                   '-y', spawn_y,
+                   '-z', spawn_z,
                 #    '-robot_namespace','arm'
                    ],
         output="screen",
@@ -380,6 +393,13 @@ def generate_launch_description():
         'world_file',
         default_value=default_world,
         description='World to load'
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            'world',
+            default_value='warehouse',
+            description='World name used to pick a per-world spawn pose for the robot.',
         )
     )
 
