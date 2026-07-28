@@ -5583,6 +5583,76 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         except Exception:
             return set()
 
+    @staticmethod
+    def _pid_alive(pid):
+        """True while `pid` exists and has not become a zombie."""
+        try:
+            with open(f'/proc/{pid}/stat', 'rb') as f:
+                # The comm field is parenthesised and may contain spaces, so split
+                # after the last ')': the next field is the process state.
+                fields = f.read().decode(errors='replace').rsplit(')', 1)[-1].split()
+        except Exception:
+            return False
+        return bool(fields) and fields[0] != 'Z'
+
+    @staticmethod
+    def _control_node_pids(pids):
+        """Subset of `pids` that are ros2_control_node processes.
+
+        The column hardware interface retracts the column from its
+        ``on_deactivate`` callback, which only runs when ros2_control_node shuts
+        down gracefully -- so its pid is what tells us whether the retraction has
+        finished.
+        """
+        matches = set()
+        for pid in pids:
+            try:
+                with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                    cmdline = f.read().decode(errors='replace')
+            except Exception:
+                continue
+            if 'ros2_control_node' in cmdline:
+                matches.add(pid)
+        return matches
+
+    def _wait_for_column_retraction(self, control_pids, timeout=30.0):
+        """Wait (UI-responsive) for the ros2_control node(s) to exit.
+
+        ``ColumnHardwareInterface::on_deactivate`` drives the column back to 0 and
+        keeps pumping the Modbus heartbeat -- the drive stops the instant the
+        heartbeat does -- for as long as the retraction takes (up to ~15 s). That
+        runs inside ros2_control_node's own shutdown, so SIGKILLing the process
+        tree before it has exited leaves the column stuck wherever it was. Waiting
+        for the process to disappear is our proof the retraction finished.
+        """
+        if not control_pids:
+            return
+        self._fsm_append_log(
+            "<span style='color: #58a6ff;'>⬇ Retracting column (waiting for ros2_control to shut down)...</span>",
+            "⬇ Retracting column (waiting for ros2_control to shut down)...",
+        )
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not any(self._pid_alive(pid) for pid in control_pids):
+                self._fsm_append_log(
+                    "<span style='color: #57ab5a;'>✓ ros2_control shut down cleanly (column retracted).</span>",
+                    "✓ ros2_control shut down cleanly (column retracted).",
+                )
+                return
+            QApplication.processEvents()
+            try:
+                if rclpy.ok():
+                    rclpy.spin_once(self.node, timeout_sec=0)
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+        self._fsm_append_log(
+            f"<span style='color: #e3b341;'>⚠ ros2_control still running after {timeout:.0f}s; "
+            f"proceeding with shutdown (the column may stay extended).</span>",
+            f"⚠ ros2_control still running after {timeout:.0f}s; proceeding with shutdown.",
+        )
+
     def _wait_for_rtabmap_db_save(self, timeout=180.0):
         """SIGINT the rtabmap SLAM node and wait (UI-responsive) for it to exit.
 
@@ -5673,9 +5743,25 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             if pid:
                 all_descendants.extend(_collect_descendants(pid))
 
-        # ── Phase 2: graceful SIGINT to parent processes so the FSM runs its own
-        # clean teardown (which SIGINTs rtabmap to save the map database).
-        for pid in proc_pids:
+        # ── Phase 2: graceful SIGINT so the FSM runs its own clean teardown (which
+        # SIGINTs rtabmap to save the map database) and every node it launched gets
+        # to shut down properly.
+        #
+        # The whole tree must be signalled, not just the parents: the FSM node
+        # process is started as `ros2 run task_planner_fsm fsm_node`, and `ros2 run`
+        # does NOT forward signals to the executable it spawned -- it assumes the
+        # signal was delivered to the whole process group, which is only true for a
+        # Ctrl+C in a terminal (see ros2run/api/__init__.py). Signalling only the
+        # wrapper therefore left the real fsm_node untouched, so its stop_all()
+        # teardown never ran and the move_robot launch it started (ros2_control, and
+        # with it the column) was hard-killed in Phase 3 instead of shutting down --
+        # which is why the column stayed extended after "Stop FSM" while "Stop Full
+        # Robot" retracted it. Signalling the descendants as well also reaches
+        # ros2_control_node directly, so the column starts retracting immediately
+        # even if the FSM's own handler is busy (same belt-and-suspenders reasoning
+        # as the rtabmap SIGINT below).
+        control_pids = self._control_node_pids(all_descendants)
+        for pid in proc_pids + all_descendants:
             if pid:
                 try:
                     os.kill(pid, signal.SIGINT)
@@ -5688,6 +5774,12 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         # returned pids are excluded from the SIGKILL sweep so we never tear the
         # SLAM node down before its save completes.
         rtabmap_pids = self._wait_for_rtabmap_db_save()
+
+        # ── Phase 2c: let the column finish retracting before the SIGKILL sweep.
+        # ros2_control_node retracts the column inside its shutdown (see
+        # _wait_for_column_retraction); killing it first freezes the column
+        # mid-travel and leaves it extended.
+        self._wait_for_column_retraction(control_pids)
 
         for proc in procs:
             proc.waitForFinished(3000)
