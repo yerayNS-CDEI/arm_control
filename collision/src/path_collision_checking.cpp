@@ -298,43 +298,98 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     RCLCPP_INFO(this->get_logger(), "Connecting to robot_state_publisher at: %s", robot_state_pub_node.c_str());
     
     auto params_client = std::make_shared<rclcpp::SyncParametersClient>(this, robot_state_pub_node);
-    while (!params_client->wait_for_service(std::chrono::seconds(1)))
+
+    // Fetch robot_description with a bounded, retrying handshake.
+    //
+    // This used to be wait_for_service() -> has_parameter() -> get_parameters(), all with the
+    // default infinite timeout. wait_for_service() returning does not guarantee that every
+    // parameter service of the remote node is matched yet, so the request that follows can be
+    // dropped by the middleware and the sync call then blocks in this constructor FOREVER: the
+    // process stays alive, never reaches create_service() below, and launch reports nothing
+    // because nothing died. Downstream that looks like "collision node started but
+    // /collision/check_collision_pose never appears", and every arm goal gets rejected because
+    // it cannot be collision-validated. (On Ctrl+C the same call instead threw out of the
+    // constructor -> std::terminate -> SIGABRT.)
+    //
+    // Retry with a finite timeout so a dropped request costs one retry instead of the session,
+    // and give up loudly so launch reports a dead process instead of a hung one.
+    const double robot_description_timeout =
+        this->declare_parameter<double>("robot_description_timeout", 120.0);
+    const auto description_deadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(robot_description_timeout));
+
+    std::string robot_desc_string;
+    while (robot_desc_string.empty())
     {
         if (!rclcpp::ok())
         {
-            RCLCPP_FATAL(this->get_logger(), "Interrupted while waiting for the service. Exiting.");
-            rclcpp::shutdown();
+            throw std::runtime_error("Interrupted while waiting for robot_description.");
         }
-        RCLCPP_INFO(this->get_logger(), "Robot state description service not available, waiting...");
+        if (std::chrono::steady_clock::now() > description_deadline)
+        {
+            RCLCPP_FATAL(this->get_logger(),
+                         "Gave up after %.0fs fetching '%s' from %s. Exiting so the launch reports a "
+                         "failed node instead of silently running without collision checking.",
+                         robot_description_timeout, robot_description_name.c_str(),
+                         robot_state_pub_node.c_str());
+            throw std::runtime_error("robot_description not available from " + robot_state_pub_node);
+        }
+
+        if (!params_client->wait_for_service(std::chrono::seconds(2)))
+        {
+            RCLCPP_INFO(this->get_logger(), "Robot state description service not available, waiting...");
+            continue;
+        }
+
+        try
+        {
+            auto parameters = params_client->get_parameters({ robot_description_name },
+                                                            std::chrono::seconds(5));
+            if (parameters.empty() ||
+                parameters[0].get_type() == rclcpp::ParameterType::PARAMETER_NOT_SET)
+            {
+                RCLCPP_WARN(this->get_logger(), "Parameter %s not set on %s yet, retrying...",
+                            robot_description_name.c_str(), robot_state_pub_node.c_str());
+            }
+            else
+            {
+                robot_desc_string = parameters[0].value_to_string();
+            }
+        }
+        catch (const std::exception& ex)
+        {
+            RCLCPP_WARN(this->get_logger(), "Request for %s from %s failed (%s), retrying...",
+                        robot_description_name.c_str(), robot_state_pub_node.c_str(), ex.what());
+        }
+
+        if (robot_desc_string.empty())
+        {
+            rclcpp::sleep_for(std::chrono::seconds(1));
+        }
     }
 
-    if (!params_client->has_parameter(robot_description_name))
-    {
-        RCLCPP_FATAL(this->get_logger(), "Parameter %s not found in node robot_state_publisher", robot_description_name.c_str());
-        rclcpp::shutdown();
-    }
-
-    // Grab URDF robot description
-    auto parameters = params_client->get_parameters({ robot_description_name });
-    std::string robot_desc_string = parameters[0].value_to_string();
-    
     RCLCPP_INFO(this->get_logger(), "Robot description length: %zu bytes", robot_desc_string.length()
 );
 
     // Initialize URDF model
     model_ = std::make_unique<urdf::Model>();
 
-    // Verify that URDF string is in correct format
+    // Verify that URDF string is in correct format.
+    // Every fatal path below throws: rclcpp::shutdown() does not stop construction, so the old
+    // code kept building on a broken model and ended up as a live node serving nothing.
     if (!model_->initString(robot_desc_string))
     {
         RCLCPP_FATAL(this->get_logger(),"URDF string is not a valid robot model.");
-        rclcpp::shutdown();
+        throw std::runtime_error("Invalid URDF in " + robot_description_name);
     }
 
     // Robot kinematics model creation as KDL tree using URDF model
     if (!kdl_parser::treeFromUrdfModel(*model_, tree_))
     {
-        RCLCPP_ERROR(this->get_logger(), "Failed to construct KDL tree");
+        RCLCPP_FATAL(this->get_logger(), "Failed to construct KDL tree");
+        throw std::runtime_error("Failed to construct KDL tree from " + robot_description_name);
     }
     
     // Print all segments in the tree for debugging
@@ -349,8 +404,7 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     if (!chain_success)
     {
         RCLCPP_FATAL(this->get_logger(), "Failed to extract kinematic chain from '%s' to '%s'! These links may not exist or not be connected.", base_link_.c_str(), tip_.c_str());
-        rclcpp::shutdown();
-        return;
+        throw std::runtime_error("No kinematic chain from '" + base_link_ + "' to '" + tip_ + "'");
     }
     
     ndof_ = chain_.getNrOfJoints();
@@ -365,7 +419,7 @@ PathCollisionChecking::PathCollisionChecking(const rclcpp::NodeOptions& options)
     if (ndof_ < 1)
     {
         RCLCPP_FATAL(this->get_logger(), "Robot has 0 joints, check if root and/or tip name is incorrect!");
-        rclcpp::shutdown();
+        throw std::runtime_error("Kinematic chain '" + base_link_ + "' -> '" + tip_ + "' has 0 joints");
     }
 
     qmax_.resize(ndof_);

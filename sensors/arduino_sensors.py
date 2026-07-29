@@ -14,6 +14,10 @@ class MultiSensorNode(Node):
     def __init__(self):
         super().__init__('multi_sensor_node')
 
+        # Declare parameters
+        self.declare_parameter('autostart', False)
+        autostart = self.get_parameter('autostart').value
+
         self.serial = serial.Serial('/dev/ttyACM0', 115200, timeout=1)
 
         # Publishers
@@ -30,8 +34,8 @@ class MultiSensorNode(Node):
 
         # Almacenamiento de últimos datos
         self.last_data = None
-        self.publish_now = False
-        self.publish_mode = 0   # Publication mode --> 0: single publication, 1: continuous publication
+        self.publish_now = autostart
+        self.publish_mode = 1 if autostart else 0   # Publication mode --> 0: single publication, 1: continuous publication
         self.batch_size = 1
         self.buffer_ultra = [deque(maxlen=self.batch_size) for _ in range(3)]  # U1, U2, U3
         self.buffer_vl = [deque(maxlen=self.batch_size) for _ in range(3)]     # S1, S2, S3
@@ -40,7 +44,11 @@ class MultiSensorNode(Node):
         # Hilo para leer teclado sin bloqueo
         threading.Thread(target=self.listen_for_key, daemon=True).start()
 
-        self.get_logger().info("Multi-sensor node initialized.")
+        self.get_logger().info(f"Multi-sensor node initialized (autostart={autostart}).")
+        if autostart:
+            self.get_logger().info("Autostart enabled: continuous publishing started")
+        else:
+            self.get_logger().info("Press 'c' to enable continuous publishing, 'p' for single publish")
 
     def listen_for_key(self):
         while rclpy.ok():

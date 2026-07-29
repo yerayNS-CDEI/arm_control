@@ -73,6 +73,11 @@ def generate_launch_description():
         arguments=['--ros-args', '--log-level', 'INFO'],
     )
 
+    # respawn: without a live /collision/check_collision_pose the arm planner rejects every
+    # goal it cannot validate, so a node that dies during startup (e.g. it gave up waiting for
+    # robot_state_publisher's robot_description) must come back on its own rather than take the
+    # session down with it. The FSM's collision-service gate still fails the run if the service
+    # never appears, so a permanently broken node is reported instead of silently respawning.
     path_collision_node = Node(
         package='arm_control',
         executable='path_collision_checking',
@@ -80,6 +85,8 @@ def generate_launch_description():
         namespace='collision',
         parameters=[path_collision_params, mobile_base_yaml],
         arguments=['--ros-args', '--log-level', 'INFO'],
+        respawn=True,
+        respawn_delay=5.0,
     )
 
     return LaunchDescription([
