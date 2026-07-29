@@ -286,6 +286,11 @@ class RobotControlUI(QMainWindow):
             'left', 'right', 'one', 'two', 'three', 'four', 'five',
             'six', 'p1', 'initial', 'under', 'under1', 'under2'
         ]
+        # Full Robot tab additionally exposes the FSM named poses so they can be
+        # commanded manually without running the FSM.
+        self.full_control_position_names = self.position_names + [
+            'unfolded_fsm', 'folded_fsm'
+        ]
         self.position_dropdown = QComboBox()
         self.position_dropdown.addItems(self.position_names)
         position_sender_layout.addWidget(self.position_dropdown)
@@ -959,7 +964,7 @@ class RobotControlUI(QMainWindow):
         full_control_mapping_layout.addWidget(QLabel("Select Position:"))
         full_control_position_layout = QHBoxLayout()
         self.full_control_position_dropdown = QComboBox()
-        self.full_control_position_dropdown.addItems(self.position_names)
+        self.full_control_position_dropdown.addItems(self.full_control_position_names)
         full_control_position_layout.addWidget(self.full_control_position_dropdown)
 
         btn_full_control_send_position = QPushButton("Send Position")
