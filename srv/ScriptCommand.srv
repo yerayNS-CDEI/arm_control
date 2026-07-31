@@ -1,0 +1,14 @@
+# Service definition for sending SCRIPT commands to UR robot
+
+# Request
+string command_name         # Name of the command to execute (e.g., "popup", "set_digital_out", "movel")
+float64[] numeric_params    # Numeric parameters (int/float values) for the command
+string[] string_params      # String parameters for the command
+bool stop_program           # Stop the control box program before sending command (default: true for first command)
+bool restart_program        # Restart the control box program after sending command (default: true for last command)
+
+---
+
+# Response
+bool success                # True if command was sent and executed successfully
+string message              # Feedback message or error description

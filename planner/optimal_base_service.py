@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
 import os
+import math
 import numpy as np
 import time
 import rclpy
 from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from scipy.spatial.transform import Rotation as R
+from scipy.ndimage import distance_transform_edt
 from nav_msgs.msg import OccupancyGrid
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
@@ -42,10 +44,11 @@ class OptimalBaseService(Node):
         # Servicio
         self.srv = self.create_service(OptimalBase, 'compute_optimal_base', self.handle_request)
         self.get_logger().info("Service already running.")
+        self.get_logger().info("\033[1;32mUse: ros2 service call /compute_optimal_base arm_control/srv/OptimalBase \"{poses_ee_xyzrpy: [1.0, 0.0, 0.5, 0.0, 90.0, 0.0], obstacle_rects: [], obstacle_circles: [], min_dist: 0.5, round_decimals: 2, grid_res: 0.1, x_limits: [-2.0, 2.0], y_limits: [-2.0, 2.0], enable_simulator: false, enable_robot_viz: false}\"\033[0m")
 
         # Costmap subscription for automatic obstacle detection
         self.declare_parameter('costmap_topic', '/global_costmap/costmap')
-        self.declare_parameter('costmap_obstacle_threshold', 50)  # occupancy > 50 is obstacle
+        self.declare_parameter('costmap_obstacle_threshold', 30)  # occupancy > 50 is obstacle
         
         costmap_topic = self.get_parameter('costmap_topic').value
         self.costmap = None
@@ -167,7 +170,7 @@ class OptimalBaseService(Node):
             f"Costmap bounds: [{costmap_min_x:.2f}, {costmap_max_x:.2f}] x [{costmap_min_y:.2f}, {costmap_max_y:.2f}]"
         )
     
-    def _publish_grid_markers(self, grid, x_limits, y_limits, selected_pos=None):
+    def _publish_grid_markers(self, grid, x_limits, y_limits, selected_pos=None, selected_yaw=None):
         """Publish grid visualization as RViz markers
         
         Args:
@@ -177,6 +180,14 @@ class OptimalBaseService(Node):
             selected_pos: Optional [x, y] of selected base position to highlight
         """
         marker_array = MarkerArray()
+        now = self.get_clock().now().to_msg()
+
+        # Clear previous grid/selected markers so stale IDs from older requests do not persist.
+        clear_marker = Marker()
+        clear_marker.header.frame_id = "map"
+        clear_marker.header.stamp = now
+        clear_marker.action = Marker.DELETEALL
+        marker_array.markers.append(clear_marker)
         
         n_bins_x, n_bins_y = grid.shape
         grid_res_x = (x_limits[1] - x_limits[0]) / n_bins_x
@@ -200,7 +211,7 @@ class OptimalBaseService(Node):
                 # Create marker for this cell
                 marker = Marker()
                 marker.header.frame_id = "map"
-                marker.header.stamp = self.get_clock().now().to_msg()
+                marker.header.stamp = now
                 marker.ns = "reachability_grid"
                 marker.id = marker_id
                 marker.type = Marker.CUBE
@@ -245,19 +256,25 @@ class OptimalBaseService(Node):
         if selected_pos is not None:
             marker = Marker()
             marker.header.frame_id = "map"
-            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.header.stamp = now
             marker.ns = "selected_base"
             marker.id = marker_id
-            marker.type = Marker.CYLINDER
+            marker.type = Marker.ARROW
             marker.action = Marker.ADD
             
             marker.pose.position.x = selected_pos[0]
             marker.pose.position.y = selected_pos[1]
             marker.pose.position.z = 0.05
-            marker.pose.orientation.w = 1.0
+            if selected_yaw is not None:
+                marker.pose.orientation.x = 0.0
+                marker.pose.orientation.y = 0.0
+                marker.pose.orientation.z = math.sin(selected_yaw / 2.0)
+                marker.pose.orientation.w = math.cos(selected_yaw / 2.0)
+            else:
+                marker.pose.orientation.w = 1.0
             
             marker.scale.x = 0.3
-            marker.scale.y = 0.3
+            marker.scale.y = 0.1
             marker.scale.z = 0.1
             
             marker.color = ColorRGBA(r=1.0, g=0.0, b=1.0, a=1.0)  # Magenta
@@ -392,6 +409,24 @@ class OptimalBaseService(Node):
                 res.message = "No hay posiciones válidas tras aplicar obstáculos."
                 return res
 
+            # Compute distance transform from obstacles
+            obstacle_mask = (gi[0].grid == 0)
+            # Distance in grid cells
+            distance_from_obstacles_cells = distance_transform_edt(~obstacle_mask)
+            # Convert to meters
+            grid_res_x = (x_limits[1] - x_limits[0]) / n_bins_x
+            grid_res_y = (y_limits[1] - y_limits[0]) / n_bins_y
+            grid_res_avg = (grid_res_x + grid_res_y) / 2.0
+            distance_from_obstacles_m = distance_from_obstacles_cells * grid_res_avg
+            
+            # Minimum distance to obstacles (configurable)
+            min_obstacle_dist = 0.8  # meters
+            
+            def get_obstacle_distance(x, y):
+                """Returns distance to nearest obstacle in meters"""
+                i, j = self._world_to_idx(x, y, x_limits, y_limits, n_bins_x, n_bins_y)
+                return float(distance_from_obstacles_m[i, j])
+
             # 6) Selección: óptimos → min_dist → detrás de goals según orientación
             G = gi[0].grid
             max_val = float(np.max(G))
@@ -437,6 +472,9 @@ class OptimalBaseService(Node):
 
             def ok_min_dist(x, y):
                 return get_perpendicular_dist_to_plane(x, y) >= min_dist
+            
+            def ok_obstacle_dist(x, y):
+                return get_obstacle_distance(x, y) >= min_obstacle_dist
 
             # Filter candidates that meet minimum perpendicular distance requirement
             cands_xy = [(x, y) for (x, y) in cands_xy_all if ok_min_dist(x, y)]
@@ -448,7 +486,23 @@ class OptimalBaseService(Node):
                 cands_with_dist.sort(key=lambda x: -x[1])  # Sort by distance descending
                 cands_xy = [xy for xy, _ in cands_with_dist[:min(20, len(cands_with_dist))]]
             
+            # Filter candidates by minimum obstacle distance
+            cands_before_obstacle_filter = len(cands_xy)
+            cands_xy = [(x, y) for (x, y) in cands_xy if ok_obstacle_dist(x, y)]
+            
+            if not cands_xy:
+                self.get_logger().warn(f"No candidates meet min_obstacle_dist={min_obstacle_dist}m. Using candidates with maximum obstacle distance.")
+                # Fallback: use candidates with maximum obstacle distance
+                cands_with_obs_dist = [(xy, get_obstacle_distance(xy[0], xy[1])) for xy in [(x, y) for (x, y) in cands_xy_all if ok_min_dist(x, y)]]
+                if cands_with_obs_dist:
+                    cands_with_obs_dist.sort(key=lambda x: -x[1])  # Sort by obstacle distance descending
+                    cands_xy = [xy for xy, _ in cands_with_obs_dist[:min(20, len(cands_with_obs_dist))]]
+                else:
+                    # Last resort: use any candidates meeting min_dist
+                    cands_xy = [(x, y) for (x, y) in cands_xy_all if ok_min_dist(x, y)][:20]
+            
             self.get_logger().info(f"Plane normal: {plane_normal}, centroid: ({cx:.2f}, {cy:.2f})")
+            self.get_logger().info(f"Obstacle filtering: {cands_before_obstacle_filter} -> {len(cands_xy)} candidates (min_obstacle_dist={min_obstacle_dist}m)")
 
             # Compute "behind" direction based on goal orientations
             # Extract forward direction (Z-axis) from each pose's rotation matrix
@@ -462,37 +516,45 @@ class OptimalBaseService(Node):
                     forward_xy = forward_xy / np.linalg.norm(forward_xy)
                     forward_vectors.append(forward_xy)
             
-            # Compute average "behind" direction (opposite of forward)
+            # Compute average forward direction from goals
             if forward_vectors:
                 avg_forward = np.mean(forward_vectors, axis=0)
                 avg_forward = avg_forward / (np.linalg.norm(avg_forward) + 1e-9)
-                behind_direction = -avg_forward  # Behind is opposite of forward
                 
-                # Score each candidate: balance "behind" alignment with proximity to goals
+                # Score each candidate: strongly prefer positions behind the goals,
+                # while still considering centroid proximity and obstacle clearance.
                 def combined_score(x, y):
                     # Vector from centroid to candidate
                     vec_to_cand = np.array([x - cx, y - cy])
                     dist_to_centroid = np.linalg.norm(vec_to_cand)
                     
-                    # Alignment score: prefer positions "behind" the goals
+                    # Alignment score: prefer positions behind the goals' forward direction.
+                    # dot_forward = -1.0 is directly behind, 0.0 is lateral, 1.0 is in front.
                     alignment = 0.0
+                    dot_forward = 0.0
                     if dist_to_centroid > 1e-6:
                         vec_to_cand_norm = vec_to_cand / dist_to_centroid
-                        # Dot product: positive when candidate is in "behind" direction
-                        alignment = np.dot(vec_to_cand_norm, behind_direction)
-                        # Only consider candidates with positive alignment (actually behind)
-                        alignment = max(0.0, alignment)
+                        dot_forward = np.dot(vec_to_cand_norm, avg_forward)
+                        alignment = max(0.0, -dot_forward)
                     
                     # Distance score: prefer positions closer to centroid but respect min_dist
                     # Use perpendicular distance to the goals plane for safety
                     perp_dist = get_perpendicular_dist_to_plane(x, y)
                     # Penalize positions too close to min_dist, prefer slightly farther
                     safety_margin = 0.2  # prefer at least 0.2m beyond min_dist
-                    distance_score = 1.0 / (dist_to_centroid + 0.3)  # Closer to centroid is better
+                    distance_score = 1.0 / (1.0 + dist_to_centroid)
                     
-                    # Combined score: balance alignment and proximity
-                    # Higher weight on distance to keep base closer
-                    score = alignment * 0.3 + distance_score * 0.7
+                    # Obstacle distance score: reward positions farther from obstacles
+                    obs_dist = get_obstacle_distance(x, y)
+                    # Normalize: 0.5m -> 0.0, 1.0m+ -> 1.0
+                    obs_score = min(1.0, max(0.0, (obs_dist - min_obstacle_dist) / 0.5))
+                    
+                    # Combined score: make the rear-facing preference dominant.
+                    score = alignment * 0.55 + distance_score * 0.20 + obs_score * 0.25
+
+                    # Strongly penalize candidates that remain in front of the goals.
+                    if dot_forward > 0.0:
+                        score *= max(0.1, 1.0 - 0.9 * dot_forward)
                     
                     # Apply penalty if too close to min_dist perpendicular to plane (safety margin violation)
                     if perp_dist < min_dist + safety_margin:
@@ -503,14 +565,23 @@ class OptimalBaseService(Node):
                 
                 # Select candidate with best combined score
                 x_sel, y_sel = max(cands_xy, key=lambda xy: combined_score(xy[0], xy[1]))
-                self.get_logger().info(f"Base positioned behind goals with proximity: forward={avg_forward}, behind={behind_direction}")
+                self.get_logger().info(f"Base positioned behind goals with orientation preference: forward={avg_forward}")
             else:
                 # Fallback: use centroid-based selection
                 x_sel, y_sel = min(cands_xy, key=lambda xy: np.hypot(xy[0]-cx, xy[1]-cy))
                 self.get_logger().info("No valid orientation vectors, using centroid-based selection")
 
+            # Orientation: X-axis pointing toward goals centroid
+            dx = cx - x_sel
+            dy = cy - y_sel
+            base_yaw = math.atan2(dy, dx)
+            base_qx = 0.0
+            base_qy = 0.0
+            base_qz = math.sin(base_yaw / 2.0)
+            base_qw = math.cos(base_yaw / 2.0)
+
             # Publish grid visualization for RViz
-            self._publish_grid_markers(gi[0].grid, x_limits, y_limits, selected_pos=[x_sel, y_sel])
+            self._publish_grid_markers(gi[0].grid, x_limits, y_limits, selected_pos=[x_sel, y_sel], selected_yaw=base_yaw)
 
             # 7) (Opcional) Visualización si se pide en la request
             if req.enable_simulator:
@@ -546,12 +617,21 @@ class OptimalBaseService(Node):
                     self.get_logger().warn(f"Visualization failed (continuing without viz): {e}")
 
 
-            self.get_logger().info("Optimal base computed succesfully.")
+            self.get_logger().info(
+                f"Optimal base computed succesfully. "
+                f"pos=({x_sel:.3f}, {y_sel:.3f}), "
+                f"yaw={math.degrees(base_yaw):.1f}° → q=({base_qx:.4f}, {base_qy:.4f}, {base_qz:.4f}, {base_qw:.4f})"
+            )
             # 8) Rellenar respuesta
             res.success = True
             res.message = "Optimal base computed succesfully"
             res.base_x = float(x_sel)
             res.base_y = float(y_sel)
+            res.base_yaw = float(base_yaw)
+            res.base_qx = float(base_qx)
+            res.base_qy = float(base_qy)
+            res.base_qz = float(base_qz)
+            res.base_qw = float(base_qw)
             res.centroid_x = cx
             res.centroid_y = cy
             res.max_grid_value = max_val

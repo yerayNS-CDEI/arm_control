@@ -21,12 +21,12 @@ class WallVisualizer(Node):
             self.get_logger().info('Waiting for service...')
 
         self.req = ComputeWallDiscretization.Request()
-        self.req.start_point.x = -0.6
-        self.req.start_point.y = 0.5
+        self.req.start_point.x = 3.0
+        self.req.start_point.y = 0.0
         self.req.start_point.z = 0.0
-        self.req.end_point.x = 4.2
-        self.req.end_point.y = 3.0
-        self.req.end_point.z = 3.6
+        self.req.end_point.x = 3.0
+        self.req.end_point.y = -3.0
+        self.req.end_point.z = 3.0
         self.req.robot_amplitude_range = 1.3
         self.req.robot_height_range = 1.3
         self.req.sensors_amplitude_range = 0.4
@@ -54,6 +54,7 @@ class WallVisualizer(Node):
         wall_vertices = np.array([[p.position.x, p.position.y, p.position.z] for p in res.wall_panels_vertices])
         cell_centers = np.array([[p.position.x, p.position.y, p.position.z] for p in res.panel_cells_centers])
         cell_vertices = np.array([[p.position.x, p.position.y, p.position.z] for p in res.panel_cells_vertices])
+        cells_per_panel = res.cells_per_panel
 
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
@@ -72,12 +73,16 @@ class WallVisualizer(Node):
             poly = Poly3DCollection([quad], facecolors=cmap(i), alpha=0.5, edgecolors='k')
             ax.add_collection3d(poly)
 
-        # Plot cell panels in blue
-        n_cells = len(cell_vertices) // 4
-        for i in range(n_cells):
-            quad = cell_vertices[i * 4: (i + 1) * 4]
-            poly = Poly3DCollection([quad], facecolors='cyan', alpha=0.5, edgecolors='b')
-            ax.add_collection3d(poly)
+        # Plot cell panels, coloured by parent panel
+        n_panels = len(wall_centers) // 4 if cells_per_panel == 0 else len(cell_vertices) // 4 // cells_per_panel
+        cell_cmap = plt.get_cmap('tab20', max(n_panels, 1))
+        for panel_idx in range(n_panels):
+            color = cell_cmap(panel_idx)
+            for cell_idx in range(cells_per_panel):
+                quad_idx = panel_idx * cells_per_panel + cell_idx
+                quad = cell_vertices[quad_idx * 4: (quad_idx + 1) * 4]
+                poly = Poly3DCollection([quad], facecolors=color, alpha=0.5, edgecolors='b')
+                ax.add_collection3d(poly)
 
         # Plot centers
         ax.scatter(wall_centers[:, 0], wall_centers[:, 1], wall_centers[:, 2], c='k', s=8, label="wall centers")

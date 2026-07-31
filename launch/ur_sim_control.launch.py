@@ -1,16 +1,21 @@
 from launch import LaunchDescription
+from ament_index_python.packages import get_package_share_directory
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
     OpaqueFunction,
     RegisterEventHandler,
+    AppendEnvironmentVariable,
 )
 from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+from nav2_common.launch import RewrittenYaml
+import os
 
 def launch_setup(context, *args, **kwargs):
 
@@ -26,14 +31,31 @@ def launch_setup(context, *args, **kwargs):
     tf_prefix = LaunchConfiguration("tf_prefix")
     start_joint_controller = LaunchConfiguration("start_joint_controller")
     initial_joint_controller = LaunchConfiguration("initial_joint_controller")
-    launch_rviz = LaunchConfiguration("launch_rviz")
+    stack_launch_rviz = LaunchConfiguration("stack_launch_rviz")
     gazebo_gui = LaunchConfiguration("gazebo_gui")
     # My arguments
     mode = LaunchConfiguration("mode")
+    publish_controller_odom_tf = LaunchConfiguration("publish_controller_odom_tf")
+
+    stack_launch_rviz_enabled = (
+        context.perform_substitution(stack_launch_rviz).strip().lower() == "true"
+    )
 
     initial_joint_controllers = PathJoinSubstitution(
         [FindPackageShare("navi_wall"), "config", controllers_file]
     )
+    configured_joint_controllers = RewrittenYaml(
+        source_file=initial_joint_controllers,
+        param_rewrites={
+            'should_publish_tf': publish_controller_odom_tf,
+            'should_publish_odom': publish_controller_odom_tf,
+        },
+        convert_types=True,
+    )
+
+    # Get package share directories for Gazebo resource lookup.
+    arm_pkg_share = FindPackageShare("arm_control").find("arm_control")
+    navi_wall_pkg_share = FindPackageShare("navi_wall").find("navi_wall")
 
     initial_positions_file_abs = PathJoinSubstitution(
         [FindPackageShare("arm_control"), "config", initial_positions_file]
@@ -83,16 +105,22 @@ def launch_setup(context, *args, **kwargs):
             "tf_prefix:=",
             tf_prefix,
             " ",
-            "sim_gazebo:=true",
+            "sim_gazebo:=false",
+            " ",
+            "sim_ignition:=true",
             " ",
             "simulation_controllers:=",
-            initial_joint_controllers,
+            configured_joint_controllers,
             " ",
             "initial_positions_file:=",
             initial_positions_file_abs,
+            " ",
+            "simulation:=true",
+            " ",
+            "use_mock_hardware:=true",
         ]
     )
-    robot_description = {"robot_description": robot_description_content}
+    robot_description = {"robot_description": ParameterValue(value=robot_description_content, value_type=str)}
 
     robot_state_publisher_node = Node(
         package="robot_state_publisher",
@@ -107,7 +135,7 @@ def launch_setup(context, *args, **kwargs):
         name="rviz2",
         output="log",
         arguments=["-d", rviz_config_file],
-        condition=IfCondition(launch_rviz),
+        parameters=[{"use_sim_time": True}],
     )
 
     joint_state_broadcaster_spawner = Node(
@@ -122,7 +150,6 @@ def launch_setup(context, *args, **kwargs):
             target_action=joint_state_broadcaster_spawner,
             on_exit=[rviz_node],
         ),
-        condition=IfCondition(launch_rviz),
     )
 
     # There may be other controllers of the joints, but this is the initially-started one
@@ -139,41 +166,99 @@ def launch_setup(context, *args, **kwargs):
         condition=UnlessCondition(start_joint_controller),
     )
 
+    world = LaunchConfiguration('world_file')
+
+    # Per-world spawn pose, mirroring navi_wall/launch/sim.launch.py base mode.
+    # The default (2,-2) is open floor in most worlds, but lands inside furniture
+    # in the AWS worlds; use canonical interior waypoints for those. z matches the
+    # base platform spawn height so the mobile manipulator drops onto the floor.
+    world_name = context.perform_substitution(LaunchConfiguration('world')).strip()
+    if world_name == 'bookstore':
+        spawn_x, spawn_y = '-1.04', '5.24'
+    elif world_name == 'small_house':
+        spawn_x, spawn_y = '0.0', '0.0'
+    else:
+        spawn_x, spawn_y = '2.0', '-2.0'
+    spawn_z = '0.22'
+
+
     # Gazebo nodes
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            [FindPackageShare("gazebo_ros"), "/launch", "/gazebo.launch.py"]
+            PathJoinSubstitution([
+                FindPackageShare('ros_gz_sim'),
+                'launch',
+                'gz_sim.launch.py'
+            ])
         ),
         launch_arguments={
-            "gui": gazebo_gui,
+            'gz_args': ['-r ', world],
+            # "gui": gazebo_gui,
+             'on_exit_shutdown': 'true'
         }.items(),
         condition=IfCondition(PythonExpression(["'", mode, "' == 'arm'"])),
     )
 
     # Spawn robot
     gazebo_spawn_robot = Node(
-        package="gazebo_ros",
-        executable="spawn_entity.py",
+        package="ros_gz_sim",
+        executable="create",
         name="spawn_ur",
-        arguments=["-entity", "ur",
-                   "-topic", "robot_description", 
-                   '-x', '2.5',
-                   '-y', '-2.0',
-                   '-z', '0.15',
+        arguments=[ "-topic", "robot_description",
+                   '-x', spawn_x,
+                   '-y', spawn_y,
+                   '-z', spawn_z,
                 #    '-robot_namespace','arm'
                    ],
         output="screen",
     )
+    
+    # Bridge
+    bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=[
+            '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'],
+        output='screen',
+        condition=IfCondition(PythonExpression(["'", mode, "' == 'arm'"])),
+    )
+
+    # Set GZ_SIM_RESOURCE_PATH so Gazebo can find package:// URIs for meshes
+    set_gz_arm_resource_path = AppendEnvironmentVariable(
+        name='GZ_SIM_RESOURCE_PATH',
+        value=os.path.dirname(arm_pkg_share),
+    )
+    set_gz_navi_wall_resource_path = AppendEnvironmentVariable(
+        name='GZ_SIM_RESOURCE_PATH',
+        value=os.path.dirname(navi_wall_pkg_share),
+    )
+
+    # Also set IGN_GAZEBO_RESOURCE_PATH for backwards compatibility
+    set_ign_arm_resource_path = AppendEnvironmentVariable(
+        name='IGN_GAZEBO_RESOURCE_PATH',
+        value=os.path.dirname(arm_pkg_share),
+    )
+    set_ign_navi_wall_resource_path = AppendEnvironmentVariable(
+        name='IGN_GAZEBO_RESOURCE_PATH',
+        value=os.path.dirname(navi_wall_pkg_share),
+    )
 
     nodes_to_start = [
+        set_gz_arm_resource_path,
+        set_gz_navi_wall_resource_path,
+        set_ign_arm_resource_path,
+        set_ign_navi_wall_resource_path,
         robot_state_publisher_node,
         joint_state_broadcaster_spawner,
-        delay_rviz_after_joint_state_broadcaster_spawner,
         initial_joint_controller_spawner_stopped,
         initial_joint_controller_spawner_started,
         gazebo,
+        bridge,
         gazebo_spawn_robot,
     ]
+
+    if stack_launch_rviz_enabled:
+        nodes_to_start.append(delay_rviz_after_joint_state_broadcaster_spawner)
 
     return nodes_to_start
 
@@ -232,6 +317,13 @@ def generate_launch_description():
     )
     declared_arguments.append(
         DeclareLaunchArgument(
+            "publish_controller_odom_tf",
+            default_value="false",
+            description="Override controller YAMLs so the controller publishes odom and TF.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
             "initial_positions_file",
             default_value=PathJoinSubstitution(
                 [
@@ -276,7 +368,7 @@ def generate_launch_description():
         )
     )
     declared_arguments.append(
-        DeclareLaunchArgument("launch_rviz", default_value="true", description="Launch RViz?")
+        DeclareLaunchArgument("stack_launch_rviz", default_value="true", description="Launch the stack RViz?")
     )
     declared_arguments.append(
         DeclareLaunchArgument(
@@ -286,6 +378,28 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "mode", default_value="full", description="Launch mode full|arm", choices=['full', 'arm'],
+        )
+        
+    )
+
+    default_world = os.path.join(
+        get_package_share_directory("navi_wall"),
+        'worlds', 'empty_world',
+        'empty_world.world'
+        )
+      
+    declared_arguments.append(
+        DeclareLaunchArgument(
+        'world_file',
+        default_value=default_world,
+        description='World to load'
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            'world',
+            default_value='warehouse',
+            description='World name used to pick a per-world spawn pose for the robot.',
         )
     )
 

@@ -14,6 +14,10 @@ class MultiSensorNode(Node):
     def __init__(self):
         super().__init__('multi_sensor_node')
 
+        # Declare parameters
+        self.declare_parameter('autostart', False)
+        autostart = self.get_parameter('autostart').value
+
         self.serial = serial.Serial('/dev/ttyACM0', 115200, timeout=1)
 
         # Publishers
@@ -26,12 +30,12 @@ class MultiSensorNode(Node):
         self.pub_sensors = self.create_publisher(Float32MultiArray, 'distance_sensors', 10)
 
         # Timer
-        self.timer = self.create_timer(3.0, self.read_serial)
+        self.timer = self.create_timer(0.2, self.read_serial)
 
         # Almacenamiento de últimos datos
         self.last_data = None
-        self.publish_now = False
-        self.publish_mode = 0   # Publication mode --> 0: single publication, 1: continuous publication
+        self.publish_now = autostart
+        self.publish_mode = 1 if autostart else 0   # Publication mode --> 0: single publication, 1: continuous publication
         self.batch_size = 1
         self.buffer_ultra = [deque(maxlen=self.batch_size) for _ in range(3)]  # U1, U2, U3
         self.buffer_vl = [deque(maxlen=self.batch_size) for _ in range(3)]     # S1, S2, S3
@@ -40,7 +44,11 @@ class MultiSensorNode(Node):
         # Hilo para leer teclado sin bloqueo
         threading.Thread(target=self.listen_for_key, daemon=True).start()
 
-        self.get_logger().info("Multi-sensor node initialized.")
+        self.get_logger().info(f"Multi-sensor node initialized (autostart={autostart}).")
+        if autostart:
+            self.get_logger().info("Autostart enabled: continuous publishing started")
+        else:
+            self.get_logger().info("Press 'c' to enable continuous publishing, 'p' for single publish")
 
     def listen_for_key(self):
         while rclpy.ok():
@@ -75,7 +83,7 @@ class MultiSensorNode(Node):
             # Extracting data from message
             match = re.match(r'U1:(\d+)cm U2:(\d+)cm U3:(\d+)cm S1:(\d+)mm S2:(\d+)mm S3:(\d+)mm', line)
             if match:
-                du1, du2, du3, d1, d3, d2 = map(int, match.groups())
+                du1, du2, du3, d1, d2, d3 = map(int, match.groups())
                 self.last_data = (du1, du2, du3, d1, d2, d3)
 
                 # Checking for invalid values
@@ -138,9 +146,9 @@ class MultiSensorNode(Node):
                     # Publishing data into topic
                     distances_array = Float32MultiArray()
                     if self.calc_type == 0:
-                        distances_array.data = [median(self.buffer_ultra[i]) / 100.0 for i in range(3)] + [median(self.buffer_vl[i]) / 1000.0 for i in range(3)]
+                        distances_array.data = [median(self.buffer_ultra[i]) / 100.0 for i in range(3)] + [(median(self.buffer_vl[i]) / 1000.0)+0.083 for i in range(3)]
                     elif self.calc_type == 1:
-                        distances_array.data = [sum(self.buffer_ultra[i]) / len(self.buffer_ultra[i]) / 100.0 for i in range(3)] + [sum(self.buffer_vl[i]) / len(self.buffer_vl[i]) / 1000.0 for i in range(3)]
+                        distances_array.data = [sum(self.buffer_ultra[i]) / len(self.buffer_ultra[i]) / 100.0 for i in range(3)] + [(sum(self.buffer_vl[i]) / len(self.buffer_vl[i]) / 1000.0)+0.083 for i in range(3)]
                     else:
                         self.get_logger().error("Wrong computation type selected.")
                     

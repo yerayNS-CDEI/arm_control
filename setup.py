@@ -27,6 +27,7 @@ setup(
             'example_move = control.example_move:main',
             'exhaustive_scan_node = control.exhaustive_scan_node:main',
             'freedrive_control = control.freedrive_control:main',
+            'joint_state_merger_node = control.joint_state_merger_node:main',
             'position_sender_node = control.position_sender_node:main',
             'publisher_joint_trajectory_planned = control.publisher_joint_trajectory_planned:main',
             'remote_DASHBOARD = control.remote_DASHBOARD:main',
@@ -34,13 +35,15 @@ setup(
             'robot_command_logger = control.robot_command_logger:main',
             'robot_status_check = control.robot_status_check:main',
             'send_and_monitor_trajectory = control.send_and_monitor_trajectory:main',
+            'script_command_service_node = control.script_command_service_node:main',
             'UI = control.UI:main',
             'inspection_manager = sensors.inspection_manager:main',
 
             # Planner nodes
             'base_placement_node = planner.base_placement_node:main',
             'planner_node = planner.planner_node:main',
-            'visualize_wall_discretization_client = planner.visualize_wall_discretization_client:main',
+            'moveit_planner_node = planner.moveit_planner_node:main',
+'visualize_wall_discretization_client = planner.visualize_wall_discretization_client:main',
             'wall_discretization_node = planner.wall_discretization_node:main',
             'optimal_base_service = planner.optimal_base_service:main',
             
@@ -53,6 +56,7 @@ setup(
             'arduino_sensors = sensors.arduino_sensors:main',
             'test_hyperspectral_client = sensors.test_hyperspectral_client:main',
             'arduino_sensors_sim = sensors.arduino_sensors_sim:main',
+            'wall_parallel_controller = sensors.wall_parallel_controller:main',
         ],
     },
 )

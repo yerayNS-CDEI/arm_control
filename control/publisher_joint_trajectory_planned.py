@@ -77,6 +77,7 @@ class PublisherJointTrajectoryActionClient(Node):
         self.get_logger().info("Waiting for action server...")
         self._action_client.wait_for_server()
         self.get_logger().info("Action server already available.")
+        self.get_logger().info("\033[1;32mEmergency stop service: ros2 service call /emergency_stop std_srvs/srv/Trigger\033[0m")
         self.timer = self.create_timer(0.1, self.timer_callback)
 
     def joint_state_callback(self, msg):
@@ -129,37 +130,107 @@ class PublisherJointTrajectoryActionClient(Node):
             self.status_pub.publish(status_msg)
             self.prev_status = self.execution_complete
 
-        if self.trajectory_received and self.starting_point_ok:
+        # Only dispatch a goal when the previous one has finished. The
+        # passthrough_trajectory_controller executes a trajectory atomically and
+        # rejects any goal received mid-execution ("A trajectory is already
+        # executing."). Streaming nodes (e.g. wall_parallel_controller) publish a
+        # fresh trajectory many times per second; trajectory_callback keeps only the
+        # latest, so when a slot opens we always send the freshest target instead of
+        # spamming the controller with goals that just get rejected.
+        if self.trajectory_received and self.starting_point_ok and self.execution_complete:
             self.send_trajectory_goal()
             self.trajectory_received = False
             self.execution_complete = False
+
+    def _current_positions_for_joint_order(self, joint_order):
+        """Return current joint positions aligned with the provided joint-name order."""
+        if self.current_joint_state is None or not joint_order:
+            return None
+
+        index_by_name = {name: idx for idx, name in enumerate(self.current_joint_state.name)}
+        missing = [name for name in joint_order if name not in index_by_name]
+        if missing:
+            self.get_logger().warn(
+                f"Current joint_state is missing joints {missing}; "
+                "falling back to minimum first-segment time."
+            )
+            return None
+
+        return [self.current_joint_state.position[index_by_name[name]] for name in joint_order]
 
     def send_trajectory_goal(self):
         goal_msg = FollowJointTrajectory.Goal()
 
         trajectory = deepcopy(self.planned_trajectory)
-        duration_between_points = 1.0
+        joint_order = trajectory.joint_names if trajectory.joint_names else self.joints
+        current_positions = self._current_positions_for_joint_order(joint_order)
 
+        # Each waypoint gets zero velocities.  The joint_trajectory_controller then
+        # uses cubic Hermite interpolation and generates a smooth bell-shaped velocity
+        # profile (accelerate from 0 → decelerate to 0) for every segment.  This is
+        # the only reliable way to avoid PATH_TOLERANCE_VIOLATED in Gazebo:
+        # finite-difference velocities at intermediate points cause the cubic spline
+        # to overshoot and push the actual joint position outside the tolerance window.
+        #
+        # Timing: each segment is sized so that the peak joint velocity during the
+        # cubic segment stays at or below max_joint_speed.  For a zero-velocity
+        # cubic, peak velocity ≈ 1.5 * (delta / T), so T = 1.5 * delta / max_joint_speed.
+        max_joint_speed  = 0.1   # rad/s — intentionally slow for smooth, safe motion
+        min_segment_time = 0.9  # seconds — floor for very small moves
+        
+        n = len(trajectory.points)
+
+        # --- Pass 1: compute per-segment durations ---
+        segment_durations = []
         for i, point in enumerate(trajectory.points):
-            total_sec = duration_between_points * (i + 1)
-            secs = int(total_sec)
-            nsecs = int((total_sec - secs) * 1e9)
-            point.time_from_start = Duration(sec=secs, nanosec=nsecs)
-            # if not point.velocities or len(point.velocities) != len(point.positions):
-            #     point.velocities = [0.0] * len(point.positions)
-            if i > 0:
-                prev = trajectory.points[i - 1]
-                dt = duration_between_points
-                point.velocities = [
-                    (p2 - p1) / dt for p1, p2 in zip(prev.positions, point.positions)
-                ]
+            if i == 0:
+                # First waypoint: calculate time from CURRENT robot position
+                if current_positions is not None and len(current_positions) == len(point.positions):
+                    max_delta = max(
+                        abs(p2 - p1) for p1, p2 in zip(current_positions, point.positions)
+                    )
+                    seg_time = max(min_segment_time, 1.5 * max_delta / max_joint_speed)
+                    segment_durations.append(seg_time)
+                else:
+                    segment_durations.append(min_segment_time)
             else:
-                point.velocities = [0.0] * len(point.positions)
+                prev = trajectory.points[i - 1]
+                max_delta = max(
+                    abs(p2 - p1) for p1, p2 in zip(prev.positions, point.positions)
+                )
+                # Factor of 1.5: peak velocity of a zero-velocity cubic spline
+                seg_time = max(min_segment_time, 1.5 * max_delta / max_joint_speed)
+                segment_durations.append(seg_time)
+
+        # Log current vs first waypoint for debugging
+        if current_positions is not None and len(trajectory.points) > 0:
+            if len(current_positions) == len(trajectory.points[0].positions):
+                self.get_logger().info(f"Joint order used for timing: {joint_order}")
+                self.get_logger().info(f"Current joint positions: {[f'{p:.3f}' for p in current_positions]}")
+                self.get_logger().info(f"First waypoint positions: {[f'{p:.3f}' for p in trajectory.points[0].positions]}")
+                deltas = [abs(p2 - p1) for p1, p2 in zip(current_positions, trajectory.points[0].positions)]
+                self.get_logger().info(f"Joint deltas to first waypoint: {[f'{d:.3f}' for d in deltas]}")
+
+        self.get_logger().info(
+            f"Trajectory: {n} waypoints, segment times: "
+            f"{[f'{t:.2f}' for t in segment_durations]} s, "
+            f"total: {sum(segment_durations):.2f} s"
+        )
+
+        # --- Pass 2: assign timestamps; zero velocity at every waypoint ---
+        accumulated_time = 0.0
+        for i, point in enumerate(trajectory.points):
+            accumulated_time += segment_durations[i]
+            secs = int(accumulated_time)
+            nsecs = int((accumulated_time - secs) * 1e9)
+            point.time_from_start = Duration(sec=secs, nanosec=nsecs)
+            point.velocities = [0.0] * len(point.positions)
+            point.accelerations = [0.0] * len(point.positions)
 
         goal_msg.trajectory = trajectory
-        goal_msg.goal_time_tolerance = Duration(sec=0, nanosec=200_000_000)
+        goal_msg.goal_time_tolerance = Duration(sec=2, nanosec=0)
         goal_msg.goal_tolerance = [
-            JointTolerance(position=0.01, velocity=0.01, name=name) for name in self.joints
+            JointTolerance(position=0.01, velocity=0.05, name=name) for name in joint_order
         ]
 
         self.get_logger().info("Sending trajectory goal with added times and velocities...")

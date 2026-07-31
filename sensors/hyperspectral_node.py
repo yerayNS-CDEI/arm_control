@@ -142,6 +142,14 @@ class HyperspectralNode(Node):
             raise
 
         self.get_logger().info("HyperspectralNode llest.")
+        self.get_logger().info(
+            "\033[1;32mConfigure service: ros2 service call /hyperspectral/configure "
+            "arm_control/srv/HyperspectralConfig \"{sensor: 'VIS', command: 'MTR', value: 60000}\"\033[0m"
+        )
+        self.get_logger().info(
+            "\033[1;32mMeasurement service: ros2 service call /hyperspectral/measurement "
+            "arm_control/srv/HyperspectralCommand \"{command: 'GSM', x_coord: 0.0, y_coord: 0.0, z_coord: 0.0}\"\033[0m"
+        )
 
     # ----------------------------------------------------------
     # Helper: Matplotlib backend (Ubuntu / headless)

@@ -89,6 +89,7 @@ class WallDiscretizer(Node):
         super().__init__('wall_discretizer_node')
         self.srv = self.create_service(ComputeWallDiscretization, 'compute_wall_discretization', self.discretize_wall_callback)
         self.get_logger().info("Wall discretization node initialized. Service is already available.")
+        self.get_logger().info("\033[1;32mUse: ros2 service call /compute_wall_discretization arm_control/srv/ComputeWallDiscretization \"{start_point: {x: 0.0, y: 0.0, z: 0.0}, end_point: {x: 2.0, y: 0.0, z: 1.5}, robot_amplitude_range: 1.0, robot_height_range: 1.0, sensors_amplitude_range: 0.5, sensors_height_range: 0.5, resolution: 0.1, target_i: 0, target_j: 0}\"\033[0m")
 
     def discretize_wall_callback(self, request, response):
         try:
@@ -124,38 +125,41 @@ class WallDiscretizer(Node):
                     for v in cell:
                         response.wall_panels_vertices.append(to_pose(v))
 
-            # Selecting indicated panel
-            try:
-                target_panel = wall_cells[request.target_i][request.target_j]
-            except IndexError:
-                self.get_logger().error("Invalid panel indices")
-                response.success = False
-                return response
-            
-            # Divide panel in subcells
-            v_ampl = target_panel[1] - target_panel[0]
-            v_height = target_panel[3] - target_panel[0]
-            unit_ampl = v_ampl / np.linalg.norm(v_ampl)
-            unit_height = v_height / np.linalg.norm(v_height)
-            
-            sensor_cells, sensor_centers = divide_plane(
-                target_panel[0], unit_ampl, unit_height,
-                np.linalg.norm(v_ampl), np.linalg.norm(v_height),
-                request.sensors_amplitude_range, request.sensors_height_range,
-                h_res, v_res, dec_round)
+            # Divide all panels into subcells
+            cells_per_panel = None
+            for panel_row in wall_cells:
+                for panel in panel_row:
+                    panel_cell_count = 0
+                    v_ampl = panel[1] - panel[0]
+                    v_height = panel[3] - panel[0]
+                    unit_ampl = v_ampl / np.linalg.norm(v_ampl)
+                    unit_height = v_height / np.linalg.norm(v_height)
 
-            for row in sensor_centers:
-                for c in row:
-                    response.panel_cells_centers.append(to_pose(c))
+                    sensor_cells, sensor_centers = divide_plane(
+                        panel[0], unit_ampl, unit_height,
+                        np.linalg.norm(v_ampl), np.linalg.norm(v_height),
+                        request.sensors_amplitude_range, request.sensors_height_range,
+                        h_res, v_res, dec_round)
 
-            for row in sensor_cells:
-                for cell in row:
-                    for v in cell:
-                        response.panel_cells_vertices.append(to_pose(v))
+                    for row in sensor_centers:
+                        for c in row:
+                            response.panel_cells_centers.append(to_pose(c))
+                            panel_cell_count += 1
+
+                    for row in sensor_cells:
+                        for cell in row:
+                            for v in cell:
+                                response.panel_cells_vertices.append(to_pose(v))
+
+                    if cells_per_panel is None:
+                        cells_per_panel = panel_cell_count
+
+            response.cells_per_panel = cells_per_panel if cells_per_panel is not None else 0
 
             response.success = True
+            n_panels = len(wall_centers) * len(wall_centers[0])
             self.get_logger().info(f"Wall of size {wall_length:.2f} x {wall_height:.2f} m divided into {len(wall_centers[0])} cols and {len(wall_centers)} rows")
-            self.get_logger().info(f"Panel ({request.target_i},{request.target_j}) divided into {len(sensor_centers[0])} cols and {len(sensor_centers)} rows")
+            self.get_logger().info(f"All {n_panels} panels subdivided into sensor cells ({len(response.panel_cells_centers)} total cell centers)")
 
             return response
 

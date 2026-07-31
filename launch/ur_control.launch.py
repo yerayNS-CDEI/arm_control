@@ -14,6 +14,7 @@ from launch.substitutions import (
     PathJoinSubstitution,
     PythonExpression,
 )
+from nav2_common.launch import RewrittenYaml
 
 def launch_setup(context, *args, **kwargs):
     # Initialize Arguments
@@ -33,7 +34,8 @@ def launch_setup(context, *args, **kwargs):
     controller_spawner_timeout = LaunchConfiguration("controller_spawner_timeout")
     initial_joint_controller = LaunchConfiguration("initial_joint_controller")
     activate_joint_controller = LaunchConfiguration("activate_joint_controller")
-    launch_rviz = LaunchConfiguration("launch_rviz")
+    ethercat_interface = LaunchConfiguration("ethercat_interface")
+    stack_launch_rviz = LaunchConfiguration("stack_launch_rviz")
     headless_mode = LaunchConfiguration("headless_mode")
     launch_dashboard_client = LaunchConfiguration("launch_dashboard_client")
     use_tool_communication = LaunchConfiguration("use_tool_communication")
@@ -52,6 +54,11 @@ def launch_setup(context, *args, **kwargs):
     trajectory_port = LaunchConfiguration("trajectory_port")
     # My arguments
     mode = LaunchConfiguration("mode")
+    sim = LaunchConfiguration("sim")
+    publish_controller_odom_tf = LaunchConfiguration("publish_controller_odom_tf")
+    
+    # sim is inverted from arm.launch.py, so invert back for base simulation
+    base_simulation = NotSubstitution(sim)
 
     joint_limit_params = PathJoinSubstitution(
         [FindPackageShare(description_package), "config", ur_type, "joint_limits.yaml"]
@@ -72,18 +79,21 @@ def launch_setup(context, *args, **kwargs):
         [FindPackageShare("ur_robot_driver"), "resources", "rtde_output_recipe.txt"]
     )
 
-    if PythonExpression(["'", mode, "' == 'arm'"]):
+    # Evaluate mode in context
+    mode_value = mode.perform(context)
+    
+    if mode.perform(context).strip() == "arm":
         description_file = "ur.urdf.xacro"
         description_file_path = PathJoinSubstitution(
             [FindPackageShare("arm_control"), "urdf", description_file]
         )
-    elif PythonExpression(["'", mode, "' == 'full'"]):
+    elif mode.perform(context).strip() == "full":
         description_file = "mobile_manipulator.urdf.xacro"
         description_file_path = PathJoinSubstitution(
             [FindPackageShare("navi_wall"), "navi_wall_description/description", description_file]
         )
     else:
-        raise RuntimeError("Mode not recognized, please select 'full' or 'arm'")
+        raise RuntimeError(f"Mode not recognized: '{mode_value}'. Please select 'full' or 'arm'")
                                                  
     robot_description_content = Command(
         [
@@ -181,6 +191,16 @@ def launch_setup(context, *args, **kwargs):
             "trajectory_port:=",
             trajectory_port,
             " ",
+            "simulation:=",
+            base_simulation,  # Inverted back for base (true when parent was true)
+            " ",
+            "use_mock_hardware:=",
+            use_fake_hardware,
+            " ",
+            "sim_gazebo:=false",  # Arm never in Gazebo Classic
+            " ",
+            "sim_ignition:=false",  # Arm always connects to URSim/real, never simulated
+            " ",
         ]
     )
     robot_description = {
@@ -191,7 +211,18 @@ def launch_setup(context, *args, **kwargs):
     }
 
     initial_joint_controllers = PathJoinSubstitution(
-        [FindPackageShare("arm_control"), "config", controllers_file]
+        [FindPackageShare("navi_wall"), "config", controllers_file]
+    )
+    configured_joint_controllers = ParameterFile(
+        RewrittenYaml(
+            source_file=initial_joint_controllers,
+            param_rewrites={
+                'should_publish_tf': publish_controller_odom_tf,
+                'should_publish_odom': publish_controller_odom_tf,
+            },
+            convert_types=True,
+        ),
+        allow_substs=True,
     )
 
     rviz_config_file = PathJoinSubstitution(
@@ -213,7 +244,7 @@ def launch_setup(context, *args, **kwargs):
         parameters=[
             robot_description,
             update_rate_config_file,
-            ParameterFile(initial_joint_controllers, allow_substs=True),
+            configured_joint_controllers,
         ],
         output="screen",
         condition=IfCondition(use_fake_hardware),
@@ -225,7 +256,7 @@ def launch_setup(context, *args, **kwargs):
         parameters=[
             robot_description,
             update_rate_config_file,
-            ParameterFile(initial_joint_controllers, allow_substs=True),
+            configured_joint_controllers,
         ],
         output="screen",
         condition=UnlessCondition(use_fake_hardware),
@@ -240,6 +271,11 @@ def launch_setup(context, *args, **kwargs):
         name="dashboard_client",
         output="screen",
         emulate_tty=True,
+        parameters=[
+            {
+                "robot_ip": robot_ip,
+            }
+        ],
     )
 
     tool_communication_node = Node(
@@ -266,6 +302,7 @@ def launch_setup(context, *args, **kwargs):
             }
         ],
         output="screen",
+        condition=UnlessCondition(use_fake_hardware),
     )
 
     controller_stopper_node = Node(
@@ -286,6 +323,8 @@ def launch_setup(context, *args, **kwargs):
                     "speed_scaling_state_broadcaster",
                     "tcp_pose_broadcaster",
                     "ur_configuration_controller",
+                    "column_position_controller",
+                    "sim_controller",
                 ]
             },
         ],
@@ -302,7 +341,7 @@ def launch_setup(context, *args, **kwargs):
 
     rviz_node = Node(
         package="rviz2",
-        condition=IfCondition(launch_rviz),
+        condition=IfCondition(stack_launch_rviz),
         executable="rviz2",
         name="rviz2",
         output="log",
@@ -332,13 +371,13 @@ def launch_setup(context, *args, **kwargs):
         "force_torque_sensor_broadcaster",
         "tcp_pose_broadcaster",
         "ur_configuration_controller",
+        "force_mode_controller",
     ]
     controllers_inactive = [
         "scaled_joint_trajectory_controller",
         "joint_trajectory_controller",
         "forward_velocity_controller",
         "forward_position_controller",
-        "force_mode_controller",
         "passthrough_trajectory_controller",
         "freedrive_mode_controller",
     ]
@@ -422,6 +461,13 @@ def generate_launch_description():
     )
     declared_arguments.append(
         DeclareLaunchArgument(
+            "publish_controller_odom_tf",
+            default_value="false",
+            description="Override controller YAMLs so the controller publishes odom and TF.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
             "description_package",
             default_value="ur_description",
             description="Description package with robot URDF/XACRO files. Usually the argument "
@@ -467,6 +513,13 @@ def generate_launch_description():
     )
     declared_arguments.append(
         DeclareLaunchArgument(
+            "ethercat_interface",
+            default_value="eno1",
+            description="Network interface used by the Navi Wall EtherCAT master.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
             "headless_mode",
             default_value="false",
             description="Enable headless mode for robot control",
@@ -482,7 +535,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "initial_joint_controller",
-            default_value="joint_trajectory_controller",
+            default_value="passthrough_trajectory_controller",
             choices=[
                 "scaled_joint_trajectory_controller",
                 "joint_trajectory_controller",
@@ -491,7 +544,11 @@ def generate_launch_description():
                 "freedrive_mode_controller",
                 "passthrough_trajectory_controller",
             ],
-            description="Initially loaded robot controller.",
+            description=(
+                "Initially loaded robot controller. Defaults to passthrough_trajectory_controller "
+                "because scaled_joint_trajectory_controller is currently crashing on the "
+                "real-robot Humble path."
+            ),
         )
     )
     declared_arguments.append(
@@ -502,7 +559,7 @@ def generate_launch_description():
         )
     )
     declared_arguments.append(
-        DeclareLaunchArgument("launch_rviz", default_value="true", description="Launch RViz?")
+        DeclareLaunchArgument("stack_launch_rviz", default_value="true", description="Launch the stack RViz?")
     )
     declared_arguments.append(
         DeclareLaunchArgument(

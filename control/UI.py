@@ -112,7 +112,18 @@ class RobotControlUI(QMainWindow):
             lambda msg: self._on_joint_states(msg, '/arm/joint_states'),
             10,
         )
- 
+
+        # Latched parking-active flag from the base controller. Used to wait for the
+        # chassis-parking maneuver to finish before shutting down the base robot.
+        self._parking_active = False
+        parking_active_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.parking_active_subscriber = self.node.create_subscription(
+            Bool,
+            '/sim_controller/parking_active',
+            self._on_parking_active,
+            parking_active_qos,
+        )
+
         # Track processes and their associated buttons
         self.process_map = {}
         self.button_map = {}
@@ -141,6 +152,7 @@ class RobotControlUI(QMainWindow):
         self.freedrive_transition_in_progress = False
         self.freedrive_transition_target_active = False
         self.freedrive_trajectory_controller = None
+        self.freedrive_controller_manager = '/controller_manager'
  
         # Robot dashboard connection
         self.robot_socket = None
@@ -274,6 +286,11 @@ class RobotControlUI(QMainWindow):
             'left', 'right', 'one', 'two', 'three', 'four', 'five',
             'six', 'p1', 'initial', 'under', 'under1', 'under2'
         ]
+        # Full Robot tab additionally exposes the FSM named poses so they can be
+        # commanded manually without running the FSM.
+        self.full_control_position_names = self.position_names + [
+            'unfolded_fsm', 'folded_fsm'
+        ]
         self.position_dropdown = QComboBox()
         self.position_dropdown.addItems(self.position_names)
         position_sender_layout.addWidget(self.position_dropdown)
@@ -289,6 +306,11 @@ class RobotControlUI(QMainWindow):
         self.btn_arm_reset_planner.clicked.connect(self.reset_planner_arm)
         self.btn_arm_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
         control_layout.addWidget(self.btn_arm_reset_planner)
+
+        self.btn_arm_reset_octomap = QPushButton("Reset Octomap")
+        self.btn_arm_reset_octomap.clicked.connect(self.reset_octomap_arm)
+        self.btn_arm_reset_octomap.setToolTip('ros2 service call /octomap_server/reset std_srvs/srv/Empty "{}"')
+        control_layout.addWidget(self.btn_arm_reset_octomap)
  
         # List Controllers button
         btn_list_controllers = QPushButton("List Controllers")
@@ -353,7 +375,16 @@ class RobotControlUI(QMainWindow):
             "Click again to stop freedrive and restore joint_trajectory_controller."
         )
         init_layout.addWidget(self.btn_arm_freedrive)
- 
+
+        init_layout.addWidget(QLabel("Robot Screen:"))
+        self.btn_arm_vnc = QPushButton("Start Robot Screen")
+        self.btn_arm_vnc.clicked.connect(lambda: self.toggle_vnc_viewer(context='arm'))
+        self.btn_arm_vnc.setToolTip(
+            "vncviewer 192.168.1.102\n"
+            "Shows the teach pendant screen. Only available when simulation=false."
+        )
+        init_layout.addWidget(self.btn_arm_vnc)
+
         init_layout.addStretch()
         boxes_layout.addWidget(init_box)
  
@@ -709,6 +740,11 @@ class RobotControlUI(QMainWindow):
         self.btn_joint_reset_planner.clicked.connect(self.reset_planner_joint)
         self.btn_joint_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
         button_layout.addWidget(self.btn_joint_reset_planner)
+
+        self.btn_joint_reset_octomap = QPushButton("Reset Octomap")
+        self.btn_joint_reset_octomap.clicked.connect(self.reset_octomap_joint)
+        self.btn_joint_reset_octomap.setToolTip('ros2 service call /octomap_server/reset std_srvs/srv/Empty "{}"')
+        button_layout.addWidget(self.btn_joint_reset_octomap)
         
         joint_control_layout.addLayout(button_layout)
         
@@ -855,6 +891,15 @@ class RobotControlUI(QMainWindow):
         )
         full_control_init_layout.addWidget(self.btn_full_control_freedrive)
 
+        full_control_init_layout.addWidget(QLabel("Robot Screen:"))
+        self.btn_full_control_vnc = QPushButton("Start Robot Screen")
+        self.btn_full_control_vnc.clicked.connect(lambda: self.toggle_vnc_viewer(context='full'))
+        self.btn_full_control_vnc.setToolTip(
+            "vncviewer 192.168.1.102\n"
+            "Shows the teach pendant screen. Only available when simulation=false."
+        )
+        full_control_init_layout.addWidget(self.btn_full_control_vnc)
+
         full_control_init_layout.addStretch()
         full_control_boxes_layout.addWidget(full_control_init_box)
         self.full_control_init_box = full_control_init_box
@@ -919,7 +964,7 @@ class RobotControlUI(QMainWindow):
         full_control_mapping_layout.addWidget(QLabel("Select Position:"))
         full_control_position_layout = QHBoxLayout()
         self.full_control_position_dropdown = QComboBox()
-        self.full_control_position_dropdown.addItems(self.position_names)
+        self.full_control_position_dropdown.addItems(self.full_control_position_names)
         full_control_position_layout.addWidget(self.full_control_position_dropdown)
 
         btn_full_control_send_position = QPushButton("Send Position")
@@ -933,6 +978,11 @@ class RobotControlUI(QMainWindow):
         self.btn_full_control_reset_planner.clicked.connect(self.reset_planner)
         self.btn_full_control_reset_planner.setToolTip('ros2 topic pub --once /planner/reset std_msgs/msg/Bool "{data: true}"')
         full_control_mapping_layout.addWidget(self.btn_full_control_reset_planner)
+
+        self.btn_full_control_reset_octomap = QPushButton("Reset Octomap")
+        self.btn_full_control_reset_octomap.clicked.connect(self.reset_octomap)
+        self.btn_full_control_reset_octomap.setToolTip('ros2 service call /octomap_server/reset std_srvs/srv/Empty "{}"')
+        full_control_mapping_layout.addWidget(self.btn_full_control_reset_octomap)
 
         # Emergency stop button for Full Control tab
         full_control_mapping_layout.addWidget(QLabel(""))  # Spacer
@@ -1237,6 +1287,10 @@ class RobotControlUI(QMainWindow):
     def _update_full_control_sim_mode(self):
         """Refresh Full Control state when its simulation mode changes."""
         self._update_full_control_planner_constraints()
+        if hasattr(self, "btn_full_control_vnc"):
+            self.btn_full_control_vnc.setEnabled(
+                self.full_control_sim_mode_combo.currentText() == 'false'
+            )
 
     def _on_full_control_hybrid_changed(self):
         """Refresh dependent UI elements when Full Control hybrid_sim changes."""
@@ -1545,6 +1599,8 @@ class RobotControlUI(QMainWindow):
         hybrid_mode = self.arm_hybrid_sim_combo.currentText() if hasattr(self, "arm_hybrid_sim_combo") else 'false'
         should_disable = (sim_mode == 'true' and hybrid_mode == 'false')
         self.init_box.setEnabled(not should_disable)
+        if hasattr(self, "btn_arm_vnc"):
+            self.btn_arm_vnc.setEnabled(sim_mode == 'false')
 
     def _update_tab_states_for_arm(self):
         """Update tab states based on arm control processes"""
@@ -1566,6 +1622,10 @@ class RobotControlUI(QMainWindow):
                 rclpy.spin_once(self.node, timeout_sec=0)
         except Exception:
             pass  # Ignore errors if context is shutting down
+
+    def _on_parking_active(self, msg):
+        """Cache the controller's parking-active flag (true while parking is running)."""
+        self._parking_active = bool(msg.data)
 
     def _on_joint_states(self, msg, source_topic=None):
         """Update live joint sliders in Arm and Full Control tabs from joint states topics."""
@@ -1868,6 +1928,16 @@ class RobotControlUI(QMainWindow):
             'trajectory controller restore switch',
         )
 
+    def _freedrive_namespace_prefix(self):
+        """Namespace prefix derived from the active controller_manager (e.g. '/arm' or '')."""
+        cm = self.freedrive_controller_manager or '/controller_manager'
+        suffix = '/controller_manager'
+        return cm[:-len(suffix)] if cm.endswith(suffix) else ''
+
+    def _freedrive_enable_topic(self):
+        """Enable/keepalive topic for the freedrive controller, namespaced to its controller_manager."""
+        return f"{self._freedrive_namespace_prefix()}/freedrive_mode_controller/enable_freedrive_mode"
+
     def _start_freedrive_publisher(self, status_text):
         """Start the persistent freedrive keepalive publisher."""
         process_key = 'freedrive_enable_publisher'
@@ -1876,7 +1946,7 @@ class RobotControlUI(QMainWindow):
             'pub',
             '--rate',
             '2',
-            '/freedrive_mode_controller/enable_freedrive_mode',
+            self._freedrive_enable_topic(),
             'std_msgs/msg/Bool',
             '{data: true}',
         ]
@@ -1933,15 +2003,51 @@ class RobotControlUI(QMainWindow):
             self.btn_full_control_freedrive.setStyleSheet(style)
             self.btn_full_control_freedrive.setEnabled(True)
 
-    def _get_freedrive_controller_check_command(self):
+    def _detect_freedrive_controller_manager(self):
+        """Find the controller_manager node that hosts freedrive_mode_controller.
+
+        The arm stack can run under the /arm namespace (Full Control hybrid sim),
+        in which case its controllers live on /arm/controller_manager rather than
+        the root /controller_manager. Falls back to /controller_manager.
+        """
+        try:
+            nodes = subprocess.run(
+                ['bash', '-lc', "ros2 node list 2>/dev/null | grep -E '(^|/)controller_manager$' | sort -u"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except Exception:
+            return '/controller_manager'
+
+        candidates = [line.strip() for line in nodes.stdout.splitlines() if line.strip()]
+        for cm in candidates:
+            try:
+                result = subprocess.run(
+                    ['bash', '-lc', f"ros2 control list_controllers -c {cm} 2>/dev/null"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+            except Exception:
+                continue
+            if 'freedrive_mode_controller' in result.stdout:
+                return cm
+
+        return '/controller_manager'
+
+    def _get_freedrive_controller_check_command(self, controller_manager='/controller_manager'):
         """Return the shell command used to detect freedrive-related controllers."""
-        return "ros2 control list_controllers -c /controller_manager | grep -E 'freedrive|joint_traj'"
+        return f"ros2 control list_controllers -c {controller_manager} | grep -E 'freedrive|trajectory_controller'"
 
     def _get_controller_states(self, status_text=None):
         """Return freedrive-related controller states parsed from the direct shell command output."""
+        controller_manager = self._detect_freedrive_controller_manager()
+        self.freedrive_controller_manager = controller_manager
+        check_command = self._get_freedrive_controller_check_command(controller_manager)
         try:
             result = subprocess.run(
-                ['bash', '-lc', self._get_freedrive_controller_check_command()],
+                ['bash', '-lc', check_command],
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -1965,7 +2071,7 @@ class RobotControlUI(QMainWindow):
         controller_states = {}
 
         if status_text is not None:
-            cmd_str = self._get_freedrive_controller_check_command()
+            cmd_str = check_command
             self._append_to_text_widget(status_text, f"<b style='color: #57ab5a;'>▶ {html.escape(cmd_str)}</b>")
             stripped_output = controller_output.strip()
             if stripped_output:
@@ -2002,6 +2108,7 @@ class RobotControlUI(QMainWindow):
         if controller_states is None:
             controller_states = self._get_controller_states()
         trajectory_controller_candidates = (
+            'passthrough_trajectory_controller',
             'joint_trajectory_controller',
             'scaled_joint_trajectory_controller',
         )
@@ -2084,8 +2191,11 @@ class RobotControlUI(QMainWindow):
             [
                 'control',
                 'switch_controllers',
+                '-c',
+                self.freedrive_controller_manager,
                 '--deactivate',
                 trajectory_controller,
+                'force_mode_controller',
                 '--activate',
                 'freedrive_mode_controller',
             ],
@@ -2120,7 +2230,7 @@ class RobotControlUI(QMainWindow):
                 'topic',
                 'pub',
                 '--once',
-                '/freedrive_mode_controller/enable_freedrive_mode',
+                self._freedrive_enable_topic(),
                 'std_msgs/msg/Bool',
                 '{data: false}',
             ],
@@ -2149,10 +2259,13 @@ class RobotControlUI(QMainWindow):
             [
                 'control',
                 'switch_controllers',
+                '-c',
+                self.freedrive_controller_manager,
                 '--deactivate',
                 'freedrive_mode_controller',
                 '--activate',
                 trajectory_controller,
+                'force_mode_controller',
             ],
             status_text,
             self._on_freedrive_stop_switch_finished,
@@ -2616,7 +2729,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         }
 
     def _create_gpr_api_test_tab(self):
-        """Create the GPR API test tab UI."""
+        """Create the Sensors tab UI (GPR API test + hyperspectral camera)."""
         gpr_tab = QWidget()
         gpr_tab_layout = QVBoxLayout(gpr_tab)
 
@@ -2829,6 +2942,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         gpr_groups_layout = QGridLayout()
         gpr_groups_layout.setHorizontalSpacing(12)
         gpr_groups_layout.setVerticalSpacing(12)
+        # Two columns: the GPR panel now shares the tab width with the
+        # hyperspectral panel, so 'presets' drops to its own row.
         group_positions = [
             ('probe', 'Probe', 0, 0),
             ('line', 'Line', 0, 1),
@@ -3568,6 +3683,31 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             self._toggle_process('arduino_sensors', self.btn_arduino_sensors, 'Arduino Sensors',
                             'ros2', ['run', 'arm_control', 'arduino_sensors'])
  
+    def toggle_vnc_viewer(self, context='arm'):
+        """Toggle the VNC viewer showing the robot teach pendant screen."""
+        button = self.btn_arm_vnc if context == 'arm' else self.btn_full_control_vnc
+        self._toggle_process('vnc_viewer', button, 'Robot Screen',
+                            'vncviewer', ['192.168.1.102'])
+        process = self.process_map.get('vnc_viewer')
+        if process is not None:
+            # Keep both tabs' buttons in sync if the viewer window is closed directly
+            process.finished.connect(self._sync_vnc_buttons)
+        self._sync_vnc_buttons()
+
+    def _sync_vnc_buttons(self):
+        """Mirror the shared vnc_viewer process state on both Robot Screen buttons."""
+        running = 'vnc_viewer' in self.process_map
+        for button in (getattr(self, 'btn_arm_vnc', None),
+                       getattr(self, 'btn_full_control_vnc', None)):
+            if button is None:
+                continue
+            if running:
+                button.setText("Stop Robot Screen")
+                button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+            else:
+                button.setText("Start Robot Screen")
+                button.setStyleSheet("")
+
     def toggle_align_ee_to_wall(self):
         self._toggle_process('align_ee_to_wall', self.btn_align_ee_to_wall, 'Align EE to Wall',
                             'ros2', ['run', 'arm_control', 'align_ee_to_wall'])
@@ -4150,6 +4290,82 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             button.setText(f"Stop {name}")
             button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
  
+    def _park_chassis_before_stop(self, process_key, status_text):
+        """Call the chassis-parking service and wait for alignment before stopping the
+        base-robot bringup, so the launch shuts down with the chassis aligned to the
+        turret. This is the safe, deterministic alternative to parking on Ctrl+C: the
+        maneuver runs while the control loop is alive and nothing is tearing it down.
+
+        Best-effort: if the service is unavailable (e.g. diff controller, or the
+        controller is not up) it skips quickly and lets normal shutdown proceed.
+        """
+        # Bringups that run the base controller and should park the chassis before
+        # shutdown. Base Control tab: Launch Base Robot, Start Mapping, Start
+        # Localization. Full Control tab: Launch Full Robot, Start Mapping, Start
+        # Localization. (The full-robot base controller is also /sim_controller; if it
+        # were ever named differently, the service-list check below skips gracefully.)
+        if process_key not in (
+            'mobile_platform', 'mapping', 'localization',
+            'full_mobile_manipulator', 'full_mapping', 'full_localization',
+        ):
+            return
+
+        service = '/sim_controller/park_now'
+
+        # Fast availability check so diff-mode / no-controller stops don't block on a
+        # service call that would otherwise wait for a service that never appears.
+        try:
+            listed = subprocess.run(
+                ['ros2', 'service', 'list'],
+                capture_output=True, text=True, timeout=5)
+            if service not in (listed.stdout or ''):
+                return  # not present (e.g. diff controller) -> skip silently
+        except Exception:
+            return
+
+        self._log_append(status_text, "🅿 Parking chassis before shutdown...")
+
+        try:
+            result = subprocess.run(
+                ['ros2', 'service', 'call', service, 'std_srvs/srv/Trigger'],
+                capture_output=True, text=True, timeout=8)
+        except Exception as e:
+            self._log_append(status_text, f"⚠ Park service call failed ({e}); proceeding to shutdown.")
+            return
+        if result.returncode != 0 or 'success=True' not in (result.stdout or ''):
+            self._log_append(status_text, "⚠ Park service call did not succeed; proceeding to shutdown.")
+            return
+
+        # Wait on the controller's /sim_controller/parking_active flag: it is true while
+        # the maneuver runs and false when the chassis is aligned. We keep waiting for as
+        # long as the flag stays active (so large-angle parks, which can take ~30 s near a
+        # half turn, are never cut short), and finish the instant it goes back to false.
+        # If it never goes active within a short grace (robot already aligned, nothing to
+        # do), we proceed. A generous absolute ceiling guards against a hung controller so
+        # the UI can never block indefinitely.
+        absolute_deadline = time.time() + 120.0
+        first_active_grace = time.time() + 3.0
+        saw_active = False
+        while time.time() < absolute_deadline:
+            try:
+                if rclpy.ok():
+                    rclpy.spin_once(self.node, timeout_sec=0)
+            except Exception:
+                pass
+            QApplication.processEvents()
+            if self._parking_active:
+                saw_active = True
+            elif saw_active:
+                # active -> inactive transition: parking finished.
+                self._log_append(status_text, "✓ Chassis aligned; proceeding to shutdown.")
+                return
+            elif time.time() > first_active_grace:
+                # never went active: already aligned / nothing to park.
+                self._log_append(status_text, "✓ Chassis already aligned; proceeding to shutdown.")
+                return
+            time.sleep(0.05)
+        self._log_append(status_text, "⚠ Parking did not confirm in time; proceeding to shutdown.")
+
     def _toggle_base_process(self, process_key, button, name, program, args):
         # Decide status widget
         status_text = self.full_control_status_text if process_key.startswith('full') else self.base_status_text
@@ -4157,6 +4373,10 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         if process_key in self.process_map:
             # ===== STOP PROCESS =====
             process = self.process_map[process_key]
+
+            # Align the chassis with the turret before shutting down the base robot, so
+            # the launch stops with the robot parked. Best-effort and bounded.
+            self._park_chassis_before_stop(process_key, status_text)
 
             # Disconnect finished to avoid double cleanup
             try:
@@ -5035,13 +5255,25 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         """Reset the planner from Arm Control tab"""
         self._reset_planner_generic('reset_planner_arm', self.status_text, self.handle_output)
 
+    def reset_octomap_arm(self):
+        """Reset the octomap from Arm Control tab"""
+        self._reset_octomap_generic('reset_octomap_arm', self.status_text, self.handle_output)
+
     def reset_planner(self):
         """Reset the planner from Full Control tab"""
         self._reset_planner_generic('reset_planner_full', self.full_control_status_text, self.handle_full_control_output)
 
+    def reset_octomap(self):
+        """Reset the octomap from Full Control tab"""
+        self._reset_octomap_generic('reset_octomap_full', self.full_control_status_text, self.handle_full_control_output)
+
     def reset_planner_joint(self):
         """Reset the planner from Joint Control tab"""
         self._reset_planner_generic('reset_planner_joint', self.joint_status_text, self.handle_joint_output)
+
+    def reset_octomap_joint(self):
+        """Reset the octomap from Joint Control tab"""
+        self._reset_octomap_generic('reset_octomap_joint', self.joint_status_text, self.handle_joint_output)
     
     def _reset_planner_generic(self, process_key, status_text_widget, output_handler):
         """Generic method to reset the planner by publishing to /planner/reset topic"""
@@ -5085,6 +5317,54 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 self._append_to_text_widget(
                     status_text_widget,
                     f"<span style='color: #f85149;'>[Reset Planner]</span> Command failed with exit code {exit_code}."
+                )
+            del self.process_map[process_key]
+
+    def _reset_octomap_generic(self, process_key, status_text_widget, output_handler):
+        """Generic method to reset octomap_server by calling its reset service"""
+        if process_key in self.process_map:
+            existing_process = self.process_map[process_key]
+            if existing_process.state() == QProcess.Running:
+                existing_process.kill()
+                existing_process.waitForFinished(1000)
+            del self.process_map[process_key]
+
+        process = QProcess()
+        command = 'ros2'
+        args = ['service', 'call', '/octomap_server/reset', 'std_srvs/srv/Empty', '{}']
+
+        cmd_str = command + ' ' + ' '.join(args)
+        self._log_append(status_text_widget, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
+        process.readyReadStandardOutput.connect(lambda: output_handler(process))
+        process.readyReadStandardError.connect(lambda: output_handler(process))
+        process.finished.connect(lambda: self._cleanup_reset_octomap(process_key, status_text_widget))
+
+        process.start(command, args)
+        self.process_map[process_key] = process
+
+    def _cleanup_reset_octomap(self, process_key, status_text_widget):
+        """Clean up reset octomap process"""
+        if process_key in self.process_map:
+            process = self.process_map[process_key]
+            exit_code = process.exitCode()
+            if exit_code == 0:
+                self._append_to_text_widget(
+                    status_text_widget,
+                    f"<span style='color: #3fb950;'>[Reset Octomap]</span> Successfully reset octomap."
+                )
+            else:
+                self._append_to_text_widget(
+                    status_text_widget,
+                    (
+                        f"<span style='color: #d29922;'>[Reset Octomap]</span> "
+                        f"Reset command exited with code {exit_code}. "
+                        "If octomap_server restarted while handling the reset, wait a few seconds for the respawned node to come back up and then retry if needed."
+                    )
+                )
+                self._append_to_text_widget(
+                    status_text_widget,
+                    "<span style='color: #8b949e;'>[Reset Octomap]</span> Automatic respawn is enabled for octomap_server in the launch configuration."
                 )
             del self.process_map[process_key]
 
@@ -5682,8 +5962,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         controls_row.addWidget(QLabel("Initial State:"))
         self.fsm_state_combo = QComboBox()
         self.fsm_state_combo.addItems([
-            "ScanWall", "CreateMap", "ExhaustiveScan",
-            "Armfolding", "ArmUnfolding", "NavigateToPose", "BasePlacement",
+            "ScanWall", "CreateMap", "ObjectID", "GeometryReconstruction", "ScanFloor",
+            "Armfolding", "ArmUnfolding", "NavigateToPose",
         ])
         controls_row.addWidget(self.fsm_state_combo)
 
@@ -5813,6 +6093,145 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         proc_node.start('ros2', node_args)
         self.fsm_node_process = proc_node
 
+    def _rtabmap_slam_pids(self):
+        """PIDs of the running rtabmap SLAM node(s).
+
+        Matches on ``rtabmap_slam`` in the command line -- the SLAM node executes
+        from ``.../rtabmap_slam/lib/rtabmap_slam/rtabmap`` -- the same pattern the
+        FSM's ``graceful_rtabmap_save`` uses. The odometry/sync/viz helpers live in
+        ``rtabmap_odom``/``rtabmap_sync``/``rtabmap_viz`` and are intentionally not
+        matched.
+        """
+        try:
+            r = subprocess.run(['pgrep', '-f', 'rtabmap_slam'],
+                               capture_output=True, text=True, timeout=2)
+            return {int(x) for x in r.stdout.split()}
+        except Exception:
+            return set()
+
+    @staticmethod
+    def _pid_alive(pid):
+        """True while `pid` exists and has not become a zombie."""
+        try:
+            with open(f'/proc/{pid}/stat', 'rb') as f:
+                # The comm field is parenthesised and may contain spaces, so split
+                # after the last ')': the next field is the process state.
+                fields = f.read().decode(errors='replace').rsplit(')', 1)[-1].split()
+        except Exception:
+            return False
+        return bool(fields) and fields[0] != 'Z'
+
+    @staticmethod
+    def _control_node_pids(pids):
+        """Subset of `pids` that are ros2_control_node processes.
+
+        The column hardware interface retracts the column from its
+        ``on_deactivate`` callback, which only runs when ros2_control_node shuts
+        down gracefully -- so its pid is what tells us whether the retraction has
+        finished.
+        """
+        matches = set()
+        for pid in pids:
+            try:
+                with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                    cmdline = f.read().decode(errors='replace')
+            except Exception:
+                continue
+            if 'ros2_control_node' in cmdline:
+                matches.add(pid)
+        return matches
+
+    def _wait_for_column_retraction(self, control_pids, timeout=30.0):
+        """Wait (UI-responsive) for the ros2_control node(s) to exit.
+
+        ``ColumnHardwareInterface::on_deactivate`` drives the column back to 0 and
+        keeps pumping the Modbus heartbeat -- the drive stops the instant the
+        heartbeat does -- for as long as the retraction takes (up to ~15 s). That
+        runs inside ros2_control_node's own shutdown, so SIGKILLing the process
+        tree before it has exited leaves the column stuck wherever it was. Waiting
+        for the process to disappear is our proof the retraction finished.
+        """
+        if not control_pids:
+            return
+        self._fsm_append_log(
+            "<span style='color: #58a6ff;'>⬇ Retracting column (waiting for ros2_control to shut down)...</span>",
+            "⬇ Retracting column (waiting for ros2_control to shut down)...",
+        )
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not any(self._pid_alive(pid) for pid in control_pids):
+                self._fsm_append_log(
+                    "<span style='color: #57ab5a;'>✓ ros2_control shut down cleanly (column retracted).</span>",
+                    "✓ ros2_control shut down cleanly (column retracted).",
+                )
+                return
+            QApplication.processEvents()
+            try:
+                if rclpy.ok():
+                    rclpy.spin_once(self.node, timeout_sec=0)
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+        self._fsm_append_log(
+            f"<span style='color: #e3b341;'>⚠ ros2_control still running after {timeout:.0f}s; "
+            f"proceeding with shutdown (the column may stay extended).</span>",
+            f"⚠ ros2_control still running after {timeout:.0f}s; proceeding with shutdown.",
+        )
+
+    def _wait_for_rtabmap_db_save(self, timeout=180.0):
+        """SIGINT the rtabmap SLAM node and wait (UI-responsive) for it to exit.
+
+        rtabmap only writes its visual-word dictionary + optimized graph to
+        rtabmap.db on a clean SIGINT shutdown; SIGKILLing it mid-save leaves a
+        database with 0 words (``VWDictionary ... dict size=0`` on reload). On a
+        large (>1 GB) map that flush can take well over a minute -- far longer than
+        the 3 s grace in ``_stop_fsm`` -- so we block here until the SLAM process
+        actually disappears (our proof the save finished) before the caller hard-
+        kills the rest of the tree. Pumps the Qt event loop so the UI stays alive.
+
+        Returns the SLAM pids seen at entry, so the caller can exclude them from
+        its SIGKILL sweep and never tear the node down before the save completes.
+        """
+        initial = self._rtabmap_slam_pids()
+        if not initial:
+            return set()
+
+        # Belt-and-suspenders: make sure a SIGINT reaches the SLAM node even if the
+        # FSM's own signal handler missed it (e.g. it was mid-transition).
+        for pid in initial:
+            try:
+                os.kill(pid, signal.SIGINT)
+            except Exception:
+                pass
+
+        self._fsm_append_log(
+            "<span style='color: #58a6ff;'>💾 Saving mapping database (waiting for rtabmap to flush)...</span>",
+            "💾 Saving mapping database (waiting for rtabmap to flush)...",
+        )
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self._rtabmap_slam_pids():
+                self._fsm_append_log(
+                    "<span style='color: #57ab5a;'>✓ rtabmap database saved.</span>",
+                    "✓ rtabmap database saved.",
+                )
+                return initial
+            QApplication.processEvents()
+            try:
+                if rclpy.ok():
+                    rclpy.spin_once(self.node, timeout_sec=0)
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+        self._fsm_append_log(
+            f"<span style='color: #e3b341;'>⚠ rtabmap still saving after {timeout:.0f}s; "
+            f"proceeding with shutdown (database may be incomplete).</span>",
+            f"⚠ rtabmap still saving after {timeout:.0f}s; proceeding with shutdown.",
+        )
+        return initial
+
     def _stop_fsm(self):
         """Stop both FSM processes and their entire spawned process trees."""
 
@@ -5850,18 +6269,52 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             if pid:
                 all_descendants.extend(_collect_descendants(pid))
 
-        # ── Phase 2: graceful SIGINT to parent processes.
-        for pid in proc_pids:
+        # ── Phase 2: graceful SIGINT so the FSM runs its own clean teardown (which
+        # SIGINTs rtabmap to save the map database) and every node it launched gets
+        # to shut down properly.
+        #
+        # The whole tree must be signalled, not just the parents: the FSM node
+        # process is started as `ros2 run task_planner_fsm fsm_node`, and `ros2 run`
+        # does NOT forward signals to the executable it spawned -- it assumes the
+        # signal was delivered to the whole process group, which is only true for a
+        # Ctrl+C in a terminal (see ros2run/api/__init__.py). Signalling only the
+        # wrapper therefore left the real fsm_node untouched, so its stop_all()
+        # teardown never ran and the move_robot launch it started (ros2_control, and
+        # with it the column) was hard-killed in Phase 3 instead of shutting down --
+        # which is why the column stayed extended after "Stop FSM" while "Stop Full
+        # Robot" retracted it. Signalling the descendants as well also reaches
+        # ros2_control_node directly, so the column starts retracting immediately
+        # even if the FSM's own handler is busy (same belt-and-suspenders reasoning
+        # as the rtabmap SIGINT below).
+        control_pids = self._control_node_pids(all_descendants)
+        for pid in proc_pids + all_descendants:
             if pid:
                 try:
                     os.kill(pid, signal.SIGINT)
                 except Exception:
                     pass
+
+        # ── Phase 2b: let rtabmap finish writing rtabmap.db BEFORE the Phase 3
+        # SIGKILL below. Without this the SLAM node is hard-killed mid-save on a
+        # large map, leaving a 0-word database ("VWDictionary dict size=0"). The
+        # returned pids are excluded from the SIGKILL sweep so we never tear the
+        # SLAM node down before its save completes.
+        rtabmap_pids = self._wait_for_rtabmap_db_save()
+
+        # ── Phase 2c: let the column finish retracting before the SIGKILL sweep.
+        # ros2_control_node retracts the column inside its shutdown (see
+        # _wait_for_column_retraction); killing it first freezes the column
+        # mid-travel and leaves it extended.
+        self._wait_for_column_retraction(control_pids)
+
         for proc in procs:
             proc.waitForFinished(3000)
 
-        # ── Phase 3: SIGKILL every collected descendant.
+        # ── Phase 3: SIGKILL every collected descendant, except the rtabmap SLAM
+        # node (it has already exited after saving; never hard-killed here).
         for dpid in all_descendants:
+            if dpid in rtabmap_pids:
+                continue
             try:
                 os.kill(dpid, signal.SIGKILL)
             except Exception:
