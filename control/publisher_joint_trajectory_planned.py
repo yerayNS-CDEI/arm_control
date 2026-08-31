@@ -60,6 +60,18 @@ class PublisherJointTrajectoryActionClient(Node):
         self.trajectory_sub = self.create_subscription(JointTrajectory, "planned_trajectory", self.trajectory_callback, 10)
         self.status_pub = self.create_publisher(Bool, "execution_status", 10)
         self.emergency_sub = self.create_subscription(Bool, "emergency_stop", self.emergency_callback, qos)
+        # Hand the arm over to another node without stopping this one.
+        #
+        # While held, this bridge cancels whatever it is running and dispatches
+        # nothing. wall_sweep_executor drives the trajectory controller directly
+        # during a wall sweep, and two publishers on one controller is not
+        # survivable: each new goal preempts the other's, so the sweep comes back
+        # CANCELED. Killing wall_parallel_controller is not enough -- its last
+        # trajectory is still sitting here, and this node re-dispatches it the
+        # moment a slot opens.
+        #
+        # Transient-local so a late-starting executor's hold is not missed.
+        self.hold_sub = self.create_subscription(Bool, "trajectory_bridge/hold", self.hold_callback, qos)
 
         self.emergency_srv = self.create_service(Trigger, "emergency_stop", self.handle_emergency_service)
 
@@ -73,6 +85,7 @@ class PublisherJointTrajectoryActionClient(Node):
         self.execution_complete = True
         self.current_goal_handle = None
         self.prev_status = True
+        self.held = False
 
         self.get_logger().info("Waiting for action server...")
         self._action_client.wait_for_server()
@@ -96,12 +109,40 @@ class PublisherJointTrajectoryActionClient(Node):
             self.check_starting_point = False       # to just check once at the start
 
     def trajectory_callback(self, msg):
+        if self.held:
+            # Dropped, not queued: another node owns the arm, and a trajectory
+            # planned against a pose it has since moved away from is worse than no
+            # trajectory at all.
+            return
         if not self.starting_point_ok:
             self.get_logger().warn("Received trajectory but robot not in valid starting configuration.")
             return
         self.planned_trajectory = msg
         self.trajectory_received = True
         self.get_logger().info("Trajectory received and stored.")
+
+    def hold_callback(self, msg):
+        """Stand down (or resume) so another node can command the arm."""
+        held = bool(msg.data)
+        if held == self.held:
+            return
+        self.held = held
+        if not held:
+            self.get_logger().info("Trajectory bridge released; dispatching again.")
+            return
+
+        self.get_logger().info(
+            "Trajectory bridge held: another node is driving the arm. Cancelling "
+            "any active goal and dropping the pending trajectory."
+        )
+        # Drop the pending trajectory too. Without this, releasing the hold would
+        # fire whatever wall_parallel_controller happened to publish last -- a
+        # target from before the sweep, now stale by a whole partition.
+        self.trajectory_received = False
+        self.planned_trajectory = None
+        if self.current_goal_handle:
+            self.current_goal_handle.cancel_goal_async()
+            self.execution_complete = True
 
     def emergency_callback(self, msg):
         if msg.data and self.current_goal_handle:
@@ -137,6 +178,8 @@ class PublisherJointTrajectoryActionClient(Node):
         # fresh trajectory many times per second; trajectory_callback keeps only the
         # latest, so when a slot opens we always send the freshest target instead of
         # spamming the controller with goals that just get rejected.
+        if self.held:
+            return
         if self.trajectory_received and self.starting_point_ok and self.execution_complete:
             self.send_trajectory_goal()
             self.trajectory_received = False
