@@ -456,7 +456,7 @@ class WallSweepExecutor(Node):
         for warning in sweep.warnings:
             self.get_logger().warn(f"Sweep margin: {warning}")
 
-        # The contact watchdog belongs to the sweep alone. The plunge and retract
+        # The contact watchdog belongs to the sweep alone. The traverse and retract
         # deliberately cross the standoff band, so "the plate is far from the wall"
         # is the expected state there, not a fault.
         press = bool(self.get_parameter("watchdog_enabled").value) and request.press
@@ -641,9 +641,10 @@ class WallSweepExecutor(Node):
         plus the sweep itself, which is what progress and feedback are measured
         against.
 
-            plunge   close in from the approach standoff onto the sweep plane
-            sweep    cross the partition, plate held off the wall
-            retract  back the plate off before the base moves again
+            traverse  cross to the partition start, closing the approach standoff
+                      onto the sweep plane on the way (one diagonal line)
+            sweep     cross the partition, plate held off the wall
+            retract   back the plate off before the base moves again
 
         Raises ``SweepPlanError`` (a sweep that must not run) or ``RuntimeError``
         (missing state: no joints, no TF, no distance reading).
@@ -761,19 +762,30 @@ class WallSweepExecutor(Node):
 
         # The FSM's approach leaves the plate centred on the partition; the sweep
         # has to begin at one END of it, so there is a real lateral move first.
-        # WHERE that move happens depends on who owns the wall-normal axis:
         #
-        # - **Force Mode pressing**: stay in the contact plane. The GPR is a WHEEL
-        #   -- it rolls along the wall, which is what it is for -- and commanding a
-        #   0.20 m retreat here would fight the press directly and trip its
-        #   deviation limits. So: no retreat, no plunge, just roll to the start.
-        # - **No press**: nothing holds the plate off the wall, so the executor
-        #   backs it off for the lateral move and plunges back in at the start.
+        # It is ONE straight Cartesian leg, from wherever the approach left the
+        # plate to the partition start, and it is safe to run it as a diagonal
+        # because the approach plane is always the FURTHER of the two: the FSM
+        # extends to `sweep_scan_standoff_m + sweep_approach_retract_m` and this
+        # leg ends at `sweep_scan_standoff_m`. Wall distance therefore decreases
+        # MONOTONICALLY along it and never drops below the sweep standoff, so the
+        # plate cannot scrub the wall on the way across. Splitting it into a
+        # lateral traverse plus a wall-normal plunge cost a full stop-settle-
+        # accelerate cycle between two legs that were already collision-free.
+        #
+        # Under Force Mode the leg is purely lateral anyway: `retract` is 0, so
+        # the start point IS the contact plane. That is deliberate -- the GPR is a
+        # WHEEL, it rolls along the wall, and commanding a 0.20 m retreat here
+        # would fight the press directly and trip its deviation limits.
         retract = 0.0 if request.press else float(
             self.get_parameter("approach_retract_m").value
         )
-        p_safe_start = p_scan_start - n_in * retract
-        traverse_distance = float(np.linalg.norm(p_safe_start - p_current))
+        traverse_distance = float(np.linalg.norm(p_scan_start - p_current))
+        # Reported separately because it is the component the FSM's approach could
+        # not place: the wall-normal part is by construction just `retract`.
+        lateral_distance = float(np.linalg.norm(
+            (p_scan_start - p_current) - n_in * float(np.dot(p_scan_start - p_current, n_in))
+        ))
         max_traverse = float(self.get_parameter("max_traverse_m").value)
         if traverse_distance > max_traverse:
             raise SweepPlanError(
@@ -786,9 +798,11 @@ class WallSweepExecutor(Node):
             )
 
         self.get_logger().info(
-            f"Traverse {traverse_distance:.3f} m to the partition start, "
+            f"Traverse {traverse_distance:.3f} m to the partition start "
+            f"({lateral_distance:.3f} m of it lateral), "
             + ("in the contact plane (Force Mode holds the wheel on the wall)."
-               if request.press else f"{retract:.2f} m clear of the sweep plane.")
+               if request.press
+               else f"closing the {retract:.2f} m approach margin on the way in.")
         )
 
         legs = []
@@ -803,17 +817,16 @@ class WallSweepExecutor(Node):
             legs.append((name, leg))
             q_seed = leg.q[-1]
 
-        # 1. Walk sideways to the partition start, held clear of the wall.
-        add("traverse", p_current, p_safe_start, approach_speed)
-        # 2. Close the remaining standoff: a pure wall-normal move.
-        add("plunge", p_safe_start, p_scan_start, approach_speed)
+        # 1. Cross to the partition start and close the approach margin in one
+        #    diagonal leg (see above: wall distance only ever decreases along it).
+        add("traverse", p_current, p_scan_start, approach_speed)
 
-        # 3. The scan itself -- always planned, even if it is the only leg.
+        # 2. The scan itself -- always planned, even if it is the only leg.
         sweep = plan_sweep(p_scan_start, p_scan_end, rotation, q_seed, speed=speed, **limits)
         legs.append(("sweep", sweep))
         q_seed = sweep.q[-1]
 
-        # 4. Back off by the margin the approach came in at, so the plate is clear
+        # 3. Back off by the margin the approach came in at, so the plate is clear
         #    of the wall before the base moves to the next partition.
         #
         #    Not under Force Mode: it is still pressing when the executor finishes
