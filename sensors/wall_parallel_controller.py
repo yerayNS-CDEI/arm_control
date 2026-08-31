@@ -27,6 +27,14 @@ from scipy.spatial.transform import Rotation as R
 import tf2_ros
 
 from planner.planner_lib.closed_form_algorithm import closed_form_algorithm
+from sensors.wall_alignment_estimator import (
+    SENSOR_NAMES,
+    SENSOR_XY,
+    WallAlignmentEstimator,
+    correction_angles,
+    usable_mask,
+    valid_mask,
+)
 
 
 class WallParallelController(Node):
@@ -89,32 +97,19 @@ class WallParallelController(Node):
         self.tool0_frame = self.get_parameter('tool0_frame').value
         self.base_frame = self.get_parameter('base_frame').value
 
-        # --- Sensor geometry (plate frame, metres) and noise model ----------
-        # index -> (x, y) in plate frame. Layout matches both sim (sensor_plate.urdf.xacro
-        # D/E/F poses) and the real plate (vl6180 mounting): S1 top-left, S2 top-right.
-        self.sensor_names = ['C/U1', 'A/U2', 'B/U3', 'S1', 'S2', 'S3']
-        ultrasonic = [
-            [0.00,  0.172],   # 0: C ultrasonic (top-mid)
-            [-0.155, -0.17],  # 1: A ultrasonic (bottom-left)
-            [0.155,  -0.17],  # 2: B ultrasonic (bottom-right)
-        ]
-        tof = [
-            [-0.152, 0.17],   # 3: S1 (top-left)
-            [0.152,  0.17],   # 4: S2 (top-right)
-            [0.00,  -0.172],  # 5: S3 (bottom-mid)
-            ]
-        self.pos = np.array(ultrasonic + tof)
-        # per-sensor stddev (m): ToF is far more precise than ultrasonic
-        self.sigma = np.array([0.010, 0.010, 0.010, 0.010, 0.010, 0.010])
-        # validity window (m): drop saturated / invalid readings
-        self.valid_lo = np.array([0.02, 0.02, 0.02, 0.011, 0.011, 0.011])
-        self.valid_hi = np.array([3.90, 3.90, 3.90, 0.258, 0.258, 0.258])
+        # --- Sensor geometry, noise model and the plane fit -----------------
+        # All of it lives in sensors/wall_alignment_estimator, because
+        # wall_sweep_executor needs the identical numbers WITHOUT commanding the
+        # arm (ARM_SWEEP_PLAN §4.2). Two copies of this geometry would drift, and
+        # the two nodes would then disagree about where the wall is.
+        self.estimator = WallAlignmentEstimator(
+            ema_alpha=self.ema_alpha, huber_k=self.huber_k
+        )
 
         # --- State ----------------------------------------------------------
         self.distances = None
         self.current_joint_state = None
         self.joint_indices = None
-        self.nw_filt = np.array([0.0, 0.0, 1.0])   # filtered wall normal (plate frame)
         self.T_tool0_dhend = None                  # static tool0 -> IK DH end-frame (calibrated)
 
         self.tf_buffer = tf2_ros.Buffer()
@@ -157,45 +152,6 @@ class WallParallelController(Node):
                     return
             self.joint_indices = idx
         self.current_joint_state = msg
-
-    # --- Estimation ---------------------------------------------------------
-    def fit_wall_normal(self, d):
-        """Weighted robust plane fit d = a*x + b*y + c over valid sensors.
-        Returns (nw, mean_distance, n_valid) or (None, None, n_valid)."""
-        valid = np.isfinite(d) & (d > self.valid_lo) & (d < self.valid_hi)
-        n_valid = int(valid.sum())
-        if n_valid < 3:
-            return None, None, n_valid
-
-        x = self.pos[valid, 0]
-        y = self.pos[valid, 1]
-        dv = d[valid]
-        A = np.column_stack((x, y, np.ones_like(x)))
-
-        # base weights from sensor precision (inverse variance)
-        w_base = 1.0 / (self.sigma[valid] ** 2)
-        w = w_base.copy()
-
-        theta = None
-        for _ in range(3):  # IRLS for robustness to outliers
-            W = np.diag(w)
-            try:
-                theta = np.linalg.solve(A.T @ W @ A, A.T @ W @ dv)
-            except np.linalg.LinAlgError:
-                return None, None, n_valid
-            res = dv - A @ theta
-            # robust scale via MAD (fall back to std)
-            mad = np.median(np.abs(res - np.median(res)))
-            scale = 1.4826 * mad if mad > 1e-6 else (np.std(res) + 1e-6)
-            t = np.abs(res) / (self.huber_k * scale)
-            huber = np.where(t <= 1.0, 1.0, 1.0 / np.maximum(t, 1e-9))
-            w = w_base * huber
-
-        a, b, c = theta
-        nw = np.array([-a, -b, 1.0])
-        nw /= np.linalg.norm(nw)
-        mean_d = float(np.mean(dv))
-        return nw, mean_d, n_valid
 
     # UR10e DH parameters (must match planner_lib.closed_form_algorithm)
     _DH_D = (0.1807, 0.0, 0.0, 0.17415, 0.11985, 0.11655)
@@ -278,36 +234,39 @@ class WallParallelController(Node):
         # closest -> confirms the layout is correct (the near corner's sensor
         # must be the one whose (x,y) is on that side).
         d = self.distances
-        valid = np.isfinite(d) & (d > self.valid_lo) & (d < self.valid_hi)
+        # (x) = outside the sensor's own validity window.
+        # (p) = in range, but not on the same plane as the others, so the fit
+        #       excluded it -- e.g. an ultrasonic seeing past the edge of the
+        #       wall. Distinguished because the two mean different things on the
+        #       bench: (x) is a sensor problem, (p) is a geometry problem.
+        in_window = valid_mask(d)
+        used = usable_mask(d, max_residual=self.estimator.max_residual)
         table = "  ".join(
-            f"{self.sensor_names[i]}@({self.pos[i,0]:+.2f},{self.pos[i,1]:+.2f})="
-            f"{d[i]*100:5.1f}cm{'' if valid[i] else '(x)'}"
+            f"{SENSOR_NAMES[i]}@({SENSOR_XY[i,0]:+.2f},{SENSOR_XY[i,1]:+.2f})="
+            f"{d[i]*100:5.1f}cm"
+            f"{'' if used[i] else ('(x)' if not in_window[i] else '(p)')}"
             for i in range(6))
         self.get_logger().info(table, throttle_duration_sec=1.0)
 
-        nw, mean_d, n_valid = self.fit_wall_normal(self.distances)
-        if nw is None:
-            self.get_logger().warn(f"Too few valid sensors ({n_valid}/6) for plane fit",
-                                   throttle_duration_sec=2.0)
+        # Shared estimator: plane fit + EMA on the fitted normal (not on raw
+        # ranges -- filtering ranges individually smears the plane when only some
+        # sensors are noisy).
+        est = self.estimator.update(d)
+        if est is None:
+            self.get_logger().warn(
+                f"No usable plane fit ({int(in_window.sum())}/6 in range, "
+                f"{int(used.sum())} on a common plane) — holding orientation.",
+                throttle_duration_sec=2.0)
             return
-
-        # EMA low-pass on the wall normal (filter the fit, not raw ranges)
-        self.nw_filt = self.ema_alpha * nw + (1.0 - self.ema_alpha) * self.nw_filt
-        self.nw_filt /= np.linalg.norm(self.nw_filt)
-        nwf = self.nw_filt
-
-        tilt = float(np.arccos(np.clip(nwf[2], -1.0, 1.0)))  # angle from parallel
+        nwf, mean_d, n_valid, tilt = est.normal, est.distance, est.n_valid, est.tilt
 
         if tilt <= self.deadband:
             # Parallel enough: hold orientation, don't chase noise (anti-shake).
             goal_rot = curr_rot
         else:
             # Pitch/yaw error to null the wall normal, in EE frame.
-            gamma = -np.arctan2(nwf[1], nwf[2])
-            beta = np.arctan2(nwf[0], nwf[2])
             # Low gain + per-cycle slew limit -> smooth, non-oscillatory.
-            beta = np.clip(self.kp * beta, -self.max_step, self.max_step)
-            gamma = np.clip(self.kp * gamma, -self.max_step, self.max_step)
+            beta, gamma = correction_angles(nwf, kp=self.kp, max_step=self.max_step)
 
             inc = R.from_euler('ZYX', [0.0, beta, gamma], degrees=False)
             goal_rot = curr_rot * inc
