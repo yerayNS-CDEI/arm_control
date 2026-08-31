@@ -1,0 +1,54 @@
+# Sweep the sensor plate across one wall partition with the ARM, base parked.
+#
+# ARM_SWEEP_PLAN §7.B. The base-driven sweep it replaces could not hold the plate
+# on the wall: force mode's compliant axis cannot keep up with even the slowest
+# Nav2 velocity, and the global planner arcs the path away from walls. Here the
+# base does not move at all -- `arm_base` is static for the whole goal, which is
+# what makes solving the whole sweep in that frame safe.
+
+# --- Goal ---
+# Partition endpoints. The authoritative sweep direction is normalize(end - start);
+# the plate-derived direction is only ever a sanity check (§4.2).
+geometry_msgs/Point start
+geometry_msgs/Point end
+# Which partition this is, for the diagnostics identity only -- the executor's
+# behaviour does not depend on it.
+int32 partition_index
+int32 partition_count
+# Frame the endpoints are expressed in. Transformed into the arm's planning frame
+# once, at goal acceptance.
+string frame_id
+# Commanded Cartesian speed along the wall, m/s. <= 0 uses the node's
+# sweep_speed_mps parameter. Waypoint times are derived as t_i = s_i / speed, so
+# this is the single control over how fast the plate crosses the wall.
+float64 speed
+# True when Force Mode is pressing the plate against the wall, so the contact
+# watchdog knows whether losing contact is a fault or the expected standoff case
+# (Gazebo has no force mode: the sweep runs contact-free at the plate offset).
+bool press
+---
+# --- Result ---
+bool success
+# Machine-readable failure reason, matching SweepPlanError.reason where the
+# failure came from trajectory generation: ik_unreachable, branch_discontinuity,
+# joint_velocity, near_singular, interpolation_error, seed_not_at_start, ...
+# plus the execution-side ones: contact_lost, controller_failed, cancelled.
+string reason
+string detail
+# How far the plate actually travelled along the partition tangent, and how long
+# it took -- the two numbers that say whether the sweep ran at the speed asked for.
+float64 swept_length
+float64 duration
+---
+# --- Feedback ---
+# "lead_in" while the arm travels from where it was parked (the partition CENTRE,
+# where the base stops) to the partition start; "sweep" once it is actually
+# crossing the wall. The FSM starts the GPR line on that transition -- starting it
+# at goal acceptance would record the lead-in travel as scan data.
+string phase
+float64 progress             # 0..1 along the partition
+float64 lateral_speed        # measured wall-tangent TCP speed, m/s
+float64 wall_distance        # mean plate-to-wall distance from the six sensors, m
+float64 lateral_error        # TCP deviation along the tangent, m
+float64 normal_error         # TCP deviation along the wall normal, m
+int32 replans                # orientation-correction replans so far (§4.2)
