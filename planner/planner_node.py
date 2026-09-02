@@ -3997,7 +3997,7 @@ class PlannerNode(Node):
         # Maximum allowed angular change per joint between consecutive trajectory steps.
         # UR10e joint limits are [-2π, 2π]; a step larger than π/2 (90°) is considered
         # a dangerous jump and the trajectory is aborted.
-        JUMP_THRESHOLD = 2 * np.pi  # radians
+        JUMP_THRESHOLD = np.pi/2  # radians
         jump_detected = False
         for step_i in range(1, len(all_joint_values_print)):
             delta = np.abs(np.array(all_joint_values_print[step_i], dtype=float)
