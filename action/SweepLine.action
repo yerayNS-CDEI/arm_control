@@ -26,6 +26,17 @@ float64 speed
 # watchdog knows whether losing contact is a fault or the expected standoff case
 # (Gazebo has no force mode: the sweep runs contact-free at the plate offset).
 bool press
+# Positioning-only goal: run the LEAD-IN and stop, without sweeping.
+#
+# The FSM's arm approach can only move the plate along the wall normal (the
+# partition centre sits on the base centreline, where the arm planner's column
+# obstacle is), so the lateral move to the partition start belongs to this node.
+# Doing it as its own goal is what lets the FSM press the plate against the wall
+# at the partition START rather than at its centre: force mode is started between
+# this goal and the sweep goal, so the GPR wheel is never dragged sideways across
+# the wall under load. The sweep goal that follows re-plans from the new pose and
+# skips its own lead-in, which is by then shorter than MIN_LEAD_IN_M.
+bool lead_in_only
 ---
 # --- Result ---
 bool success

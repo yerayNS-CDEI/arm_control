@@ -25,10 +25,17 @@ exists to produce (§3.2). It also lets only one publisher drive the controller,
 and ``wall_parallel_controller`` is on that topic (§3.3).
 
 **The lead-in is a separate trajectory.** The base parks at the partition
-*centre*, so after ``press_prepare`` the plate is in the middle of the partition,
-not at its start. Sweeping without a lead-in would fling the plate sideways
-across the wall to reach the start point; ``plan_sweep`` refuses to plan that
-(``seed_not_at_start``).
+*centre*, so after the FSM's arm approach the plate is in the middle of the
+partition, not at its start. Sweeping without a lead-in would fling the plate
+sideways across the wall to reach the start point; ``plan_sweep`` refuses to plan
+that (``seed_not_at_start``).
+
+**The lead-in normally runs as its own goal** (``lead_in_only``), before Force
+Mode is started. The press then begins at the partition START, and the sweep goal
+that follows finds the plate already there and skips its own lead-in. Running the
+traverse inside the sweep goal instead means crossing the wall with the GPR wheel
+already pressed -- which is what this split exists to avoid -- and remains the
+behaviour only when a caller sends the sweep goal without a preceding lead-in.
 
 Controller target is a parameter, so the same node drives
 ``joint_trajectory_controller`` in Gazebo and
@@ -429,7 +436,12 @@ class WallSweepExecutor(Node):
         self._tilt_armed = True
         self._last_replan = 0.0
         self._alignment.reset()
-        self._open_csv(request)
+        # One diagnostics CSV per SWEEP. A lead-in goal records no wall data, so
+        # opening one for it would leave an empty second file beside the real one.
+        if request.lead_in_only:
+            self._close_csv()
+        else:
+            self._open_csv(request)
         self._goal_started = self._now()
         started = time.time()
 
@@ -455,6 +467,15 @@ class WallSweepExecutor(Node):
         )
         for warning in sweep.warnings:
             self.get_logger().warn(f"Sweep margin: {warning}")
+
+        # Positioning-only goal: cross to the partition start and stop there, so
+        # the FSM can start Force Mode with the plate already at the point the
+        # sweep begins from. The sweep leg is still PLANNED above -- validating it
+        # before anything presses against the wall is most of the value of asking
+        # for the lead-in separately, since an unsweepable partition is then
+        # rejected while the plate is still at its standoff.
+        if request.lead_in_only:
+            return self._run_lead_in(goal_handle, legs, sweep, started)
 
         # The contact watchdog belongs to the sweep alone. The traverse and retract
         # deliberately cross the standoff band, so "the plate is far from the wall"
@@ -498,6 +519,33 @@ class WallSweepExecutor(Node):
                 return self._finish(goal_handle, False, reason, detail, swept, started)
 
         return self._finish(goal_handle, True, "", "", sweep.length, started)
+
+    def _run_lead_in(self, goal_handle, legs, sweep, started):
+        """Run the traverse leg alone and report success (``lead_in_only``).
+
+        No contact watchdog: nothing is pressing yet, and "the plate is far from
+        the wall" is the whole point of this leg. ``swept_length`` is 0 because no
+        wall was crossed -- the FSM counts a partition from the sweep goal only.
+        """
+        lead_in = next((plan for name, plan in legs if name == "traverse"), None)
+        if lead_in is None:
+            self.get_logger().info(
+                f"Lead-in only: the plate is already within {self.MIN_LEAD_IN_M * 1000:.0f} mm "
+                f"of the partition start; nothing to move."
+            )
+            return self._finish(goal_handle, True, "", "", 0.0, started)
+
+        self._publish_feedback(goal_handle, sweep, "traverse")
+        ok, reason, detail = self._run(
+            lead_in, goal_handle, sweep, watch=False, phase="traverse",
+            request=goal_handle.request,
+        )
+        if not ok:
+            return self._finish(goal_handle, False, reason, detail, 0.0, started)
+        self.get_logger().info(
+            "Lead-in complete: the plate is at the partition start, ready for the press."
+        )
+        return self._finish(goal_handle, True, "", "", 0.0, started)
 
     def _run_sweep_with_replans(self, plan, goal_handle, sweep, press, request):
         """Run the scan leg, regenerating the remainder whenever the plate drifts.
@@ -765,13 +813,14 @@ class WallSweepExecutor(Node):
         #
         # It is ONE straight Cartesian leg, from wherever the approach left the
         # plate to the partition start, and it is safe to run it as a diagonal
-        # because the approach plane is always the FURTHER of the two: the FSM
+        # because the approach plane is never NEARER than the sweep plane: the FSM
         # extends to `sweep_scan_standoff_m + sweep_approach_retract_m` and this
-        # leg ends at `sweep_scan_standoff_m`. Wall distance therefore decreases
-        # MONOTONICALLY along it and never drops below the sweep standoff, so the
-        # plate cannot scrub the wall on the way across. Splitting it into a
-        # lateral traverse plus a wall-normal plunge cost a full stop-settle-
-        # accelerate cycle between two legs that were already collision-free.
+        # leg ends at `sweep_scan_standoff_m`. Wall distance therefore never
+        # increases along it and never drops below the sweep standoff, so the plate
+        # cannot scrub the wall on the way across (with the retract margin at its
+        # 0 default the leg is purely lateral). Splitting it into a lateral
+        # traverse plus a wall-normal plunge cost a full stop-settle-accelerate
+        # cycle between two legs that were already collision-free.
         #
         # Under Force Mode the leg is purely lateral anyway: `retract` is 0, so
         # the start point IS the contact plane. That is deliberate -- the GPR is a
