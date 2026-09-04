@@ -4,11 +4,39 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Range
 from std_msgs.msg import Header, Float32MultiArray
+import os
 import serial
 import re
+import sys
 import threading
 from collections import deque
 from statistics import median
+
+# Stable name created by the udev rule in arm_control/udev/99-arduino-sensors.rules.
+# Do not use a raw /dev/ttyACM* index: it shifts whenever the board re-enumerates.
+DEFAULT_SERIAL_PORT = '/dev/arduino_sensors'
+BY_ID_DIR = '/dev/serial/by-id'
+
+
+class SerialPortUnavailable(RuntimeError):
+    """Raised when no Arduino serial port could be opened."""
+
+
+def list_by_id_ports():
+    """Return every /dev/serial/by-id entry, sorted (empty if the dir is missing)."""
+    try:
+        return sorted(os.path.join(BY_ID_DIR, n) for n in os.listdir(BY_ID_DIR))
+    except OSError:
+        return []
+
+
+def find_arduino_by_id():
+    """Return the first /dev/serial/by-id entry that looks like an Arduino, or None."""
+    for path in list_by_id_ports():
+        if 'Arduino' in os.path.basename(path):
+            return path
+    return None
+
 
 class MultiSensorNode(Node):
     def __init__(self):
@@ -16,9 +44,11 @@ class MultiSensorNode(Node):
 
         # Declare parameters
         self.declare_parameter('autostart', False)
+        self.declare_parameter('serial_port', DEFAULT_SERIAL_PORT)
         autostart = self.get_parameter('autostart').value
+        serial_port = self.get_parameter('serial_port').value
 
-        self.serial = serial.Serial('/dev/ttyACM0', 115200, timeout=1)
+        self.serial = self.open_serial(serial_port, 115200)
 
         # Publishers
         self.pub_s4 = self.create_publisher(Range, 'vl6180/sensor1', 10)
@@ -49,6 +79,51 @@ class MultiSensorNode(Node):
             self.get_logger().info("Autostart enabled: continuous publishing started")
         else:
             self.get_logger().info("Press 'c' to enable continuous publishing, 'p' for single publish")
+
+    def open_serial(self, port, baud_rate):
+        """Open `port`, falling back to the Arduino's by-id path if that name is absent."""
+        candidates = [port]
+        fallback = find_arduino_by_id()
+        if fallback and fallback not in candidates:
+            candidates.append(fallback)
+
+        for candidate in candidates:
+            try:
+                connection = serial.Serial(candidate, baud_rate, timeout=1)
+            except serial.SerialException as exc:
+                self.get_logger().warn(f"Could not open '{candidate}': {exc}")
+                continue
+
+            if candidate != port:
+                self.get_logger().warn(
+                    f"'{port}' is not available, using '{candidate}' instead. "
+                    "Install arm_control/udev/99-arduino-sensors.rules for a stable name.")
+            else:
+                self.get_logger().info(f"Opened serial port '{candidate}' at {baud_rate} baud.")
+            return connection
+
+        raise SerialPortUnavailable(self.serial_help_text(port))
+
+    @staticmethod
+    def serial_help_text(port):
+        """Build an actionable message listing the serial ports that do exist."""
+        available = list_by_id_ports()
+        if available:
+            listing = "\n".join(f"  {path}" for path in available)
+            detail = f"Serial devices currently present:\n{listing}"
+        else:
+            detail = ("No serial devices are present under /dev/serial/by-id at all - "
+                      "check that the Arduino is plugged in and powered.")
+        return (
+            f"Could not open the Arduino on '{port}'.\n"
+            f"{detail}\n"
+            "Fixes:\n"
+            "  - install the udev rule once:\n"
+            "      sudo cp <ws>/src/arm_control/udev/99-arduino-sensors.rules /etc/udev/rules.d/\n"
+            "      sudo udevadm control --reload-rules && sudo udevadm trigger\n"
+            "  - or point the node at a port explicitly:\n"
+            "      ros2 run arm_control arduino_sensors --ros-args -p serial_port:=/dev/ttyACM1\n"
+            "  - also confirm you are in the 'dialout' group (groups | grep dialout).")
 
     def listen_for_key(self):
         while rclpy.ok():
@@ -163,7 +238,12 @@ class MultiSensorNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = MultiSensorNode()
+    try:
+        node = MultiSensorNode()
+    except SerialPortUnavailable as exc:
+        rclpy.logging.get_logger('multi_sensor_node').error(str(exc))
+        rclpy.shutdown()
+        sys.exit(1)
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
