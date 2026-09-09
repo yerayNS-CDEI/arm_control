@@ -81,6 +81,33 @@ class PlannerNode(Node):
         self.collision_cache_round_digits = self.get_parameter('collision_cache_round_digits').get_parameter_value().integer_value
         self.declare_parameter('enable_batch_collision_checks', True)
         self.enable_batch_collision_checks = self.get_parameter('enable_batch_collision_checks').get_parameter_value().bool_value
+        # A* validates the planned waypoints, but the controller drives straight lines
+        # through joint space between them and that swept motion is what actually runs.
+        # Subdivide every segment and collision-check the intermediate configurations
+        # before the trajectory is allowed out.
+        self.declare_parameter('validate_interpolated_path', True)
+        self.validate_interpolated_path = self.get_parameter('validate_interpolated_path').get_parameter_value().bool_value
+        # Maximum per-joint change between two validated configurations.
+        self.declare_parameter('interpolation_max_joint_step', 0.15)
+        self.interpolation_max_joint_step = self.get_parameter('interpolation_max_joint_step').get_parameter_value().double_value
+        # Upper bound on subdivisions per segment. 12 covers the widest step the jump
+        # detector lets through (pi/2 rad) at the default interpolation_max_joint_step.
+        self.declare_parameter('interpolation_max_substeps', 12)
+        self.interpolation_max_substeps = self.get_parameter('interpolation_max_substeps').get_parameter_value().integer_value
+        # Interpolated states are validated in chunks so a single service call does not
+        # have to carry the whole path.
+        self.declare_parameter('interpolation_validation_batch_size', 40)
+        self.interpolation_validation_batch_size = self.get_parameter('interpolation_validation_batch_size').get_parameter_value().integer_value
+        # Publishing the interpolated states makes the commanded path explicitly the
+        # validated one instead of relying on how the controller interpolates.
+        self.declare_parameter('publish_interpolated_waypoints', True)
+        self.publish_interpolated_waypoints = self.get_parameter('publish_interpolated_waypoints').get_parameter_value().bool_value
+        # Neighbour layers applied when marking the two waypoints that bound a colliding
+        # transit. Defaults to cell-only: both waypoints are themselves collision-free,
+        # so dilating around them would carve out a corridor that is actually usable.
+        # Raise it if A* keeps re-proposing the same transit through adjacent cells.
+        self.declare_parameter('interpolation_collision_neighbor_layers', 0)
+        self.interpolation_collision_neighbor_layers = self.get_parameter('interpolation_collision_neighbor_layers').get_parameter_value().integer_value
         self.declare_parameter('hot_loop_info_logging', False)
         self.hot_loop_info_logging = self.get_parameter('hot_loop_info_logging').get_parameter_value().bool_value
         self.declare_parameter('publish_replanning_visualization', False)
@@ -179,7 +206,7 @@ class PlannerNode(Node):
 
         # Define cilinder parameters
         self.cyl_center_xy = (0.0, 0.0)   # (xc, yc)
-        self.cyl_radius    = 0.3
+        self.cyl_radius    = 0.4
         self.z_min, self.z_max  = -1.112, 1.3
 
         # Define mobile manipulator base footprint obstacle (XY corners in arm_base frame)
@@ -2452,6 +2479,152 @@ class PlannerNode(Node):
                     return fallback_to_single_checks()
 
         return fallback_to_single_checks()
+
+    def _densify_joint_path(self, joint_values):
+        """Subdivide each joint-space segment so consecutive states stay within
+        ``interpolation_max_joint_step`` on every joint.
+
+        The controller drives a straight line through joint space between two
+        trajectory points, so linear interpolation here reproduces the motion that
+        actually executes.
+
+        Returns ``(states, progress, interpolated_indices, coarse_segments)``:
+          - ``states``: the densified configurations, planned waypoints included in order
+          - ``progress``: fractional index into ``joint_values`` for each state, so the
+            published timing can stay identical to the undensified trajectory
+          - ``interpolated_indices``: indices into ``states`` that were newly created and
+            therefore still need collision validation
+          - ``coarse_segments``: ``(segment_idx, segment_step, achieved_step)`` for segments
+            too wide to subdivide to the requested resolution within the substep cap
+        """
+        states = []
+        progress = []
+        interpolated_indices = []
+        coarse_segments = []
+
+        if not joint_values:
+            return states, progress, interpolated_indices, coarse_segments
+
+        max_joint_step = max(float(self.interpolation_max_joint_step), 1e-3)
+        max_substeps = max(int(self.interpolation_max_substeps), 1)
+
+        q_prev = np.asarray(joint_values[0], dtype=float)
+        states.append(q_prev)
+        progress.append(0.0)
+
+        for waypoint_idx in range(1, len(joint_values)):
+            q_next = np.asarray(joint_values[waypoint_idx], dtype=float)
+            delta = q_next - q_prev
+            segment_step = float(np.max(np.abs(delta))) if delta.size else 0.0
+
+            required_substeps = int(math.ceil(segment_step / max_joint_step)) if segment_step > 0.0 else 1
+            substeps = max(1, min(required_substeps, max_substeps))
+            if required_substeps > max_substeps:
+                coarse_segments.append((waypoint_idx - 1, segment_step, segment_step / substeps))
+
+            for substep in range(1, substeps):
+                fraction = substep / substeps
+                interpolated_indices.append(len(states))
+                states.append(q_prev + delta * fraction)
+                progress.append((waypoint_idx - 1) + fraction)
+
+            states.append(q_next)
+            progress.append(float(waypoint_idx))
+            q_prev = q_next
+
+        return states, progress, interpolated_indices, coarse_segments
+
+    def _validate_interpolated_states(self, states, interpolated_indices, cancel_check=None):
+        """Collision-check the configurations created between planned waypoints.
+
+        The planned waypoints themselves were already validated during the search, so
+        only the newly interpolated states are sent.
+
+        Returns ``(path_valid, failure)``, where ``failure`` is ``(state_idx, status)``
+        for the first interpolated state that is in collision or could not be validated.
+        """
+        if not interpolated_indices:
+            return True, None
+
+        batch_size = max(int(self.interpolation_validation_batch_size), 1)
+
+        for chunk_start in range(0, len(interpolated_indices), batch_size):
+            chunk = interpolated_indices[chunk_start:chunk_start + batch_size]
+            statuses = self._check_collision_batch_sync(
+                [states[state_idx] for state_idx in chunk],
+                timeout_sec=max(2.0, 0.1 * len(chunk)),
+                cancel_check=cancel_check,
+            )
+
+            for state_idx, status in zip(chunk, statuses):
+                if status != CollisionCheckStatus.FREE:
+                    return False, (state_idx, status or CollisionCheckStatus.CHECK_FAILED)
+
+        return True, None
+
+    def _validate_path_interpolation(self, joint_values, plan_generation):
+        """Densify a planned joint path and collision-check everything between waypoints.
+
+        Returns ``(path_valid, states, progress, interpolated_indices, failure)``. When
+        validation is disabled the path passes unchanged with no interpolated states, so
+        callers can always use the returned lists to build the trajectory.
+        """
+        states = [np.asarray(q, dtype=float) for q in joint_values]
+        progress = [float(idx) for idx in range(len(states))]
+
+        if not (self.validate_interpolated_path and self.enable_collision_checking) or len(joint_values) < 2:
+            return True, states, progress, [], None
+
+        states, progress, interpolated_indices, coarse_segments = self._densify_joint_path(joint_values)
+
+        for segment_idx, segment_step, achieved_step in coarse_segments:
+            self.get_logger().warn(
+                f"Segment {segment_idx} -> {segment_idx + 1} spans {segment_step:.3f} rad and could only "
+                f"be subdivided into {achieved_step:.3f} rad steps "
+                f"(interpolation_max_substeps={self.interpolation_max_substeps}); this segment is validated "
+                f"more coarsely than interpolation_max_joint_step={self.interpolation_max_joint_step:.3f} rad."
+            )
+
+        self._log_hot_loop_info(lambda: (
+            f"Validating {len(interpolated_indices)} interpolated configuration(s) across "
+            f"{len(joint_values) - 1} planned segment(s)."
+        ))
+
+        path_valid, failure = self._validate_interpolated_states(
+            states,
+            interpolated_indices,
+            cancel_check=lambda: self._should_abort_plan(plan_generation),
+        )
+        return path_valid, states, progress, interpolated_indices, failure
+
+    def _describe_interpolation_failure(self, joint_values, states, progress, failure):
+        """Human-readable account of a colliding transit, plus the segment it belongs to.
+
+        Returns ``(segment_idx, message)``; ``segment_idx`` indexes the first of the two
+        planned waypoints the offending configuration sits between.
+        """
+        failed_state_idx, failed_status = failure
+        segment_progress = progress[failed_state_idx]
+        segment_idx = int(math.floor(segment_progress))
+        segment_fraction = segment_progress - segment_idx
+        segment_delta = np.abs(
+            np.asarray(joint_values[segment_idx + 1], dtype=float)
+            - np.asarray(joint_values[segment_idx], dtype=float)
+        )
+        reason = (
+            "is in collision"
+            if failed_status == CollisionCheckStatus.COLLISION
+            else "could not be collision-validated"
+        )
+        message = (
+            f"The motion between planned waypoints {segment_idx} and {segment_idx + 1} {reason} at "
+            f"{segment_fraction * 100:.0f}% along the segment. Both endpoints are collision-free, so the "
+            f"collision happens only between them. "
+            f"Segment joint deltas: {np.round(segment_delta, 3).tolist()}. "
+            f"Offending configuration: {np.round(states[failed_state_idx], 3).tolist()}."
+        )
+        return segment_idx, message
+
     def _select_best_collision_free_solution(
         self,
         ik_solutions,
@@ -2759,7 +2932,12 @@ class PlannerNode(Node):
         last_collision_batch_center_only_retry_used = False
         MAX_REPLANNING_ATTEMPTS = 350  # Increased to allow multiple boundary narrowings (each gets 15 attempts) + grid resets
         replanning_attempt = 0
-        
+
+        # Trajectory states produced by interpolated-path validation inside the loop.
+        trajectory_states = []
+        trajectory_progress = []
+        interpolated_indices = []
+
         # Track validated collision-free segments across replanning iterations
         # Structure: list of {'waypoints': [(world_pos, orientation, grid_idx)...], 'joint_solutions': [q...]}
         validated_start_segment = None  # Segment connected to robot current pose
@@ -3901,7 +4079,13 @@ class PlannerNode(Node):
                     (wp[0], wp[1])
                     for wp in validated_start_segment['waypoints'] + validated_goal_segment['waypoints']
                 ]
-                
+                # Kept parallel to all_joint_values so a colliding transit between two
+                # waypoints can be mapped back to the A* cells that produced it.
+                all_grid_indices = [
+                    tuple(wp[2])
+                    for wp in validated_start_segment['waypoints'] + validated_goal_segment['waypoints']
+                ]
+
                 self._log_hot_loop_info(lambda: (
                     f"Final path statistics:\n"
                     f"    Start segment: {len(validated_start_segment['waypoints'])} waypoints\n"
@@ -3912,6 +4096,7 @@ class PlannerNode(Node):
                 # First iteration with no collisions - use all validated waypoints
                 all_joint_values_print = all_joint_values
                 all_cartesian_waypoints = list(zip(path_world, interp_rot_matrices))
+                all_grid_indices = [tuple(grid_idx) for grid_idx in pruned_path_grid_indices]
                 self._log_hot_loop_info(lambda: f"🎉 Path validated with {len(all_joint_values)} collision-free waypoints!")
 
             all_cartesian_waypoints, all_joint_values, final_path_trim_start, final_path_trim_end = self._prune_joint_cartesian_waypoints(
@@ -3923,6 +4108,9 @@ class PlannerNode(Node):
                 log=self.hot_loop_info_logging,
             )
             all_joint_values_print = list(all_joint_values)
+            # Apply the same slice the pruner applied so the grid indices stay aligned.
+            grid_end_index = len(all_grid_indices) - final_path_trim_end if final_path_trim_end > 0 else len(all_grid_indices)
+            all_grid_indices = list(all_grid_indices[final_path_trim_start:grid_end_index])
             if final_path_trim_start > 0 or final_path_trim_end > 0:
                 self._log_hot_loop_info(lambda: (
                     f"Final path pruning removed {final_path_trim_start} start and {final_path_trim_end} end waypoint(s); "
@@ -3980,7 +4168,137 @@ class PlannerNode(Node):
             all_joint_values_print.append(precise_goal_joint_values)
             all_joint_values.append(precise_goal_joint_values)
             all_cartesian_waypoints.append((goal_pos_wrist3, goal_orientation_wrist3.as_matrix()))
-            
+            # The goal is not an A* cell we may mark as an obstacle, so it carries no index.
+            all_grid_indices.append(None)
+
+            # --- Interpolated-path validation ---
+            # The search validated the planned waypoints, but the controller sweeps a
+            # straight line through joint space between them and nothing has checked that
+            # swept motion. Subdivide every segment and collision-check the intermediate
+            # configurations before accepting the path.
+            (
+                path_interpolation_valid,
+                trajectory_states,
+                trajectory_progress,
+                interpolated_indices,
+                interpolation_failure,
+            ) = self._validate_path_interpolation(all_joint_values, plan_generation)
+
+            if self._abort_if_requested(plan_generation, "goal was cancelled during interpolated-path validation"):
+                return
+
+            if not path_interpolation_valid:
+                if interpolation_failure is None:
+                    self._fail_current_goal(
+                        "Interpolated-path validation did not complete. Trajectory not published."
+                    )
+                    return
+
+                failed_segment_idx, failure_description = self._describe_interpolation_failure(
+                    all_joint_values,
+                    trajectory_states,
+                    trajectory_progress,
+                    interpolation_failure,
+                )
+
+                # Feed the colliding transit back to A* by marking the cells of the two
+                # waypoints that bound it, then replan. Cell-only by default: both
+                # waypoints are individually reachable, so only this transit is bad.
+                num_layers = max(int(self.interpolation_collision_neighbor_layers), 0)
+                if len(all_grid_indices) == len(all_joint_values):
+                    # The request endpoints are never marked: blocking the start cell
+                    # would leave the next A* search with nowhere to expand from, and
+                    # blocking the goal cell would make the goal unreachable.
+                    protected_cells = {tuple(start_idx), tuple(goal_idx)}
+                    bounding_grid_indices = [
+                        grid_idx
+                        for grid_idx in all_grid_indices[failed_segment_idx:failed_segment_idx + 2]
+                        if grid_idx is not None and grid_idx not in protected_cells
+                    ]
+                else:
+                    # Never expected: the grid list is built and pruned alongside the joint
+                    # list. Bail out rather than mark a cell that belongs to another waypoint.
+                    self.get_logger().error(
+                        f"Grid-index bookkeeping is out of step with the planned path "
+                        f"({len(all_grid_indices)} indices for {len(all_joint_values)} waypoints); "
+                        f"cannot map the colliding transit back to A* cells."
+                    )
+                    bounding_grid_indices = []
+
+                newly_marked = [
+                    grid_idx for grid_idx in bounding_grid_indices
+                    if collision_waypoints_to_avoid.get(grid_idx, -1) < num_layers
+                ]
+
+                if not newly_marked:
+                    if bounding_grid_indices:
+                        self._fail_current_goal(
+                            f"❌ [INTERPOLATED PATH] {failure_description}\n"
+                            f"   Bounding waypoint cells {bounding_grid_indices} are already marked as obstacles, "
+                            f"so another A* search would reproduce the same transit.\n"
+                            f"   Suggestion: raise interpolation_collision_neighbor_layers to push A* further away, "
+                            f"or approach this goal from a different pose."
+                        )
+                    elif failed_segment_idx + 1 >= len(all_joint_values) - 1:
+                        self._fail_current_goal(
+                            f"❌ [INTERPOLATED PATH] {failure_description}\n"
+                            f"   The colliding transit is the final approach to the goal, which has no A* cell to "
+                            f"mark, so replanning cannot route around it.\n"
+                            f"   Suggestion: move the goal pose or approach it from a different robot pose."
+                        )
+                    else:
+                        self._fail_current_goal(
+                            f"❌ [INTERPOLATED PATH] {failure_description}\n"
+                            f"   No A* cell could be associated with the colliding transit, so replanning cannot "
+                            f"route around it."
+                        )
+                    return
+
+                for grid_idx in newly_marked:
+                    collision_waypoints_to_avoid[grid_idx] = num_layers
+
+                # The offending transit sits inside the segments preserved across
+                # iterations, and the next A* pass only searches the gap between them, so
+                # it would hand back the same waypoints regardless of the new obstacles.
+                # Drop the preserved segments and re-open the full start -> goal problem.
+                validated_start_segment = None
+                validated_goal_segment = None
+                current_planning_start_pose = start_pos_wrist3
+                current_planning_start_orientation = start_orientation_wrist3.as_matrix()
+                current_planning_start_grid = start_idx
+                current_planning_goal_pose = goal_pos_wrist3
+                current_planning_goal_orientation = goal_orientation_wrist3.as_matrix()
+                current_planning_goal_grid = goal_idx
+                previous_planning_start_grid = None
+                previous_planning_goal_grid = None
+
+                self.get_logger().warn(
+                    f"⚠️  [INTERPOLATED PATH] {failure_description}\n"
+                    f"   Marking bounding waypoint cell(s) {newly_marked} as obstacles "
+                    f"({num_layers} neighbour layer(s)), discarding the validated segments and replanning "
+                    f"the full path."
+                )
+
+                replanning_attempt += 1
+                if replanning_attempt >= MAX_REPLANNING_ATTEMPTS:
+                    self._log_replanning_limit_hit(
+                        'MAX_REPLANNING_ATTEMPTS',
+                        replanning_attempt,
+                        MAX_REPLANNING_ATTEMPTS,
+                        'Stopping because the replanning-attempt budget was exhausted.',
+                    )
+                    self._fail_current_goal(
+                        f"❌ Path planning FAILED after {MAX_REPLANNING_ATTEMPTS} attempts: "
+                        f"the motion between planned waypoints keeps colliding "
+                        f"({len(collision_waypoints_to_avoid)} grid cell(s) marked)."
+                    )
+                    return
+
+                self._log_hot_loop_info(lambda: (
+                    f"🔄 Continuing to replanning iteration {replanning_attempt} after an interpolated-path collision..."
+                ))
+                continue
+
             # Path planning successful - break out of replanning loop
             if replanning_attempt > 0:
                 self._log_hot_loop_info(lambda: (
@@ -3997,7 +4315,7 @@ class PlannerNode(Node):
         # Maximum allowed angular change per joint between consecutive trajectory steps.
         # UR10e joint limits are [-2π, 2π]; a step larger than π/2 (90°) is considered
         # a dangerous jump and the trajectory is aborted.
-        JUMP_THRESHOLD = 2 * np.pi  # radians
+        JUMP_THRESHOLD = np.pi/2  # radians
         jump_detected = False
         for step_i in range(1, len(all_joint_values_print)):
             delta = np.abs(np.array(all_joint_values_print[step_i], dtype=float)
@@ -4022,6 +4340,14 @@ class PlannerNode(Node):
             self.publish_planner_goal_failed(True)
             self._log_plan_metrics('jump_detected')
             return
+
+        # Interpolated-path validation ran inside the replanning loop, which is the only
+        # way out to here. Rebuild a plain one-state-per-waypoint schedule if the loop
+        # ever exits without it so the trajectory below is still well formed.
+        if not trajectory_states:
+            trajectory_states = [np.asarray(q, dtype=float) for q in all_joint_values]
+            trajectory_progress = [float(idx) for idx in range(len(trajectory_states))]
+            interpolated_indices = []
 
         self._log_hot_loop_info(lambda: f"Joint values: {all_joint_values_print}")
         # joints_msg = Float64MultiArray()
@@ -4049,30 +4375,54 @@ class PlannerNode(Node):
         traj_msg = JointTrajectory()
         traj_msg.joint_names = self.expected_joint_names
 
-        time_from_start = 1.0
+        if self.publish_interpolated_waypoints:
+            published_states = trajectory_states
+            published_progress = trajectory_progress
+        else:
+            interpolated_state_indices = set(interpolated_indices)
+            published_states = [
+                q for idx, q in enumerate(trajectory_states) if idx not in interpolated_state_indices
+            ]
+            published_progress = [
+                p for idx, p in enumerate(trajectory_progress) if idx not in interpolated_state_indices
+            ]
 
-        for q in all_joint_values:
+        # Timing is keyed to the planned waypoint index (1s offset, 3s per waypoint for
+        # slow, smooth motion), so interpolated states subdivide the existing schedule
+        # instead of lengthening the trajectory.
+        for q, waypoint_progress in zip(published_states, published_progress):
             point = JointTrajectoryPoint()
             point.positions = q.tolist()
             point.velocities = [0.0] * 6  # Zero velocities = smoother interpolation
+            time_from_start = 1.0 + 3.0 * waypoint_progress
             point.time_from_start.sec = int(time_from_start)
             point.time_from_start.nanosec = int((time_from_start % 1.0) * 1e9)
             traj_msg.points.append(point)
-            time_from_start += 3.0  # 3 seconds per waypoint for slow, smooth motion
 
         if self.log_detailed_planning_diagnostics and traj_msg.points:
             waypoint_lines = []
-            for idx, (point, cartesian_waypoint) in enumerate(zip(traj_msg.points, all_cartesian_waypoints)):
+            for idx, (point, waypoint_progress) in enumerate(zip(traj_msg.points, published_progress)):
                 point_time = point.time_from_start.sec + point.time_from_start.nanosec / 1e9
-                wrist3_position, wrist3_orientation = cartesian_waypoint
-                wrist3_orientation_quat = R.from_matrix(wrist3_orientation).as_quat()
                 formatted_joint_positions = [f'{position:.4f}' for position in point.positions]
-                waypoint_lines.append(
-                    f"  waypoint {idx:02d} @ {point_time:.2f}s: "
-                    f"wrist3_pos={[f'{value:.4f}' for value in wrist3_position]}, "
-                    f"wrist3_quat_xyzw={[f'{value:.4f}' for value in wrist3_orientation_quat]}, "
-                    f"joints={formatted_joint_positions}"
-                )
+                # Only planned waypoints have a Cartesian pose; interpolated states sit
+                # between two of them and are identified by their fractional index.
+                planned_idx = int(round(waypoint_progress))
+                is_planned_waypoint = abs(waypoint_progress - planned_idx) < 1e-9
+                if is_planned_waypoint and planned_idx < len(all_cartesian_waypoints):
+                    wrist3_position, wrist3_orientation = all_cartesian_waypoints[planned_idx]
+                    wrist3_orientation_quat = R.from_matrix(wrist3_orientation).as_quat()
+                    waypoint_lines.append(
+                        f"  waypoint {idx:02d} @ {point_time:.2f}s: "
+                        f"wrist3_pos={[f'{value:.4f}' for value in wrist3_position]}, "
+                        f"wrist3_quat_xyzw={[f'{value:.4f}' for value in wrist3_orientation_quat]}, "
+                        f"joints={formatted_joint_positions}"
+                    )
+                else:
+                    waypoint_lines.append(
+                        f"  waypoint {idx:02d} @ {point_time:.2f}s: "
+                        f"interpolated at {waypoint_progress:.3f}, "
+                        f"joints={formatted_joint_positions}"
+                    )
             self.get_logger().warn(
                 "Planned trajectory waypoints:\n"
                 f"  joint_names: {traj_msg.joint_names}\n"

@@ -57,6 +57,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Matrix.msg"
   "msg/ObjectDistances.msg"
   "msg/Polytope.msg"
+  "msg/SweepDiagnostics.msg"
   "srv/AddRemoveCollisionMesh.srv"
   "srv/AddRemoveCollisionSolid.srv"
   "srv/AddRemoveCollisionMeshStamped.srv"
@@ -76,7 +77,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/PredictMaterial.srv"
   "srv/SendPosition.srv"
   "srv/ScriptCommand.srv"
-  DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs shape_msgs std_msgs
+  "action/SweepLine.action"
+  DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs shape_msgs std_msgs action_msgs
 )
 
 # Install Python modules as symlinks for development
@@ -121,6 +123,7 @@ install(CODE "
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/robot_command_logger.py \${LIB_DIR}/robot_command_logger)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/robot_status_check.py \${LIB_DIR}/robot_status_check)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/send_and_monitor_trajectory.py \${LIB_DIR}/send_and_monitor_trajectory)
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/wall_sweep_executor.py \${LIB_DIR}/wall_sweep_executor)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/UI.py \${LIB_DIR}/UI)
   
   # Planner nodes
