@@ -1,0 +1,134 @@
+arm_joy_node:
+  ros__parameters:
+    # ------------------------------------------------------------------------
+    # Gamepad
+    # ------------------------------------------------------------------------
+    # Logitech F710, mode switch at D (DirectInput): 6 axes, 12 buttons.
+    #   axes    0/1 left stick X/Y   2/3 right stick X/Y   4/5 dpad X/Y
+    #   buttons 0 X   1 A   2 B   3 Y   4 LB  5 RB  6 LT  7 RT
+    #           8 BACK  9 START  10 left stick click  11 right stick click
+    #
+    # The mode is whichever button is held, so there is no latched state to
+    # disagree with what the operator thinks is selected, and releasing stops the
+    # arm. The right thumb does nothing but hold that button -- which is why the
+    # right stick appears nowhere below.
+    #
+    # Keep the button numbers in step with navi_wall's general_params.yaml: the
+    # turret refuses to move while any of these are held.
+    joy_topic: "joy"
+    deadzone: 0.3
+    proportional_axes: false     # true -> stick deflection scales the jog speed
+
+    mode_button_joint: 3         # Y
+    mode_button_tcp: 1           # A
+    mode_button_base: 2          # B
+    blocking_buttons: [0]        # X drives the base; never jog the arm with it held
+
+    speed_down_button: 8         # BACK
+    speed_up_button: 9           # START
+    arm_chord: [10, 11]          # both stick clicks, held, toggles armed/disarmed
+    arm_chord_hold: 0.5          # seconds; toggles once per press, not repeatedly
+
+    # ------------------------------------------------------------------------
+    # Mapping, in DOF order
+    # ------------------------------------------------------------------------
+    # "axis:N" reads axis N, "-axis:N" inverts it, "btn:N,M" is a button pair
+    # with the negative direction first.
+    joint_mode:                  # J1..J6, base to wrist
+      - "btn:6,7"                # LT / RT                 shoulder_pan
+      - "btn:4,5"                # LB / RB                 shoulder_lift
+      - "axis:0"                 # left stick left/right   elbow
+      - "axis:1"                 # left stick down/up      wrist_1
+      - "axis:4"                 # dpad left/right         wrist_2
+      - "axis:5"                 # dpad down/up            wrist_3
+
+    # Both cartesian modes share this table. Only the frame the axes refer to
+    # changes between them, which is exactly what the pendant's Base/Tool toggle
+    # does -- and it means a control never means a different letter per mode.
+    cartesian_mode:              # X Y Z RX RY RZ
+      - "axis:4"                 # dpad left/right
+      - "axis:5"                 # dpad down/up
+      - "btn:4,5"                # LB / RB
+      - "axis:1"                 # left stick down/up
+      - "axis:0"                 # left stick left/right
+      - "btn:6,7"                # LT / RT
+
+    # ------------------------------------------------------------------------
+    # Speeds
+    # ------------------------------------------------------------------------
+    # Nominal rates at speed_scale 1.0. BACK/START step the scale on press --
+    # on the button edge, not while held, or a 20 Hz autorepeat would run the
+    # scale end to end in half a second.
+    joint_speed: 0.20            # rad/s
+    linear_speed: 0.05           # m/s
+    angular_speed: 0.20          # rad/s
+
+    speed_scale: 0.5
+    speed_scale_min: 0.1
+    speed_scale_max: 1.0
+    speed_scale_step: 0.1
+
+    # Hard ceiling as a fraction of the rated joint speeds, applied after the
+    # Jacobian: a cartesian jog near a singularity asks for far more than the
+    # nominal rates suggest.
+    max_velocity_fraction: 0.25
+    acceleration: 1.0            # rad/s^2, ramps the fixed-rate step input
+    joint_limit_margin: 0.10     # rad
+
+    # Smallest singular value of the Jacobian, below which the jog goes heavy and
+    # then refuses. Cartesian modes only; joint mode has no Jacobian to lose.
+    singularity_slow_below: 0.05
+    singularity_stop_below: 0.01
+
+    # ------------------------------------------------------------------------
+    # Rates and watchdogs
+    # ------------------------------------------------------------------------
+    publish_rate: 100.0
+    joint_state_timeout: 0.5     # no joint_states -> halt
+    joy_timeout: 0.3             # no joy messages at all -> halt
+
+    # The F710 is wireless. If its batteries die while the receiver stays
+    # plugged in, joy_linux keeps republishing the last state at autorepeat_rate
+    # -- held button and deflected stick included -- and no message content can
+    # tell that apart from an operator holding still. Capping one uninterrupted
+    # jog bounds how far that can go; releasing and pressing again resets it.
+    max_continuous_jog: 15.0     # seconds
+    disarm_timeout: 60.0         # seconds idle before handing the arm back
+    max_tracking_error: 0.20     # rad between command and measurement -> halt
+
+    # ------------------------------------------------------------------------
+    # Robot
+    # ------------------------------------------------------------------------
+    joints:
+      - "arm_shoulder_pan_joint"
+      - "arm_shoulder_lift_joint"
+      - "arm_elbow_joint"
+      - "arm_wrist_1_joint"
+      - "arm_wrist_2_joint"
+      - "arm_wrist_3_joint"
+    base_frame: "arm_base"       # IK base, the UR DH base
+
+    # The frame the operator means by "tool", and the point cartesian rotations
+    # happen about. On this robot the URDF puts it 0.300 m out along the tool
+    # axis and on-axis -- a 0.15 m adapter cylinder plus a 0.15 m sensors_offset
+    # -- which is the TCP the teach pendant is set to. The node logs the measured
+    # distance on its first cartesian jog; if it disagrees with the pendant,
+    # correct sensors_offset in the URDF rather than adding an offset here, or
+    # the planner and the collision scene end up believing a different TCP.
+    tool0_frame: "arm_tool0"
+    wrist_frame: "arm_wrist_3_link"   # only used to report that distance
+
+    # The operator outranks the FSM: arming raises the stack's emergency_stop,
+    # which cancels whatever trajectory is running and makes the planners refuse
+    # new ones, and disarming clears it. The delay lets that cancel land before
+    # the controller is switched out from under the trajectory.
+    preempt_on_arm: true
+    preempt_topic: "emergency_stop"
+    preempt_delay: 0.25
+
+    # Jogging streams positions, so a lost publisher holds the arm where it is.
+    # forward_velocity_controller would keep the last velocity instead, which is
+    # the wrong failure mode behind a wireless gamepad.
+    controller_manager: "controller_manager"
+    jog_controller: "forward_position_controller"
+    trajectory_controller: "passthrough_trajectory_controller"

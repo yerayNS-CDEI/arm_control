@@ -105,6 +105,7 @@ install(CODE "
   file(MAKE_DIRECTORY \${LIB_DIR})
   
   # Control nodes
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/arm_joy_node.py \${LIB_DIR}/arm_joy_node)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/end_effector_pose_node.py \${LIB_DIR}/end_effector_pose_node)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/example_move.py \${LIB_DIR}/example_move)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/control/exhaustive_scan_node.py \${LIB_DIR}/exhaustive_scan_node)
