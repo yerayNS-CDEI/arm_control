@@ -265,6 +265,14 @@ def generate_launch_description():
         default_value='false',
         description='Enable wall-marker collision sync into MoveIt PlanningScene',
     )
+    joy_arm_arg = DeclareLaunchArgument(
+        'joy_arm',
+        default_value='false',
+        description=(
+            'Enable gamepad jogging of the arm. Off by default: arming it swaps '
+            'the trajectory controller out, so planned motions cannot run.'
+        ),
+    )
     enable_octomap_arg = DeclareLaunchArgument(
         'enable_octomap',
         default_value='false',
@@ -442,6 +450,25 @@ def generate_launch_description():
                 output='screen',
                 parameters=[{'planner_backend': planner_backend}],
             ),
+            Node(
+                package='arm_control',
+                executable='arm_joy_node',
+                name='arm_joy_node',
+                output='screen',
+                parameters=[
+                    PathJoinSubstitution(
+                        [FindPackageShare('arm_control'), 'config', 'joy_arm.yaml']
+                    ),
+                    # Gazebo runs joint_trajectory_controller where the real robot
+                    # runs passthrough; the jog has to hand back whichever one it
+                    # took the arm from.
+                    {'trajectory_controller': effective_trajectory_controller_name},
+                ],
+                # joy_linux publishes on the global topic from navi_wall's
+                # platform launch, outside this namespace.
+                remappings=[('joy', '/joy')],
+                condition=IfCondition(LaunchConfiguration('joy_arm')),
+            ),
             # OpaqueFunction(function=launch_ee_jacobian_node)
             
         ]
@@ -537,6 +564,7 @@ def generate_launch_description():
             planner_backend_arg,
             astar_collision_mode_arg,
             enable_wall_scene_sync_arg,
+            joy_arm_arg,
             enable_octomap_arg,
             octomap_point_cloud_topic_arg,
             octomap_frame_arg,

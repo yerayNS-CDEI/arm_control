@@ -13,6 +13,7 @@ A comprehensive ROS2 manipulation package for the UR10e robotic arm that provide
   - [Simulation](#simulation-ur_sim_controllaunchpy)
   - [Motion Planning](#motion-planning-arm_moveitlaunchpy)
   - [Visualization](#visualization)
+- [Gamepad Jogging](#gamepad-jogging)
 - [Workflow](#workflow)
 - [Key Features](#key-features)
 - [Important Notes](#important-notes)
@@ -344,6 +345,108 @@ Visualizes collision meshes and planning scene for debugging:
 - Collision geometry
 - Self-collision checking
 - Environment obstacles
+
+---
+
+## Gamepad Jogging
+
+Manual jogging of the arm from the Logitech F710, in the spirit of the teach
+pendant's Move tab. Off by default -- add `joy_arm:=true` to `arm.launch.py`.
+
+```bash
+ros2 launch arm_control arm.launch.py mode:=full joy_arm:=true
+```
+
+The gamepad's mode switch must be at **D** (DirectInput): 6 axes, 12 buttons.
+Check with `ros2 topic echo /joy` -- 8 axes means it is in XInput mode and the
+whole mapping below is off by several indices.
+
+### Arming
+
+**The operator outranks the FSM.** Arming raises the stack's `emergency_stop`,
+which cancels whatever trajectory is running and makes the planners refuse new
+ones, and only then swaps `passthrough_trajectory_controller` out for
+`forward_position_controller`. So arming mid-motion stops that motion and hands
+control to whoever is holding the gamepad. **Planned motions will not run while
+the jog is armed.** Disarming switches back and clears the stop; it also disarms
+itself after `disarm_timeout` seconds idle.
+
+```bash
+# From the UI or a terminal, instead of the gamepad chord
+ros2 service call /arm_joy_node/set_armed std_srvs/srv/SetBool "{data: true}"
+```
+
+On the gamepad, hold **both stick clicks** together for half a second to toggle.
+
+### Modes
+
+The mode is whichever button you hold; releasing it stops the arm. Holding two
+stops the arm rather than picking one, and holding **X** -- the base's own enable
+-- blocks the arm entirely, so driving the base can never also jog the arm.
+
+| Hold | Mode |
+|------|------|
+| **Y** | Joint jog |
+| **A** | Cartesian, tool frame |
+| **B** | Cartesian, base frame |
+
+| Control | Joint mode | Cartesian modes |
+|---------|-----------|-----------------|
+| LT / RT | J1 shoulder_pan | RZ |
+| LB / RB | J2 shoulder_lift | Z |
+| Left stick left/right | J3 elbow | RY |
+| Left stick down/up | J4 wrist_1 | RX |
+| Dpad left/right | J5 wrist_2 | X |
+| Dpad down/up | J6 wrist_3 | Y |
+| BACK / START | speed scale down / up | speed scale down / up |
+
+The right stick is deliberately unused: the right thumb's only job is holding the
+mode button. Both cartesian modes share one control table, so the only thing that
+changes between A and B is the frame the axes refer to -- the same thing the
+pendant's Base/Tool toggle changes. Rotations are about the TCP in both.
+
+Jogging is fixed-rate by default: past the deadzone, a stick means full speed in
+that direction, like the pendant's arrows. Set `proportional_axes: true` in
+[config/joy_arm.yaml](config/joy_arm.yaml) for stick deflection to scale the speed.
+
+### Limits
+
+Speeds, ramps, and watchdogs all live in `config/joy_arm.yaml`. Worth knowing:
+
+- Cartesian jogs slow down and then refuse near a singularity, reported in the log.
+- A joint on its limit stops going outward but can still be jogged back.
+- One uninterrupted jog is capped at `max_continuous_jog` seconds. The F710 is
+  wireless: if its batteries die while the receiver stays plugged in, `joy_linux`
+  keeps republishing the last state -- held button included -- and nothing in the
+  message can tell that apart from someone holding still.
+- Positions are streamed, not velocities, so a lost publisher holds the arm.
+
+### The TCP
+
+Cartesian rotations happen about `arm_tool0`, which the URDF puts **0.300 m**
+out along the tool axis and on-axis — a 0.15 m adapter cylinder plus a 0.15 m
+`sensors_offset`. That is the point the teach pendant's TCP is set to, and with a
+lever that long, getting it wrong is visible: the tool swings through an arc
+instead of spinning in place.
+
+On its first cartesian jog the node logs where it believes the TCP is:
+
+```
+Jog rotates about arm_tool0, 0.300 m from arm_wrist_3_link (xyz=[0.0, 0.0, 0.3]).
+Check this against the TCP set on the teach pendant.
+```
+
+If that disagrees with the pendant, correct `sensors_offset` in the URDF rather
+than adding an offset to the jog — the planner and the collision scene read the
+TCP from the same TF, and a jog-local override would put them in different
+places.
+
+The kinematics are in [planner/planner_lib/jog.py](planner/planner_lib/jog.py),
+free of ROS so they can be tested offline:
+
+```bash
+python3 -m pytest test/test_jog.py -v
+```
 
 ---
 

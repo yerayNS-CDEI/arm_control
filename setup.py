@@ -23,6 +23,7 @@ setup(
     entry_points={
         'console_scripts': [
             # Control nodes
+            'arm_joy_node = control.arm_joy_node:main',
             'end_effector_pose_node = control.end_effector_pose_node:main',
             'example_move = control.example_move:main',
             'exhaustive_scan_node = control.exhaustive_scan_node:main',
