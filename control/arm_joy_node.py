@@ -12,8 +12,10 @@ trajectory controller the planner and the FSM execute through. Rather than paper
 over that, this node switches ``passthrough_trajectory_controller`` out and
 ``forward_position_controller`` in when armed, and back when disarmed, letting
 ros2_control enforce that a jog and a planned trajectory can never run at once.
-Arming is deliberate: both stick clicks held, or the ``~/set_armed`` service for
-the UI.
+``force_mode_controller`` is spawned active and claims those same interfaces, so
+it comes out with the trajectory controller and goes back in on disarm -- but
+only when it was active at the moment of arming. Arming is deliberate: both stick
+clicks held, or the ``~/set_armed`` service for the UI.
 
 Positions are streamed rather than velocities. Behind a wireless gamepad a lost
 publisher must mean "hold", not "keep going at the last commanded speed".
@@ -26,7 +28,7 @@ import numpy as np
 import rclpy
 import rclpy.time
 import tf2_ros
-from controller_manager_msgs.srv import SwitchController
+from controller_manager_msgs.srv import ListControllers, SwitchController
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -113,6 +115,7 @@ class ArmJoyNode(Node):
         self.declare_parameter('controller_manager', 'controller_manager')
         self.declare_parameter('jog_controller', 'forward_position_controller')
         self.declare_parameter('trajectory_controller', 'passthrough_trajectory_controller')
+        self.declare_parameter('force_mode_controller', 'force_mode_controller')
 
         p = self.get_parameter
         self.deadzone = p('deadzone').value
@@ -164,10 +167,12 @@ class ArmJoyNode(Node):
         self.preempt_delay = p('preempt_delay').value
         self.jog_controller = p('jog_controller').value
         self.trajectory_controller = p('trajectory_controller').value
+        self.force_mode_controller = p('force_mode_controller').value
 
         # --- State -----------------------------------------------------------
         self.armed = False
         self.switch_pending = False
+        self.force_mode_borrowed = False   # we took force mode away and owe it back
         self.joy = None
         self.joy_stamp = 0.0
         self.prev_buttons = []
@@ -204,6 +209,8 @@ class ArmJoyNode(Node):
         self.create_service(SetBool, '~/set_armed', self.on_set_armed)
         self.switch_client = self.create_client(
             SwitchController, f"{p('controller_manager').value}/switch_controller")
+        self.list_client = self.create_client(
+            ListControllers, f"{p('controller_manager').value}/list_controllers")
 
         rate = float(p('publish_rate').value)
         self.dt = 1.0 / rate
@@ -321,12 +328,57 @@ class ArmJoyNode(Node):
         self.request_switch(armed, source)
 
     def request_switch(self, armed, source):
+        """Arm: find out whether force mode is in the way, then switch.
+
+        ``force_mode_controller`` is spawned active and claims the same command
+        interfaces as the jog, so the manager refuses ``forward_position_controller``
+        while it is up; it has to come out alongside the trajectory controller.
+        Whether it was active is worth knowing rather than assuming, for two
+        reasons: a STRICT switch that deactivates an already-inactive controller
+        is refused outright, and handing back on disarm a controller the operator
+        never had running would be a surprise the jog has no business springing.
+        """
+        if not armed or not self.force_mode_controller:
+            self.send_switch(armed, source)
+            return
+        if not self.list_client.service_is_ready():
+            self.get_logger().warn(
+                f'{self.list_client.srv_name} is not available; arming without '
+                f'touching {self.force_mode_controller}')
+            self.force_mode_borrowed = False
+            self.send_switch(armed, source)
+            return
+        future = self.list_client.call_async(ListControllers.Request())
+        future.add_done_callback(lambda f: self.on_controllers_listed(f, source))
+
+    def on_controllers_listed(self, future, source):
+        try:
+            controllers = future.result().controller
+        except Exception as e:
+            # Not fatal: go on without touching force mode. If it really was in
+            # the way the switch below fails and says so, which is the same
+            # outcome as before this node knew about force mode at all.
+            self.get_logger().warn(
+                f'Could not list controllers ({e}); arming without touching '
+                f'{self.force_mode_controller}')
+            self.force_mode_borrowed = False
+        else:
+            self.force_mode_borrowed = any(
+                c.name == self.force_mode_controller and c.state == 'active'
+                for c in controllers)
+        self.send_switch(True, source)
+
+    def send_switch(self, armed, source):
         request = SwitchController.Request()
         if armed:
             request.activate_controllers = [self.jog_controller]
             request.deactivate_controllers = [self.trajectory_controller]
+            if self.force_mode_borrowed:
+                request.deactivate_controllers.append(self.force_mode_controller)
         else:
             request.activate_controllers = [self.trajectory_controller]
+            if self.force_mode_borrowed:
+                request.activate_controllers.append(self.force_mode_controller)
             request.deactivate_controllers = [self.jog_controller]
         # STRICT: a half-completed switch would leave two controllers claiming the
         # same command interfaces, which is worse than not switching at all.
@@ -342,13 +394,13 @@ class ArmJoyNode(Node):
             ok = future.result().ok
         except Exception as e:
             self.get_logger().error(f'Controller switch failed: {e}')
-            self.release_failed_preempt()
+            self.abort_switch(armed)
             return
         if not ok:
             self.get_logger().error(
                 f'Controller manager refused to switch to '
                 f'{self.jog_controller if armed else self.trajectory_controller}')
-            self.release_failed_preempt()
+            self.abort_switch(armed)
             return
 
         self.armed = armed
@@ -364,13 +416,27 @@ class ArmJoyNode(Node):
             # Arm handed back: clear the stop last, so nothing can dispatch a new
             # trajectory into the window before the controller is ready for it.
             self.publish_preempt(False)
+        force_mode_note = '' if not self.force_mode_borrowed else (
+            f', {self.force_mode_controller} '
+            f'{"deactivated for the jog" if armed else "reactivated"}')
+        if not armed:
+            # Debt settled. A later arm re-reads the state rather than assuming
+            # force mode is still where this one left it.
+            self.force_mode_borrowed = False
         self.get_logger().warn(
             f'Arm jog {"ARMED" if armed else "disarmed"} ({source}); '
             f'{self.trajectory_controller} is now '
-            f'{"inactive - planned trajectories will not run" if armed else "active"}')
+            f'{"inactive - planned trajectories will not run" if armed else "active"}'
+            f'{force_mode_note}')
 
-    def release_failed_preempt(self):
-        """An arm that never happened must not leave the planners blocked."""
+    def abort_switch(self, armed):
+        """Leave no trace of a switch that never happened.
+
+        The planners must not stay blocked by an arm that failed, and a failed
+        arm never took force mode away, so it owes nothing back.
+        """
+        if armed:
+            self.force_mode_borrowed = False
         if self.preempting:
             self.publish_preempt(False)
 
