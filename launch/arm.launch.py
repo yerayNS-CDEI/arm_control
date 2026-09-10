@@ -273,10 +273,12 @@ def generate_launch_description():
     )
     joy_arm_arg = DeclareLaunchArgument(
         'joy_arm',
-        default_value='false',
+        default_value='true',
         description=(
-            'Enable gamepad jogging of the arm. Off by default: arming it swaps '
-            'the trajectory controller out, so planned motions cannot run.'
+            'Spawn the gamepad arm jog. The node comes up disarmed and nothing '
+            'moves until it is armed, so this is inert until asked for; arming '
+            'swaps the trajectory controller out, and planned motions cannot run '
+            'while it is armed. Pass joy_arm:=false to leave it out entirely.'
         ),
     )
     enable_octomap_arg = DeclareLaunchArgument(
