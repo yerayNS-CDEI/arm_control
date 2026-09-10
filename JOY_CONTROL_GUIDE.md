@@ -85,7 +85,10 @@ ros2 service call /arm_joy_node/set_armed std_srvs/srv/SetBool "{data: false}"
 `emergency_stop`, which cancels any running trajectory and makes the planners
 refuse new ones, then swaps `passthrough_trajectory_controller` (real) or
 `joint_trajectory_controller` (Gazebo) out for `forward_position_controller`.
-Planned motions cannot run while the jog is armed. Disarming reverses both.
+`force_mode_controller` claims the same command interfaces, so it goes out in
+the same switch when it is active — and comes back on disarm only if it was
+active when the jog was armed. Planned motions cannot run while the jog is
+armed. Disarming reverses all of it.
 
 It also disarms itself after `disarm_timeout` (60 s) with no jogging.
 
@@ -121,6 +124,7 @@ ros2 control list_controllers | grep -E "forward_position|trajectory"
 | No `/arm_joy_node` in `ros2 node list` | launched with `joy_arm:=false`? It defaults to true |
 | `status` says `joy=stale` | joystick unplugged, or `/joy` not reaching the node |
 | Armed, mode shows, still nothing | `forward_position_controller` loaded? Under Gazebo it needs the spawner that `joy_arm` gates |
+| Arming logs `refused to switch to forward_position_controller` | another controller holds the arm's command interfaces — `ros2 control list_controllers` and look for `freedrive_mode_controller`, or a `force_mode_controller` this node was told to ignore |
 | Arms then instantly disarms | released the chord too slowly — it is latched, not repeating |
 | Cartesian does nothing, joint works | TF `arm_base`→`arm_tool0` missing; the log says so |
 | Jog goes heavy near a pose | singularity slowdown, reported in the log with sigma |

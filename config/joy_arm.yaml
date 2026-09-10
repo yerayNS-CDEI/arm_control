@@ -132,3 +132,11 @@ arm_joy_node:
     controller_manager: "controller_manager"
     jog_controller: "forward_position_controller"
     trajectory_controller: "passthrough_trajectory_controller"
+
+    # force_mode_controller is spawned active and claims the same command
+    # interfaces as the jog, so the controller manager refuses the jog while it
+    # is up. The node takes it out along with the trajectory controller, and puts
+    # it back on disarm -- but only when it found it active at the moment of
+    # arming, so a stack that never ran force mode is left exactly as it was.
+    # Set to "" to leave it alone entirely.
+    force_mode_controller: "force_mode_controller"

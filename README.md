@@ -369,7 +369,8 @@ whole mapping below is off by several indices.
 
 **The operator outranks the FSM.** Arming raises the stack's `emergency_stop`,
 which cancels whatever trajectory is running and makes the planners refuse new
-ones, and only then swaps `passthrough_trajectory_controller` out for
+ones, and only then swaps `passthrough_trajectory_controller` (plus
+`force_mode_controller`, when it is active) out for
 `forward_position_controller`. So arming mid-motion stops that motion and hands
 control to whoever is holding the gamepad. **Planned motions will not run while
 the jog is armed.** Disarming switches back and clears the stop; it also disarms
