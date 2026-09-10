@@ -112,6 +112,12 @@ def _resolve_controller_names(context, *args, **kwargs):
     jct = effective
     cfg['_arm_initial_joint_controller'] = jct
     cfg['_arm_default_trajectory_controller'] = effective
+    # ur_control.launch.py loads the jog controller inactive on the real robot;
+    # ur_sim_control.launch.py spawns only the initial joint controller, so under
+    # Gazebo forward_position_controller is declared in the controllers YAML but
+    # never loaded, and the jog's switch would be refused for a controller the
+    # manager has never heard of.
+    cfg['_arm_spawn_jog_controller'] = 'true' if is_pure_gazebo else 'false'
     return []
 
 def generate_launch_description():
@@ -449,6 +455,20 @@ def generate_launch_description():
                 name='position_sender_node',
                 output='screen',
                 parameters=[{'planner_backend': planner_backend}],
+            ),
+            Node(
+                package='controller_manager',
+                executable='spawner',
+                name='jog_controller_spawner',
+                output='screen',
+                # Relative controller manager name so it resolves inside
+                # namespace_arm, matching the other spawners.
+                arguments=['forward_position_controller', '--inactive',
+                           '-c', 'controller_manager'],
+                condition=IfCondition(PythonExpression([
+                    "'", LaunchConfiguration('joy_arm'), "' == 'true' and '",
+                    LaunchConfiguration('_arm_spawn_jog_controller'), "' == 'true'",
+                ])),
             ),
             Node(
                 package='arm_control',
