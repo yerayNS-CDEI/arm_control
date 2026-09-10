@@ -445,6 +445,10 @@ than adding an offset to the jog — the planner and the collision scene read th
 TCP from the same TF, and a jog-local override would put them in different
 places.
 
+A one-page control reference lives in
+[JOY_CONTROL_GUIDE.md](JOY_CONTROL_GUIDE.md) — the full button map for base,
+turret and arm, plus what to check when nothing moves.
+
 The kinematics are in [planner/planner_lib/jog.py](planner/planner_lib/jog.py),
 free of ROS so they can be tested offline:
 
