@@ -384,6 +384,11 @@ class ArmJoyNode(Node):
     # Control loop
     # ------------------------------------------------------------------
     def on_timer(self):
+        # Status first and unconditionally. It used to ride along with the joint
+        # command, which only publishes while armed, so the topic went silent in
+        # exactly the state someone would be checking it for -- a UI or an
+        # operator asking "is the jog armed?" got no answer at all.
+        self.publish_status()
         if not self.armed or self.q_cmd is None:
             return
 
@@ -566,9 +571,13 @@ class ArmJoyNode(Node):
         msg = Float64MultiArray()
         msg.data = [float(v) for v in self.q_cmd]
         self.command_pub.publish(msg)
+
+    def publish_status(self):
+        joy_age = self.now() - self.joy_stamp if self.joy is not None else float('inf')
         self.status_pub.publish(String(
             data=f'{"armed" if self.armed else "disarmed"} {self.mode} '
-                 f'scale={self.speed_scale:.2f}'))
+                 f'scale={self.speed_scale:.2f} '
+                 f'joy={"ok" if joy_age <= self.joy_timeout else "stale"}'))
 
 
 def main(args=None):
