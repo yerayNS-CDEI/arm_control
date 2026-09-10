@@ -351,11 +351,15 @@ Visualizes collision meshes and planning scene for debugging:
 ## Gamepad Jogging
 
 Manual jogging of the arm from the Logitech F710, in the spirit of the teach
-pendant's Move tab. Off by default -- add `joy_arm:=true` to `arm.launch.py`.
+pendant's Move tab. Launched by default, including from the UI's Arm button:
 
 ```bash
-ros2 launch arm_control arm.launch.py mode:=full joy_arm:=true
+ros2 launch arm_control arm.launch.py mode:=full
+ros2 launch arm_control arm.launch.py mode:=full joy_arm:=false   # leave it out
 ```
+
+The node comes up **disarmed** and nothing moves until it is armed, so having it
+running costs nothing until you ask for it.
 
 The gamepad's mode switch must be at **D** (DirectInput): 6 axes, 12 buttons.
 Check with `ros2 topic echo /joy` -- 8 axes means it is in XInput mode and the
