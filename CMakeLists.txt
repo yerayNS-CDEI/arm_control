@@ -76,6 +76,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/HyperspectralConfig.srv"
   "srv/PredictMaterial.srv"
   "srv/SendPosition.srv"
+  "srv/SendPokeyeTargets.srv"
   "srv/ScriptCommand.srv"
   "action/SweepLine.action"
   DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs shape_msgs std_msgs action_msgs
