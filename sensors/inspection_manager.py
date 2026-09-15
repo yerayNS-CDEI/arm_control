@@ -18,9 +18,49 @@ from arm_control.srv import HyperspectralCommand, HyperspectralConfig, PredictMa
 # Longitud esperada dels espectres (ha de coincidir amb hyperspectral_node.py)
 SPECTRUM_LENGTH = 256
 
+# Ruta relativa dins del workspace on es desen totes les dades d'aquest node.
+# Mateix arbre que fa servir la FSM (task_planner_fsm/sensors/paths.py) perquè
+# les sessions del sampler i les mesures manuals quedin al mateix lloc.
+DATA_SUBPATH = os.path.join("task_planner_fsm", "data", "raw", "hyperspectral")
+DATA_DIR_ENV = "HYPERSPECTRAL_DATA_DIR"
+
+
+def resolve_data_dir(override=None):
+    """Directori arrel de sortida: ``<ws>/src/task_planner_fsm/data/raw/hyperspectral``.
+
+    Independent de l'usuari i de la màquina: es dedueix del workspace on viu
+    aquest fitxer (els executables s'instal·len com a symlink cap a ``src/``),
+    i si no, del share de ``task_planner_fsm`` via ament. Es pot forçar amb
+    ``--output-dir`` o la variable d'entorn ``HYPERSPECTRAL_DATA_DIR``.
+    """
+    override = override or os.environ.get(DATA_DIR_ENV)
+    if override:
+        return os.path.abspath(os.path.expanduser(str(override)))
+
+    candidates = []
+    # .../<ws>/src/arm_control/sensors/inspection_manager.py -> <ws>/src
+    src_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    candidates.append(os.path.join(src_root, DATA_SUBPATH))
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        share = get_package_share_directory("task_planner_fsm")
+        if os.sep + "install" + os.sep in share:
+            ws = share.split(os.sep + "install" + os.sep, 1)[0]
+            candidates.append(os.path.join(ws, "src", DATA_SUBPATH))
+    except Exception:
+        pass
+
+    for cand in candidates:
+        if os.path.isdir(os.path.dirname(cand)):  # el pare (data/raw) existeix -> és el paquet
+            return cand
+    return candidates[0]
+
 class InspectionManager(Node):
-    def __init__(self, enable_plot=False):
+    def __init__(self, enable_plot=False, data_dir=None):
         super().__init__('inspection_manager')
+        self.data_dir = resolve_data_dir(data_dir)
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.get_logger().info(f"Directori de dades: {self.data_dir}")
         self.camera_client = self.create_client(HyperspectralCommand, 'hyperspectral/measurement')
         self.config_client  = self.create_client(HyperspectralConfig,  'hyperspectral/configure')
         self.ml_client      = self.create_client(PredictMaterial,       'hyperspectral/predict_material')
@@ -139,7 +179,7 @@ class InspectionManager(Node):
     # ----------------------------------------------------------
     def _log_calibration_if_new(self, res_gds, res_grf, counter):
         """Logs calibration data (GDS, GRF) only when it changes from previous calibration."""
-        csv_dir = os.path.expanduser("~/Documents/Hyperspectral_camera/src/arm_control/resource/raw_data")
+        csv_dir = os.path.join(self.data_dir, "raw_data")
         os.makedirs(csv_dir, exist_ok=True)
         
         now = datetime.now()
@@ -182,7 +222,7 @@ class InspectionManager(Node):
     # Helper: Log raw intensity measurements
     # ----------------------------------------------------------
     def _log_raw_intensity(self, vis_spectrum, nir_spectrum, counter, label="Unknown"):
-        csv_dir = os.path.expanduser("~/Documents/Hyperspectral_camera/src/arm_control/resource/raw_data")
+        csv_dir = os.path.join(self.data_dir, "raw_data")
         os.makedirs(csv_dir, exist_ok=True)
 
         now = datetime.now()
@@ -206,7 +246,7 @@ class InspectionManager(Node):
     # Helper: Log reflectance measurements
     # ----------------------------------------------------------
     def _log_reflectance(self, vis_norm, nir_norm, counter, label="Unknown"):
-        csv_dir = os.path.expanduser("~/Documents/Hyperspectral_camera/src/arm_control/resource/reflectance")
+        csv_dir = os.path.join(self.data_dir, "reflectance")
         os.makedirs(csv_dir, exist_ok=True)
         
         now = datetime.now()
@@ -233,7 +273,7 @@ class InspectionManager(Node):
         if (vis_mti, nir_mti) == self._last_mti:
             return
         self._last_mti = (vis_mti, nir_mti)
-        file_path = os.path.expanduser("~/Documents/Hyperspectral_camera/src/arm_control/resource/mti_log.json")
+        file_path = os.path.join(self.data_dir, "mti_log.json")
 
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -603,7 +643,7 @@ class InspectionManager(Node):
             time_str = now.strftime("%H:%M:%S.%f")[:-3]
             filename = f"Hyperspectral_data_{date_str}.csv"
 
-            csv_dir = os.path.expanduser("~/hyperspectral_inspections")
+            csv_dir = os.path.join(self.data_dir, "inspections")
             os.makedirs(csv_dir, exist_ok=True)
             csv_path = os.path.join(csv_dir, filename)
             file_exists = os.path.isfile(csv_path)
@@ -658,7 +698,7 @@ class InspectionManager(Node):
                 }
             }
 
-            json_dir       = os.path.expanduser("~/hyperspectral_inspections")
+            json_dir       = os.path.join(self.data_dir, "inspections")
             os.makedirs(json_dir, exist_ok=True)
             nom_arxiu_json = os.path.join(json_dir, "registre_inspeccions.json")
 
@@ -710,9 +750,7 @@ class InspectionManager(Node):
           - Columnes MTI_VIS, MTI_NIR com a metadades de traçabilitat (NO al model)
           - Columnes GSM_VIS_max, GSM_NIR_max per filtrar Hard Ceiling a train_model.py
         """
-        csv_dir = os.path.expanduser(
-            "~/Documents/Hyperspectral_camera/src/arm_control/resource"
-        )
+        csv_dir = self.data_dir
         os.makedirs(csv_dir, exist_ok=True)
 
         file_path = os.path.join(csv_dir, "Dataset_Entrenament_Nou.csv")
@@ -834,6 +872,9 @@ def parse_args():
                         help="Mode: 'predict', 'collect', o 'focus' per test manual.")
     parser.add_argument('--label', type=str, default='Unknown',
                         help="Classe del material per entrenar (ex: P1, Fora1). Només s'usa en mode 'collect'.")
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help=f"Directori arrel de sortida (defecte: <ws>/src/{DATA_SUBPATH}; "
+                             f"també via ${DATA_DIR_ENV}).")
     
     # Configuracio VIS
     parser.add_argument('--vis-mtr', type=int, default=None,
@@ -877,7 +918,7 @@ def main(args=None):
     rclpy.init(args=args)
     params = parse_args()
 
-    manager = InspectionManager(enable_plot=params.plot)
+    manager = InspectionManager(enable_plot=params.plot, data_dir=params.output_dir)
     
     if params.mode == 'focus':
         # --focus-speed és l'MTI dedicat al test de focus (defecte 140K, zona lineal pura)
