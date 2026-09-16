@@ -5964,6 +5964,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.fsm_state_combo.addItems([
             "ScanWall", "CreateMap", "ObjectID", "GeometryReconstruction", "ScanFloor",
             "Armfolding", "ArmUnfolding", "NavigateToPose",
+            # Offline: process the latest recorded sensor session from disk and
+            # finish. No robot stack is launched (fsm_node's offline bootstrap).
+            "SensorDataProcessing",
         ])
         controls_row.addWidget(self.fsm_state_combo)
 
