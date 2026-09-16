@@ -13,6 +13,29 @@ string[] requested_actions        # "MATERIAL_IDENTIFICATION"
 string[] reasons                  # "HSI_LOW_CONFIDENCE" | "HSI_QUALITY_REJECTED" | ...
 uint32[] sample_counts            # hyperspectral samples behind each target
 string request_json_path          # full detail: .../processed/<session>/pokeye/pokeye_request.json
+
+# NO_DRILL constraints (POKEYE decision policy v2). A GPR hyperbola is a
+# subsurface reflector -- rebar, pipe, cable -- so its position must not be
+# drilled, whatever sent POKEYE there. These are NOT targets and NOT a reason
+# to drill: they apply to every drill POKEYE performs on this wall, including
+# a RANDOM location POKEYE chooses itself. `positions` above have already been
+# screened against them by the FSM.
+# Same frame_id as `positions`; one entry per zone across the parallel arrays.
+geometry_msgs/Point[] no_drill_positions   # hyperbola positions, transformed to frame_id
+float32[] no_drill_radii                   # exclusion radius around each, metres
+string[] no_drill_ids                      # "w02_l01_s00_H001", ...
+uint32 n_no_drill_unlocated                # hyperbolae that exist but could not be placed
+
+# The scanned region: the GPR lines of this wall that were swept AND analysed.
+# Nowhere else on the wall may be drilled, because nothing is known about what
+# is behind it -- a clean B-scan is evidence, no B-scan is not. A RANDOM
+# location POKEYE chooses must lie on one of these segments (within
+# scanned_line_tolerance of it) and outside every no_drill sphere above.
+# If this list is empty, the wall has no drillable region at all.
+geometry_msgs/Point[] scanned_line_starts  # one per scanned+analysed line, in frame_id
+geometry_msgs/Point[] scanned_line_ends
+string[] scanned_line_ids                  # "w02_l01_s00", ...
+float32 scanned_line_tolerance             # how far off a segment still counts as on it, metres
 ---
 # --- Response ---
 bool success                      # the request was received and understood
