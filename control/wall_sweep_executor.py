@@ -152,6 +152,14 @@ class WallSweepExecutor(Node):
         self.declare_parameter("max_traverse_m", 1.10)
         # Taking the arm over from whatever was driving it before.
         self.declare_parameter("preempt_hold_s", 0.5)
+        # Time the arm gets to reach a leg's FIRST waypoint from wherever it
+        # actually is. The planner stamps that point t = 0, and the UR's external
+        # control script only tolerates a zero-time first point when the arm is
+        # already within 0.01 rad of it -- otherwise it cancels the whole
+        # trajectory with "Spline time shouldn't be zero" on the pendant. Under
+        # force mode the arm is never that close to the planned pose, so every
+        # leg is shifted by this much instead (see _to_msg).
+        self.declare_parameter("first_point_lead_s", 0.5)
         self.declare_parameter("at_rest_tolerance_rad", 0.002)
         self.declare_parameter("at_rest_dwell_s", 0.4)
         self.declare_parameter("at_rest_timeout_s", 90.0)
@@ -929,10 +937,21 @@ class WallSweepExecutor(Node):
         Positions AND velocities AND explicit times -- the whole reason this node
         does not go through ``publisher_joint_trajectory_planned``, which would
         strip the first and recompute the last (§3.2).
+
+        The plan's first point sits at t = 0. Sent like that, the UR script has
+        no time to get from the arm's real pose to it and cancels the motion
+        unless the two already coincide (within 0.01 rad), which after a force
+        mode press they do not. So the whole leg is shifted by
+        ``first_point_lead_s``: the first spline segment then carries the arm
+        from where it is onto the planned start, and every later point keeps
+        its planned spacing and velocity.
         """
+        lead = float(self.get_parameter("first_point_lead_s").value)
+        offset = lead if plan.times[0] <= 0.0 else 0.0
         traj = JointTrajectory()
         traj.joint_names = list(self.joint_names)
         for t, q, qdot in zip(plan.times, plan.q, plan.qdot):
+            t = float(t) + offset
             point = JointTrajectoryPoint()
             point.positions = q.tolist()
             point.velocities = qdot.tolist()
