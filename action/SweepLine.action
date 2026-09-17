@@ -34,8 +34,9 @@ bool press
 # Doing it as its own goal is what lets the FSM press the plate against the wall
 # at the partition START rather than at its centre: force mode is started between
 # this goal and the sweep goal, so the GPR wheel is never dragged sideways across
-# the wall under load. The sweep goal that follows re-plans from the new pose and
-# skips its own lead-in, which is by then shorter than MIN_LEAD_IN_M.
+# the wall under load. The sweep goal that follows starts from wherever the press
+# left the plate -- it never traverses under load, even if the press drifted the
+# plate a few centimetres from the nominal partition start.
 bool lead_in_only
 ---
 # --- Result ---

@@ -160,6 +160,10 @@ class WallSweepExecutor(Node):
         # force mode the arm is never that close to the planned pose, so every
         # leg is shifted by this much instead (see _to_msg).
         self.declare_parameter("first_point_lead_s", 0.5)
+        # A pressed sweep starts from wherever the press left the plate rather
+        # than traversing to the nominal partition start (see _plan). Above this
+        # offset the drift is logged as a warning.
+        self.declare_parameter("press_drift_warn_m", 0.05)
         self.declare_parameter("at_rest_tolerance_rad", 0.002)
         self.declare_parameter("at_rest_dwell_s", 0.4)
         self.declare_parameter("at_rest_timeout_s", 90.0)
@@ -837,6 +841,31 @@ class WallSweepExecutor(Node):
         retract = 0.0 if request.press else float(
             self.get_parameter("approach_retract_m").value
         )
+
+        # PRESSED SWEEP: no traverse at all. The lead-in goal already put the
+        # plate at the partition start, and force mode + the alignment
+        # controller then moved it a few centimetres in the contact plane while
+        # settling (4-11 cm on the 2026-09-16 runs). Chasing that residual here
+        # meant a short fast move -- up, down or sideways -- with the wheel
+        # under load, right before the scan. So the sweep is anchored where the
+        # plate actually is, keeping the partition's direction and length; any
+        # positioning belongs to the lead-in, before the press. The offset is
+        # logged so a drifting press is visible, not silently absorbed.
+        if request.press and not request.lead_in_only:
+            residual = p_scan_start - p_current
+            offset = float(np.linalg.norm(residual))
+            p_scan_end = p_current + (p_scan_end - p_scan_start)
+            p_scan_start = p_current
+            message = (
+                f"Force Mode is pressing: sweeping from where the plate is, "
+                f"{offset * 1000:.0f} mm from the nominal partition start "
+                f"(no traverse under load)."
+            )
+            if offset > float(self.get_parameter("press_drift_warn_m").value):
+                self.get_logger().warn(message + " That is a lot of drift during the press.")
+            else:
+                self.get_logger().info(message)
+
         traverse_distance = float(np.linalg.norm(p_scan_start - p_current))
         # Reported separately because it is the component the FSM's approach could
         # not place: the wall-normal part is by construction just `retract`.
@@ -854,13 +883,14 @@ class WallSweepExecutor(Node):
                 f"the singularity",
             )
 
-        self.get_logger().info(
-            f"Traverse {traverse_distance:.3f} m to the partition start "
-            f"({lateral_distance:.3f} m of it lateral), "
-            + ("in the contact plane (Force Mode holds the wheel on the wall)."
-               if request.press
-               else f"closing the {retract:.2f} m approach margin on the way in.")
-        )
+        if traverse_distance > self.MIN_LEAD_IN_M:
+            self.get_logger().info(
+                f"Traverse {traverse_distance:.3f} m to the partition start "
+                f"({lateral_distance:.3f} m of it lateral), "
+                + ("in the contact plane (Force Mode holds the wheel on the wall)."
+                   if request.press
+                   else f"closing the {retract:.2f} m approach margin on the way in.")
+            )
 
         legs = []
         q_seed = q_current
