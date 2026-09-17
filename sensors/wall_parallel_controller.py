@@ -104,8 +104,12 @@ class WallParallelController(Node):
             [0.00,  -0.172],  # 5: S3 (bottom-mid)
             ]
         self.pos = np.array(ultrasonic + tof)
-        # per-sensor stddev (m): ToF is far more precise than ultrasonic
-        self.sigma = np.array([0.010, 0.010, 0.010, 0.010, 0.010, 0.010])
+        # per-sensor stddev (m): the residual scatter measured against the arm's
+        # FK on 2026-09-17 once the reader's per-sensor offsets are applied
+        # (sensors/plate_calibration.py) — ultrasonics 4-6 mm from their 1 cm
+        # quantisation, ToF 1.4-1.7 mm. Equal weights let one ultrasonic count
+        # tilt the fitted plane by ~1 deg.
+        self.sigma = np.array([0.006, 0.006, 0.006, 0.002, 0.002, 0.002])
         # validity window (m): drop saturated / invalid readings
         self.valid_lo = np.array([0.02, 0.02, 0.02, 0.011, 0.011, 0.011])
         self.valid_hi = np.array([3.90, 3.90, 3.90, 0.258, 0.258, 0.258])

@@ -12,6 +12,8 @@ import threading
 from collections import deque
 from statistics import median
 
+from .plate_calibration import RANGE_OFFSET_M, apply_range_calibration
+
 # Stable name created by the udev rule in arm_control/udev/99-arduino-sensors.rules.
 # Do not use a raw /dev/ttyACM* index: it shifts whenever the board re-enumerates.
 DEFAULT_SERIAL_PORT = '/dev/arduino_sensors'
@@ -75,6 +77,9 @@ class MultiSensorNode(Node):
         threading.Thread(target=self.listen_for_key, daemon=True).start()
 
         self.get_logger().info(f"Multi-sensor node initialized (autostart={autostart}).")
+        self.get_logger().info(
+            "Range calibration (published - true, m): "
+            + " ".join(f"{n}:{o:+.4f}" for n, o in zip(("U1", "U2", "U3", "S1", "S2", "S3"), RANGE_OFFSET_M)))
         if autostart:
             self.get_logger().info("Autostart enabled: continuous publishing started")
         else:
@@ -221,11 +226,19 @@ class MultiSensorNode(Node):
                     # Publishing data into topic
                     distances_array = Float32MultiArray()
                     if self.calc_type == 0:
-                        distances_array.data = [median(self.buffer_ultra[i]) / 100.0 for i in range(3)] + [(median(self.buffer_vl[i]) / 1000.0)+0.083 for i in range(3)]
+                        ultra_raw = [median(self.buffer_ultra[i]) for i in range(3)]
+                        tof_raw = [median(self.buffer_vl[i]) for i in range(3)]
                     elif self.calc_type == 1:
-                        distances_array.data = [sum(self.buffer_ultra[i]) / len(self.buffer_ultra[i]) / 100.0 for i in range(3)] + [(sum(self.buffer_vl[i]) / len(self.buffer_vl[i]) / 1000.0)+0.083 for i in range(3)]
+                        ultra_raw = [sum(self.buffer_ultra[i]) / len(self.buffer_ultra[i]) for i in range(3)]
+                        tof_raw = [sum(self.buffer_vl[i]) / len(self.buffer_vl[i]) for i in range(3)]
                     else:
                         self.get_logger().error("Wrong computation type selected.")
+                    # Per-sensor offsets from the 2026-09-17 FK calibration are taken
+                    # off here, once, so every consumer sees the same corrected
+                    # ranges. Sentinels (0 cm / 255 mm) pass through untouched.
+                    distances_array.data = apply_range_calibration(
+                        [v / 100.0 for v in ultra_raw] + [v / 1000.0 + 0.083 for v in tof_raw],
+                        ultra_raw, tof_raw)
                     
                     self.pub_sensors.publish(distances_array)
                     self.get_logger().info(f"Float32MultiArray: {['%.3f' % v for v in distances_array.data]}")
