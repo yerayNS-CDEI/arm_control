@@ -12,7 +12,10 @@ import threading
 from collections import deque
 from statistics import median
 
-from .plate_calibration import RANGE_OFFSET_M, apply_range_calibration
+# This file is installed as the executable itself (a symlink into the source
+# tree), so it runs as a bare script and a relative import has no package to
+# be relative to. Absolute, like hyperspectral_node's ``sensors_lib`` import.
+from sensors.plate_calibration import RANGE_OFFSET_M, apply_range_calibration
 
 # Stable name created by the udev rule in arm_control/udev/99-arduino-sensors.rules.
 # Do not use a raw /dev/ttyACM* index: it shifts whenever the board re-enumerates.
