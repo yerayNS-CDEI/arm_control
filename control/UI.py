@@ -5428,7 +5428,13 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         controls_row.addWidget(QLabel("Sim Mode:"))
         self.fsm_sim_combo = QComboBox()
-        self.fsm_sim_combo.addItems(["true", "false"])
+        # Real robot first, so a freshly opened UI does not start the FSM in
+        # simulation: with "true" listed first, four field attempts on
+        # 2026-09-18 brought up Gazebo instead of the robot and were read as
+        # random node crashes (point_cloud_aggregator, headless rviz). This is
+        # the only sim selector in the UI that defaulted to true; the arm
+        # panel's and fsm_node's own --sim both default to false.
+        self.fsm_sim_combo.addItems(["false", "true"])
         controls_row.addWidget(self.fsm_sim_combo)
 
         controls_row.addSpacing(16)
