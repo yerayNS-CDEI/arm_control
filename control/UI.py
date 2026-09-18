@@ -5998,6 +5998,30 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         ])
         controls_row.addWidget(self.fsm_state_combo)
 
+        # Recorded session for the offline SensorDataProcessing run. Only
+        # meaningful for that state; the FSM's own fallback ("latest") is the
+        # default, and a named session goes to fsm_node as the same parameter
+        # override the README documents (-p hyperspectral_session_dir / -p
+        # sensor_session_id), so the UI cannot drift from the terminal path.
+        controls_row.addSpacing(16)
+        self.fsm_session_label = QLabel("Session:")
+        controls_row.addWidget(self.fsm_session_label)
+        self.fsm_session_combo = QComboBox()
+        self.fsm_session_combo.setMinimumWidth(220)
+        self.fsm_session_combo.setToolTip(
+            "Recorded session under task_planner_fsm/data/raw to process\n"
+            "(SensorDataProcessing only). 'latest' lets fsm_node pick: the newest\n"
+            "hyperspectral session, else the GPR session with the newest manifest.")
+        controls_row.addWidget(self.fsm_session_combo)
+        self.btn_fsm_session_refresh = QPushButton("\u21bb")
+        self.btn_fsm_session_refresh.setFixedWidth(28)
+        self.btn_fsm_session_refresh.setToolTip("Rescan the recorded sessions")
+        self.btn_fsm_session_refresh.clicked.connect(self._refresh_fsm_sessions)
+        controls_row.addWidget(self.btn_fsm_session_refresh)
+        self.fsm_state_combo.currentTextChanged.connect(self._on_fsm_state_changed)
+        self._refresh_fsm_sessions()
+        self._on_fsm_state_changed(self.fsm_state_combo.currentText())
+
         controls_row.addSpacing(24)
         self.btn_fsm_start = QPushButton("Start FSM")
         self.btn_fsm_start.clicked.connect(self._toggle_fsm)
@@ -6062,6 +6086,51 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         return fsm_tab
 
+    def _on_fsm_state_changed(self, state):
+        offline = (state == "SensorDataProcessing")
+        for w in (self.fsm_session_label, self.fsm_session_combo, self.btn_fsm_session_refresh):
+            w.setEnabled(offline)
+
+    def _refresh_fsm_sessions(self):
+        """Fill the session combo from task_planner_fsm's data/raw folders.
+
+        Each item carries the fsm_node parameter that selects it: a
+        hyperspectral session by its directory, a GPR-only session by its
+        stamp (the folder name after ``session_``, which may be a hand-given
+        name like ``wheel``). The listing comes from the package's own
+        ``sensors.paths`` so the UI shows exactly what the FSM would find.
+        """
+        combo = self.fsm_session_combo
+        current = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("latest (auto)", None)
+        try:
+            from task_planner_fsm.sensors import paths as sensor_paths
+            hsi = list(reversed(sensor_paths.raw_session_dirs()))
+            gpr = sorted(sensor_paths.gpr_session_dirs(), reverse=True)
+            for d in hsi:
+                combo.addItem(f"hsi  {d.name}", ("hyperspectral_session_dir", str(d)))
+            for d in gpr:
+                combo.addItem(f"gpr  {d.name}", ("sensor_session_id", sensor_paths.session_stamp_of(d)))
+            if not hsi and not gpr:
+                combo.addItem("(no recorded session found)", None)
+        except Exception as exc:  # noqa: BLE001 -- the UI must not die on a missing package
+            combo.addItem(f"(cannot list sessions: {exc})", None)
+        idx = combo.findData(current) if current is not None else 0
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _fsm_session_override(self, state):
+        """``['--ros-args', '-p', 'key:=value']`` for the chosen session, or []."""
+        if state != "SensorDataProcessing":
+            return []
+        data = self.fsm_session_combo.currentData()
+        if not data:
+            return []
+        key, value = data
+        return ['--ros-args', '-p', f'{key}:={value}']
+
     def _toggle_fsm(self):
         """Start or stop the FSM launch + node pair."""
         if self.fsm_launch_process is not None or self.fsm_node_process is not None:
@@ -6101,7 +6170,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             '--sim', sim,
             '--planner-backend', planner,
             '--initial-state', state,
-        ]
+        ] + self._fsm_session_override(state)
         QTimer.singleShot(3000, lambda: self._start_fsm_node(node_args))
 
     def _start_fsm_node(self, node_args):
