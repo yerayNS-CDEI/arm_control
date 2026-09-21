@@ -6022,6 +6022,28 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self._refresh_fsm_sessions()
         self._on_fsm_state_changed(self.fsm_state_combo.currentText())
 
+        # GPR trigger bridge (ESP32 fake encoder on Oliwall_2G). Off by default:
+        # it is only useful with the real probe on the robot, and a node with
+        # nothing to talk to is wasted Jetson time. Ticked, the box starts the
+        # bridge from task_planner.launch.py (gpr_trigger_bridge:=true, so it
+        # dies with the rest of the launch on Stop) and hands fsm_node
+        # gpr_trigger_bridge_required so a sweep refuses to start on a dead link.
+        controls_row.addSpacing(16)
+        self.fsm_gpr_bridge_check = QCheckBox("GPR trigger bridge")
+        self.fsm_gpr_bridge_check.setToolTip(
+            "Start gpr_trigger_bridge (/gpr/trigger -> UDP -> ESP32) with the FSM\n"
+            "and require the board to answer before every wall sweep.\n"
+            "Real robot only; leave off in sim and when the GPR is not mounted.")
+        self.fsm_gpr_bridge_check.toggled.connect(self._on_fsm_gpr_bridge_toggled)
+        controls_row.addWidget(self.fsm_gpr_bridge_check)
+        self.fsm_gpr_ip_input = QLineEdit()
+        self.fsm_gpr_ip_input.setPlaceholderText("ESP32 IP")
+        self.fsm_gpr_ip_input.setMaximumWidth(130)
+        self.fsm_gpr_ip_input.setToolTip(
+            "ESP32 address on Oliwall_2G (DHCP reservation, see ESP32/README.md).")
+        controls_row.addWidget(self.fsm_gpr_ip_input)
+        self._on_fsm_gpr_bridge_toggled(self.fsm_gpr_bridge_check.isChecked())
+
         controls_row.addSpacing(24)
         self.btn_fsm_start = QPushButton("Start FSM")
         self.btn_fsm_start.clicked.connect(self._toggle_fsm)
@@ -6091,6 +6113,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         for w in (self.fsm_session_label, self.fsm_session_combo, self.btn_fsm_session_refresh):
             w.setEnabled(offline)
 
+    def _on_fsm_gpr_bridge_toggled(self, checked):
+        self.fsm_gpr_ip_input.setEnabled(bool(checked))
+
     def _refresh_fsm_sessions(self):
         """Fill the session combo from task_planner_fsm's data/raw folders.
 
@@ -6122,14 +6147,35 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         combo.blockSignals(False)
 
     def _fsm_session_override(self, state):
-        """``['--ros-args', '-p', 'key:=value']`` for the chosen session, or []."""
+        """``['-p', 'key:=value']`` for the chosen session, or []."""
         if state != "SensorDataProcessing":
             return []
         data = self.fsm_session_combo.currentData()
         if not data:
             return []
         key, value = data
-        return ['--ros-args', '-p', f'{key}:={value}']
+        return ['-p', f'{key}:={value}']
+
+    def _fsm_gpr_bridge_enabled(self):
+        return self.fsm_gpr_bridge_check.isChecked()
+
+    def _fsm_gpr_bridge_launch_args(self):
+        """Launch arguments that start the bridge from task_planner.launch.py."""
+        if not self._fsm_gpr_bridge_enabled():
+            return []
+        ip = self.fsm_gpr_ip_input.text().strip()
+        return ['gpr_trigger_bridge:=true', f'gpr_receiver_ip:={ip}']
+
+    def _fsm_gpr_bridge_override(self):
+        """``['-p', ...]`` making fsm_node refuse a sweep on a dead link."""
+        if not self._fsm_gpr_bridge_enabled():
+            return []
+        return ['-p', 'gpr_trigger_bridge_required:=true']
+
+    def _fsm_ros_args(self, *overrides):
+        """Join ``['-p', ...]`` lists under a single ``--ros-args``, or []."""
+        flat = [a for group in overrides for a in group]
+        return ['--ros-args'] + flat if flat else []
 
     def _toggle_fsm(self):
         """Start or stop the FSM launch + node pair."""
@@ -6143,12 +6189,23 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         planner = self.fsm_planner_combo.currentText()
         state = self.fsm_state_combo.currentText()
 
+        # The bridge exits at once without a receiver_ip; better to say so
+        # here than to have the sweep fail later on "no bridge status".
+        if self._fsm_gpr_bridge_enabled() and not self.fsm_gpr_ip_input.text().strip():
+            self._fsm_append_log(
+                "<span style='color: #f47067;'>GPR trigger bridge is ticked but the "
+                "ESP32 IP is empty; fill it in or untick the box.</span>",
+                "GPR trigger bridge is ticked but the ESP32 IP is empty; fill it in or untick the box.",
+            )
+            return
+
         self.btn_fsm_start.setText("Stop FSM")
         self.btn_fsm_start.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         self._fsm_set_input_enabled(True)
 
         # ── Step 1: launch file ──
-        launch_args = ['launch', 'task_planner_fsm', 'task_planner.launch.py']
+        launch_args = ['launch', 'task_planner_fsm', 'task_planner.launch.py'] \
+            + self._fsm_gpr_bridge_launch_args()
         self._fsm_append_log(
             f"<b style='color: #57ab5a;'>▶ ros2 {' '.join(launch_args)}</b>",
             f"▶ ros2 {' '.join(launch_args)}",
@@ -6170,7 +6227,10 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             '--sim', sim,
             '--planner-backend', planner,
             '--initial-state', state,
-        ] + self._fsm_session_override(state)
+        ] + self._fsm_ros_args(
+            self._fsm_session_override(state),
+            self._fsm_gpr_bridge_override(),
+        )
         QTimer.singleShot(3000, lambda: self._start_fsm_node(node_args))
 
     def _start_fsm_node(self, node_args):
