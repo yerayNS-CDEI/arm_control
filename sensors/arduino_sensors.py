@@ -143,7 +143,7 @@ class MultiSensorNode(Node):
                 self.publish_now = True
                 self.publish_mode = 1                 
 
-    def create_range_msg(self, frame_id, distance_m):
+    def create_range_msg(self, frame_id, distance_m, max_range=0.18):
         msg = Range()
         msg.header = Header()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -151,7 +151,7 @@ class MultiSensorNode(Node):
         msg.radiation_type = Range.INFRARED
         msg.field_of_view = 0.0349
         msg.min_range = 0.01
-        msg.max_range = 0.18
+        msg.max_range = max_range
         msg.range = min(max(distance_m, msg.min_range), msg.max_range)
         return msg
 
@@ -193,41 +193,15 @@ class MultiSensorNode(Node):
                             self.publish_now = False
                         return
 
-                    # Presenting results in the terminal
-                    sensor_ranges = []
-                    for i in range(3):
-                        if self.calc_type == 0:
-                            avg = median(self.buffer_ultra[i]) / 100.0
-                        elif self.calc_type == 1:
-                            avg = sum(self.buffer_ultra[i]) / len(self.buffer_ultra[i])
-                        else:
-                            self.get_logger().error("Wrong computation type selected.")
-
-                        self.get_logger().info(f"Buffer sensor hcsr04_{i+1}: {list(self.buffer_ultra[i])}")
-                        self.get_logger().info(f"Value sensor hcsr04_{i+1}: {avg:.3f} m")
-                        msg = self.create_range_msg(f"hcsr04_sensor{i+1}", avg)
-                        getattr(self, f'pub_s{i+1}').publish(msg)
-                        sensor_ranges.append(f"Sensor {i+1}: {msg.range:.3f} m")
-
-                    for i in range(3):
-                        if self.calc_type == 0:
-                            avg = median(self.buffer_vl[i]) / 100.0
-                        elif self.calc_type == 1:
-                            avg = sum(self.buffer_vl[i]) / len(self.buffer_vl[i])
-                        else:
-                            self.get_logger().error("Wrong computation type selected.")
-                        
-                        self.get_logger().info(f"Buffer sensor vl6180_{i+1}: {list(self.buffer_vl[i])}")
-                        self.get_logger().info(f"Value sensor vl6180_{i+1}: {avg:.3f} m")
-                        msg = self.create_range_msg(f"vl6180_sensor{i+1}", avg)
-                        getattr(self, f'pub_s{i+4}').publish(msg)
-                        sensor_ranges.append(f"Sensor {i+4}: {msg.range:.3f} m")
-
-                    log_msg = "\n".join(sensor_ranges)
-                    self.get_logger().info(f"\n{log_msg}")
-
-                    # Publishing data into topic
-                    distances_array = Float32MultiArray()
+                    # One reduction of each buffer, and ONE calibration, feeding
+                    # both the per-sensor Range topics and the array. The Range
+                    # messages used to be built separately from the raw buffers
+                    # — uncalibrated, and the ToF ones divided millimetres by
+                    # 100 and skipped the mounting offset, so they clamped at
+                    # max_range and read 0.180 whatever the plate was doing —
+                    # which made the log look like the array disagreed with the
+                    # sensors. Nothing steers by the Range topics; the array is
+                    # what every consumer reads.
                     if self.calc_type == 0:
                         ultra_raw = [median(self.buffer_ultra[i]) for i in range(3)]
                         tof_raw = [median(self.buffer_vl[i]) for i in range(3)]
@@ -236,13 +210,31 @@ class MultiSensorNode(Node):
                         tof_raw = [sum(self.buffer_vl[i]) / len(self.buffer_vl[i]) for i in range(3)]
                     else:
                         self.get_logger().error("Wrong computation type selected.")
-                    # Per-sensor offsets from the 2026-09-17 FK calibration are taken
-                    # off here, once, so every consumer sees the same corrected
-                    # ranges. Sentinels (0 cm / 255 mm) pass through untouched.
-                    distances_array.data = apply_range_calibration(
+                        return
+                    # Ultrasonics report cm, ToF mm with their faces 0.083 m in
+                    # front of the plate; both become metres from the plate's
+                    # sensor plane. Per-sensor offsets (sensors/plate_calibration.py)
+                    # are taken off here, once, so every consumer sees the same
+                    # corrected ranges. Sentinels (0 cm / 255 mm) pass through.
+                    calibrated = apply_range_calibration(
                         [v / 100.0 for v in ultra_raw] + [v / 1000.0 + 0.083 for v in tof_raw],
                         ultra_raw, tof_raw)
-                    
+
+                    sensor_ranges = []
+                    for i in range(3):
+                        self.get_logger().info(f"Buffer sensor hcsr04_{i+1}: {list(self.buffer_ultra[i])}")
+                        msg = self.create_range_msg(f"hcsr04_sensor{i+1}", calibrated[i], max_range=4.0)
+                        getattr(self, f'pub_s{i+1}').publish(msg)
+                        sensor_ranges.append(f"Sensor {i+1}: {msg.range:.3f} m")
+                    for i in range(3):
+                        self.get_logger().info(f"Buffer sensor vl6180_{i+1}: {list(self.buffer_vl[i])}")
+                        msg = self.create_range_msg(f"vl6180_sensor{i+1}", calibrated[3 + i], max_range=0.30)
+                        getattr(self, f'pub_s{i+4}').publish(msg)
+                        sensor_ranges.append(f"Sensor {i+4}: {msg.range:.3f} m")
+                    self.get_logger().info("\n" + "\n".join(sensor_ranges))
+
+                    distances_array = Float32MultiArray()
+                    distances_array.data = calibrated
                     self.pub_sensors.publish(distances_array)
                     self.get_logger().info(f"Float32MultiArray: {['%.3f' % v for v in distances_array.data]}")
 
