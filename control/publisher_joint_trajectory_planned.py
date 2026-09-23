@@ -17,6 +17,7 @@ from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 from control_msgs.msg import JointTolerance
 from copy import deepcopy
+from math import copysign
 from std_srvs.srv import Trigger
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
@@ -31,9 +32,24 @@ class PublisherJointTrajectoryActionClient(Node):
                                           "arm_wrist_2_joint", "arm_wrist_3_joint"])
         self.declare_parameter("check_starting_point", False)
 
+        # --- Motion-profile parameters -------------------------------------
+        # The arm behaves differently in Gazebo and on the real UR10e, so the
+        # timing gains are declared twice and the active pair is selected from
+        # "sim".  arm.launch.py sets it to true only for pure Gazebo; the real
+        # robot and hybrid simulation (URSim through the passthrough
+        # controller) both use the "_real" values.
+        self.declare_parameter("sim", False)
+        self.declare_parameter("max_joint_speed_sim", 0.9)    # rad/s
+        self.declare_parameter("max_joint_speed_real", 0.5)   # rad/s
+        self.declare_parameter("min_segment_time_sim", 0.1)   # s
+        self.declare_parameter("min_segment_time_real", 0.4)  # s
+        # Blend through intermediate waypoints instead of stopping at each one.
+        self.declare_parameter("blend_waypoint_velocities", True)
+
         controller_name = self.get_parameter("controller_name").value
         self.joints = self.get_parameter("joints").value
         self.check_starting_point = self.get_parameter("check_starting_point").value
+        self.sim = bool(self.get_parameter("sim").value)
 
         if self.joints is None or len(self.joints) == 0:
             raise Exception('"joints" parameter is required')
@@ -158,6 +174,73 @@ class PublisherJointTrajectoryActionClient(Node):
 
         return [self.current_joint_state.position[index_by_name[name]] for name in joint_order]
 
+    def _motion_profile(self):
+        """Return (max_joint_speed, min_segment_time) for the active sim/real profile.
+
+        Both pairs are read fresh on every goal so they can be retuned live with
+        ``ros2 param set`` without restarting the node.
+        """
+        suffix = "_sim" if self.sim else "_real"
+        return (
+            float(self.get_parameter("max_joint_speed" + suffix).value),
+            float(self.get_parameter("min_segment_time" + suffix).value),
+        )
+
+    @staticmethod
+    def _blend_velocities(waypoints, segment_durations, start_positions, max_joint_speed):
+        """Per-waypoint joint velocities that let the arm pass *through* waypoints.
+
+        ``waypoints`` are the joint positions of the trajectory points and
+        ``segment_durations[i]`` is the time allotted to reach ``waypoints[i]``.
+        ``start_positions`` is where the arm actually is when execution begins
+        (the implicit point at t=0), or None when it is unknown.
+
+        The velocity at an interior waypoint is the *minmod* of the incoming and
+        outgoing chord slopes: zero whenever the joint reverses direction (it has
+        to stop there anyway) and otherwise the smaller of the two slopes, signed.
+        Bounding the tangent by the smaller adjacent slope is exactly the
+        condition that keeps a cubic Hermite segment monotone, so the spline can
+        no longer overshoot past a waypoint - which is what made plain
+        finite-difference velocities trip PATH_TOLERANCE_VIOLATED in Gazebo.
+        The last waypoint keeps zero velocity so the arm comes to rest on the goal.
+        """
+        n = len(waypoints)
+        n_joints = len(waypoints[0])
+
+        # Node list including the implicit start point: nodes[k] is reached at the
+        # end of segment_durations[k - 1], so nodes[k + 1] == waypoints[k].
+        if start_positions is not None and len(start_positions) != n_joints:
+            start_positions = None
+        nodes = [list(start_positions) if start_positions is not None else None]
+        nodes.extend(list(p) for p in waypoints)
+
+        velocities = []
+        for k in range(n):
+            if k == n - 1 or nodes[k] is None:
+                # Final waypoint rests on the goal; without a known start position
+                # the first waypoint has no incoming slope, so keep it at rest.
+                velocities.append([0.0] * n_joints)
+                continue
+
+            dt_in = segment_durations[k]
+            dt_out = segment_durations[k + 1]
+            if dt_in <= 0.0 or dt_out <= 0.0:
+                velocities.append([0.0] * n_joints)
+                continue
+
+            point_velocities = []
+            for j in range(n_joints):
+                slope_in = (nodes[k + 1][j] - nodes[k][j]) / dt_in
+                slope_out = (nodes[k + 2][j] - nodes[k + 1][j]) / dt_out
+                if slope_in * slope_out <= 0.0:
+                    point_velocities.append(0.0)
+                else:
+                    magnitude = min(abs(slope_in), abs(slope_out), max_joint_speed)
+                    point_velocities.append(copysign(magnitude, slope_in))
+            velocities.append(point_velocities)
+
+        return velocities
+
     def send_trajectory_goal(self):
         goal_msg = FollowJointTrajectory.Goal()
 
@@ -165,19 +248,13 @@ class PublisherJointTrajectoryActionClient(Node):
         joint_order = trajectory.joint_names if trajectory.joint_names else self.joints
         current_positions = self._current_positions_for_joint_order(joint_order)
 
-        # Each waypoint gets zero velocities.  The joint_trajectory_controller then
-        # uses cubic Hermite interpolation and generates a smooth bell-shaped velocity
-        # profile (accelerate from 0 → decelerate to 0) for every segment.  This is
-        # the only reliable way to avoid PATH_TOLERANCE_VIOLATED in Gazebo:
-        # finite-difference velocities at intermediate points cause the cubic spline
-        # to overshoot and push the actual joint position outside the tolerance window.
-        #
         # Timing: each segment is sized so that the peak joint velocity during the
         # cubic segment stays at or below max_joint_speed.  For a zero-velocity
         # cubic, peak velocity ≈ 1.5 * (delta / T), so T = 1.5 * delta / max_joint_speed.
-        max_joint_speed  = 0.1   # rad/s — intentionally slow for smooth, safe motion
-        min_segment_time = 0.9  # seconds — floor for very small moves
-        
+        # Blended segments peak lower than that, so the factor stays conservative.
+        max_joint_speed, min_segment_time = self._motion_profile()
+        blend = bool(self.get_parameter("blend_waypoint_velocities").value)
+
         n = len(trajectory.points)
 
         # --- Pass 1: compute per-segment durations ---
@@ -214,18 +291,44 @@ class PublisherJointTrajectoryActionClient(Node):
         self.get_logger().info(
             f"Trajectory: {n} waypoints, segment times: "
             f"{[f'{t:.2f}' for t in segment_durations]} s, "
-            f"total: {sum(segment_durations):.2f} s"
+            f"total: {sum(segment_durations):.2f} s "
+            f"(profile: {'sim' if self.sim else 'real'}, "
+            f"max_joint_speed={max_joint_speed:.3f} rad/s, "
+            f"min_segment_time={min_segment_time:.3f} s, "
+            f"blending={'on' if blend else 'off'})"
         )
 
-        # --- Pass 2: assign timestamps; zero velocity at every waypoint ---
+        # --- Pass 2: assign timestamps ---
         accumulated_time = 0.0
         for i, point in enumerate(trajectory.points):
             accumulated_time += segment_durations[i]
             secs = int(accumulated_time)
             nsecs = int((accumulated_time - secs) * 1e9)
             point.time_from_start = Duration(sec=secs, nanosec=nsecs)
-            point.velocities = [0.0] * len(point.positions)
-            point.accelerations = [0.0] * len(point.positions)
+
+        # --- Pass 3: waypoint velocities ---
+        if blend and n > 0:
+            # Non-zero velocities at intermediate waypoints let the controller
+            # carry momentum through them instead of decelerating to a stop and
+            # accelerating again.  Accelerations are left empty on purpose: with
+            # positions + velocities the controller interpolates with a cubic
+            # Hermite spline, whereas supplying accelerations too would force a
+            # quintic that is pinned to zero acceleration at every waypoint.
+            blended = self._blend_velocities(
+                [point.positions for point in trajectory.points],
+                segment_durations,
+                current_positions,
+                max_joint_speed,
+            )
+            for point, point_velocities in zip(trajectory.points, blended):
+                point.velocities = point_velocities
+                point.accelerations = []
+        else:
+            # Legacy behaviour: rest at every waypoint.  Each segment becomes an
+            # independent accelerate-from-0 / decelerate-to-0 profile.
+            for point in trajectory.points:
+                point.velocities = [0.0] * len(point.positions)
+                point.accelerations = [0.0] * len(point.positions)
 
         goal_msg.trajectory = trajectory
         goal_msg.goal_time_tolerance = Duration(sec=2, nanosec=0)

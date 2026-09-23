@@ -27,6 +27,14 @@ def generate_launch_description():
                 default_value="false",
                 description="Use simulation time"
             ),
+            DeclareLaunchArgument(
+                "sim",
+                default_value="false",
+                description=(
+                    "Select the simulation motion profile (max_joint_speed_sim / "
+                    "min_segment_time_sim) instead of the real-robot one"
+                )
+            ),
 
             Node(
                 package="arm_control",
@@ -36,6 +44,7 @@ def generate_launch_description():
                     controller_config,
                     {"controller_name": LaunchConfiguration("controller_name"),
                      "check_starting_point": LaunchConfiguration("check_starting_point"),
+                     "sim": LaunchConfiguration("sim"),
                      "use_sim_time": LaunchConfiguration("use_sim_time")}
                 ],
                 output="screen",
