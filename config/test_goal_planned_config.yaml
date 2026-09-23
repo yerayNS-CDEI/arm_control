@@ -4,6 +4,22 @@ publisher_joint_trajectory_planned:
     controller_name: "passthrough_trajectory_controller"
     wait_sec_between_publish: 1
 
+    # Motion profile. Two sets of timing gains: the "_sim" pair is used when the
+    # node is started with sim:=true (pure Gazebo), the "_real" pair otherwise
+    # (real UR10e and hybrid simulation against URSim). arm.launch.py picks the
+    # right one automatically; nothing has to be edited when switching.
+    #   max_joint_speed  - rad/s cap used to size each trajectory segment
+    #   min_segment_time - seconds, floor for very small moves
+    max_joint_speed_sim: 0.9
+    max_joint_speed_real: 0.5
+    min_segment_time_sim: 0.1
+    min_segment_time_real: 0.4
+
+    # Pass through intermediate waypoints with non-zero velocity instead of
+    # coming to a full stop at each one. Set to false to restore the old
+    # stop-at-every-waypoint behaviour.
+    blend_waypoint_velocities: true
+
     joints:
       - arm_shoulder_lift_joint
       - arm_shoulder_pan_joint
