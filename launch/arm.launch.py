@@ -112,6 +112,17 @@ def _resolve_controller_names(context, *args, **kwargs):
     jct = effective
     cfg['_arm_initial_joint_controller'] = jct
     cfg['_arm_default_trajectory_controller'] = effective
+    # ur_control.launch.py loads the jog controller inactive on the real robot;
+    # ur_sim_control.launch.py spawns only the initial joint controller, so under
+    # Gazebo forward_position_controller is declared in the controllers YAML but
+    # never loaded, and the jog's switch would be refused for a controller the
+    # manager has never heard of.
+    cfg['_arm_spawn_jog_controller'] = 'true' if is_pure_gazebo else 'false'
+    # Motion profile for publisher_joint_trajectory_planned: the arm only behaves
+    # like a simulated arm under pure Gazebo. Hybrid sim drives URSim through the
+    # passthrough controller, whose timing matches the real UR10e, so it shares
+    # the real-robot speed limits.
+    cfg['_arm_trajectory_profile_sim'] = 'true' if is_pure_gazebo else 'false'
     return []
 
 def generate_launch_description():
@@ -410,6 +421,7 @@ def generate_launch_description():
                 launch_arguments={
                     'check_starting_point': 'false',
                     'controller_name': effective_trajectory_controller_name,
+                    'sim': LaunchConfiguration('_arm_trajectory_profile_sim'),
                 }.items(),
                 condition=IfCondition(PythonExpression(["'", planner_backend, "' == 'legacy'"])),
             ),
