@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
 from geometry_msgs.msg import Pose
-from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray
+from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray, String
 from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -137,6 +137,20 @@ class RobotControlUI(QMainWindow):
         # FSM processes
         self.fsm_launch_process = None
         self.fsm_node_process = None
+
+        # FSM restart (fsm_node's /fsm/restart). The current state comes from
+        # /fsm/current_state (latched, republished every tick); the button is
+        # only live while the node sits in Error or Finished.
+        self._fsm_current_state = None
+        self._fsm_restart_pending = False
+        fsm_state_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.fsm_current_state_subscriber = self.node.create_subscription(
+            String, '/fsm/current_state', self._on_fsm_current_state, fsm_state_qos)
+        self.fsm_restart_publisher = self.node.create_publisher(String, '/fsm/restart', 10)
 
         # FSM log buffer (html, plain_text, add_newline) for filter rebuilds
         self.fsm_log_entries = []
@@ -6006,6 +6020,34 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         controls_row.addStretch()
         fsm_tab_layout.addLayout(controls_row)
 
+        # ── Restart row: new run from Error/Finished, robot stack kept up ──
+        restart_row = QHBoxLayout()
+        restart_row.addWidget(QLabel("FSM State:"))
+        self.fsm_current_state_label = QLabel("—")
+        self.fsm_current_state_label.setMinimumWidth(170)
+        self.fsm_current_state_label.setStyleSheet("font-weight: bold;")
+        restart_row.addWidget(self.fsm_current_state_label)
+
+        restart_row.addSpacing(16)
+        restart_row.addWidget(QLabel("Restart at:"))
+        self.fsm_restart_combo = QComboBox()
+        # fsm_node's RESTART_TARGET_STATES: ObjectID onward. Initialization and
+        # CreateMap are refused by the node (mapping replaces the running stack).
+        self.fsm_restart_combo.addItems(self.FSM_RESTART_TARGETS)
+        self.fsm_restart_combo.setCurrentText("GeometryReconstruction")
+        restart_row.addWidget(self.fsm_restart_combo)
+        self.btn_fsm_restart = QPushButton("Restart")
+        self.btn_fsm_restart.setToolTip(
+            "Start a new run at the chosen state without stopping fsm_node or the\n"
+            "robot stack. Only available while the FSM is in Error or Finished.\n"
+            "Wall prompts are answered in the input box below, as on a normal start.\n"
+            "The arm is not folded first: check it is clear after an arm-state error.")
+        self.btn_fsm_restart.clicked.connect(self._restart_fsm)
+        restart_row.addWidget(self.btn_fsm_restart)
+        restart_row.addStretch()
+        fsm_tab_layout.addLayout(restart_row)
+        self._update_fsm_restart_ui()
+
         # ── Options row (GPR bridge, recorded session) ──
         options_row = QHBoxLayout()
 
@@ -6112,6 +6154,57 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         fsm_tab_layout.addLayout(stdin_row)
 
         return fsm_tab
+
+    # States fsm_node accepts on /fsm/restart (its RESTART_TARGET_STATES).
+    FSM_RESTART_TARGETS = [
+        "ObjectID", "WallLinesComputation", "GeometryReconstruction",
+        "ComputeWallPoints", "WallTargetSelection", "NavigateToTarget",
+        "ArmUnfolding", "ScanWall", "SensorDataProcessing", "SendDataToPokeye",
+        "ArmFolding", "ScanFloor", "ScanCeiling", "HomePosition",
+    ]
+    FSM_TERMINAL_STATES = ("Error", "Finished")
+
+    def _on_fsm_current_state(self, msg):
+        state = msg.data
+        if state != self._fsm_current_state:
+            # Any change ends a pending restart: it either moved the FSM or the
+            # FSM was (re)started from scratch.
+            self._fsm_restart_pending = False
+        self._fsm_current_state = state
+        self._update_fsm_restart_ui()
+
+    def _update_fsm_restart_ui(self):
+        state = self._fsm_current_state
+        running = self.fsm_node_process is not None
+        self.fsm_current_state_label.setText(state if (running and state) else "\u2014")
+        colour = {"Error": "#f47067", "Finished": "#57ab5a"}.get(state if running else None, "")
+        self.fsm_current_state_label.setStyleSheet(
+            f"font-weight: bold; color: {colour};" if colour else "font-weight: bold;")
+        self.btn_fsm_restart.setEnabled(
+            running and state in self.FSM_TERMINAL_STATES and not self._fsm_restart_pending)
+
+    def _restart_fsm(self):
+        """Ask the running fsm_node for a new run at the chosen state."""
+        target = self.fsm_restart_combo.currentText()
+        if self.fsm_node_process is None or self._fsm_current_state not in self.FSM_TERMINAL_STATES:
+            self._update_fsm_restart_ui()
+            return
+        self.fsm_restart_publisher.publish(String(data=json.dumps({"state": target})))
+        self._fsm_append_log(
+            f"<b style='color: #57ab5a;'>\u21bb Restart at {target} requested "
+            f"(from {self._fsm_current_state})</b>",
+            f"\u21bb Restart at {target} requested (from {self._fsm_current_state})",
+        )
+        # Held until /fsm/current_state changes. A refused restart leaves the
+        # state as it was (the reason is in the FSM output), so re-arm after a
+        # while in that case.
+        self._fsm_restart_pending = True
+        self._update_fsm_restart_ui()
+        QTimer.singleShot(5000, self._clear_fsm_restart_pending)
+
+    def _clear_fsm_restart_pending(self):
+        self._fsm_restart_pending = False
+        self._update_fsm_restart_ui()
 
     def _on_fsm_state_changed(self, state):
         offline = (state == "SensorDataProcessing")
@@ -6538,6 +6631,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         msg = f"fsm_node exited (code {exit_code})"
         self._fsm_append_log(f"<span style='color: {color};'>{msg}</span>", msg)
         process.deleteLater()
+        self._fsm_current_state = None
+        self._update_fsm_restart_ui()
         if self.fsm_launch_process is None:
             self.btn_fsm_start.setText("Start FSM")
             self.btn_fsm_start.setStyleSheet("")
@@ -6548,6 +6643,11 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.btn_fsm_send_input.setEnabled(enabled)
         if not enabled:
             self.fsm_stdin_input.clear()
+            # The node is gone: forget its last state (latched, so a new node
+            # republishes its own) and disarm the restart.
+            self._fsm_current_state = None
+            self._fsm_restart_pending = False
+        self._update_fsm_restart_ui()
 
     def _send_fsm_input(self):
         text = self.fsm_stdin_input.text()
