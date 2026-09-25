@@ -5998,52 +5998,6 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         ])
         controls_row.addWidget(self.fsm_state_combo)
 
-        # Recorded session for the offline SensorDataProcessing run. Only
-        # meaningful for that state; the FSM's own fallback ("latest") is the
-        # default, and a named session goes to fsm_node as the same parameter
-        # override the README documents (-p hyperspectral_session_dir / -p
-        # sensor_session_id), so the UI cannot drift from the terminal path.
-        controls_row.addSpacing(16)
-        self.fsm_session_label = QLabel("Session:")
-        controls_row.addWidget(self.fsm_session_label)
-        self.fsm_session_combo = QComboBox()
-        self.fsm_session_combo.setMinimumWidth(220)
-        self.fsm_session_combo.setToolTip(
-            "Recorded session under task_planner_fsm/data/raw to process\n"
-            "(SensorDataProcessing only). 'latest' lets fsm_node pick: the newest\n"
-            "hyperspectral session, else the GPR session with the newest manifest.")
-        controls_row.addWidget(self.fsm_session_combo)
-        self.btn_fsm_session_refresh = QPushButton("\u21bb")
-        self.btn_fsm_session_refresh.setFixedWidth(28)
-        self.btn_fsm_session_refresh.setToolTip("Rescan the recorded sessions")
-        self.btn_fsm_session_refresh.clicked.connect(self._refresh_fsm_sessions)
-        controls_row.addWidget(self.btn_fsm_session_refresh)
-        self.fsm_state_combo.currentTextChanged.connect(self._on_fsm_state_changed)
-        self._refresh_fsm_sessions()
-        self._on_fsm_state_changed(self.fsm_state_combo.currentText())
-
-        # GPR trigger bridge (ESP32 fake encoder on Oliwall_2G). Off by default:
-        # it is only useful with the real probe on the robot, and a node with
-        # nothing to talk to is wasted Jetson time. Ticked, the box starts the
-        # bridge from task_planner.launch.py (gpr_trigger_bridge:=true, so it
-        # dies with the rest of the launch on Stop) and hands fsm_node
-        # gpr_trigger_bridge_required so a sweep refuses to start on a dead link.
-        controls_row.addSpacing(16)
-        self.fsm_gpr_bridge_check = QCheckBox("GPR trigger bridge")
-        self.fsm_gpr_bridge_check.setToolTip(
-            "Start gpr_trigger_bridge (/gpr/trigger -> UDP -> ESP32) with the FSM\n"
-            "and require the board to answer before every wall sweep.\n"
-            "Real robot only; leave off in sim and when the GPR is not mounted.")
-        self.fsm_gpr_bridge_check.toggled.connect(self._on_fsm_gpr_bridge_toggled)
-        controls_row.addWidget(self.fsm_gpr_bridge_check)
-        self.fsm_gpr_ip_input = QLineEdit()
-        self.fsm_gpr_ip_input.setPlaceholderText("ESP32 IP")
-        self.fsm_gpr_ip_input.setMaximumWidth(130)
-        self.fsm_gpr_ip_input.setToolTip(
-            "ESP32 address on Oliwall_2G (DHCP reservation, see ESP32/README.md).")
-        controls_row.addWidget(self.fsm_gpr_ip_input)
-        self._on_fsm_gpr_bridge_toggled(self.fsm_gpr_bridge_check.isChecked())
-
         controls_row.addSpacing(24)
         self.btn_fsm_start = QPushButton("Start FSM")
         self.btn_fsm_start.clicked.connect(self._toggle_fsm)
@@ -6051,6 +6005,57 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         controls_row.addStretch()
         fsm_tab_layout.addLayout(controls_row)
+
+        # ── Options row (GPR bridge, recorded session) ──
+        options_row = QHBoxLayout()
+
+        # GPR trigger bridge (ESP32 fake encoder on Oliwall_2G). Off by default:
+        # it is only useful with the real probe on the robot, and a node with
+        # nothing to talk to is wasted Jetson time. Ticked, the box starts the
+        # bridge from task_planner.launch.py (gpr_trigger_bridge:=true, so it
+        # dies with the rest of the launch on Stop) and hands fsm_node
+        # gpr_trigger_bridge_required so a sweep refuses to start on a dead link.
+        self.fsm_gpr_bridge_check = QCheckBox("GPR trigger bridge")
+        self.fsm_gpr_bridge_check.setToolTip(
+            "Start gpr_trigger_bridge (/gpr/trigger -> UDP -> ESP32) with the FSM\n"
+            "and require the board to answer before every wall sweep.\n"
+            "Real robot only; leave off in sim and when the GPR is not mounted.")
+        self.fsm_gpr_bridge_check.toggled.connect(self._on_fsm_gpr_bridge_toggled)
+        options_row.addWidget(self.fsm_gpr_bridge_check)
+        self.fsm_gpr_ip_input = QLineEdit()
+        self.fsm_gpr_ip_input.setPlaceholderText("ESP32 IP")
+        self.fsm_gpr_ip_input.setMaximumWidth(130)
+        self.fsm_gpr_ip_input.setToolTip(
+            "ESP32 address on Oliwall_2G (DHCP reservation, see ESP32/README.md).")
+        options_row.addWidget(self.fsm_gpr_ip_input)
+        self._on_fsm_gpr_bridge_toggled(self.fsm_gpr_bridge_check.isChecked())
+
+        # Recorded session for the offline SensorDataProcessing run. Only
+        # meaningful for that state; the FSM's own fallback ("latest") is the
+        # default, and a named session goes to fsm_node as the same parameter
+        # override the README documents (-p hyperspectral_session_dir / -p
+        # sensor_session_id), so the UI cannot drift from the terminal path.
+        options_row.addSpacing(16)
+        self.fsm_session_label = QLabel("Session:")
+        options_row.addWidget(self.fsm_session_label)
+        self.fsm_session_combo = QComboBox()
+        self.fsm_session_combo.setMinimumWidth(220)
+        self.fsm_session_combo.setToolTip(
+            "Recorded session under task_planner_fsm/data/raw to process\n"
+            "(SensorDataProcessing only). 'latest' lets fsm_node pick: the newest\n"
+            "hyperspectral session, else the GPR session with the newest manifest.")
+        options_row.addWidget(self.fsm_session_combo)
+        self.btn_fsm_session_refresh = QPushButton("\u21bb")
+        self.btn_fsm_session_refresh.setFixedWidth(28)
+        self.btn_fsm_session_refresh.setToolTip("Rescan the recorded sessions")
+        self.btn_fsm_session_refresh.clicked.connect(self._refresh_fsm_sessions)
+        options_row.addWidget(self.btn_fsm_session_refresh)
+        self.fsm_state_combo.currentTextChanged.connect(self._on_fsm_state_changed)
+        self._refresh_fsm_sessions()
+        self._on_fsm_state_changed(self.fsm_state_combo.currentText())
+
+        options_row.addStretch()
+        fsm_tab_layout.addLayout(options_row)
 
         # ── Status header ──
         fsm_status_header = QHBoxLayout()
