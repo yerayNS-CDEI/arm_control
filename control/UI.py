@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import html
 import json
+import math
 import sys
 import os
 import shlex
@@ -13,13 +14,16 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from PyQt5.QtWidgets import *
-from PyQt5.QtCore import QTimer, QProcess, Qt
-from PyQt5.QtGui import QFontMetrics, QIcon, QPixmap, QPalette, QColor
+from PyQt5.QtCore import QEvent, QTimer, QProcess, Qt, QPointF, QRectF
+from PyQt5.QtGui import (
+    QFontMetrics, QIcon, QPixmap, QPalette, QColor, QIntValidator,
+    QBrush, QFont, QPainter, QPainterPath, QPen, QPolygonF,
+)
 from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
 from geometry_msgs.msg import Pose
-from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray
+from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray, String
 from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -60,6 +64,217 @@ def _make_dark_palette():
     p.setColor(QPalette.Disabled, QPalette.Base,       c('#22272e'))
     p.setColor(QPalette.Disabled, QPalette.Button,     c('#22272e'))
     return p
+
+
+# ── FSM graph view ──
+# Python port of the task_planner_fsm RViz panel's graph
+# (task_planner_fsm_rviz_panel/src/fsm_panel.cpp). Node positions and groups
+# come from fsm_node's /fsm/graph payload (task_planner_fsm/telemetry.py), so
+# only the drawing lives here; keep the edge routing in step with the panel.
+
+_FSM_NODE_W = 220.0
+_FSM_NODE_H = 92.0
+_FSM_OBSTACLE_MARGIN = 8.0
+_FSM_EDGE_COLOR = '#8b949e'
+_FSM_EDGE_ACTIVE_COLOR = '#2ea043'
+
+
+def _fsm_group_color(group):
+    return QColor({
+        'phase_1': '#DDEAF7',
+        'phase_2': '#E2F4E7',
+        'terminal': '#F1E3E3',
+    }.get(group, '#EEE9DD'))
+
+
+def _fsm_ellipse_boundary_point(center, rx, ry, target):
+    dx = target.x() - center.x()
+    dy = target.y() - center.y()
+    denom = math.sqrt((dx * dx) / (rx * rx) + (dy * dy) / (ry * ry))
+    if denom < 1e-6:
+        return QPointF(center)
+    return QPointF(center.x() + dx / denom, center.y() + dy / denom)
+
+
+def _fsm_unit(v):
+    length = math.hypot(v.x(), v.y())
+    if length < 1e-6:
+        return QPointF(0.0, 0.0)
+    return QPointF(v.x() / length, v.y() / length)
+
+
+def _fsm_path_clear(path, obstacles, samples=64):
+    """True when no obstacle rectangle contains a sampled point of the path."""
+    for i in range(samples + 1):
+        point = path.pointAtPercent(i / samples)
+        for rect in obstacles:
+            if rect.contains(point):
+                return False
+    return True
+
+
+def _fsm_edge_path(from_center, to_center, rx, ry, obstacles):
+    """Straight edge when it clears every other node, else the first bowed
+    curve (both sides, growing offset) that does; a self-transition is a loop
+    above the node."""
+    if math.hypot(to_center.x() - from_center.x(), to_center.y() - from_center.y()) < 1e-6:
+        top = QPointF(from_center.x(), from_center.y() - ry)
+        loop = QPainterPath(top + QPointF(-18.0, 0.0))
+        loop.cubicTo(
+            from_center + QPointF(-70.0, -ry - 80.0),
+            from_center + QPointF(70.0, -ry - 80.0),
+            top + QPointF(18.0, 0.0))
+        return loop
+
+    straight = QPainterPath(_fsm_ellipse_boundary_point(from_center, rx, ry, to_center))
+    straight.lineTo(_fsm_ellipse_boundary_point(to_center, rx, ry, from_center))
+    if _fsm_path_clear(straight, obstacles):
+        return straight
+
+    chord = to_center - from_center
+    direction = _fsm_unit(chord)
+    normal = QPointF(-direction.y(), direction.x())
+    for offset in range(80, 681, 20):
+        for side in (1.0, -1.0):
+            bulge = normal * (side * offset)
+            start = _fsm_ellipse_boundary_point(from_center, rx, ry, from_center + bulge)
+            end = _fsm_ellipse_boundary_point(to_center, rx, ry, to_center + bulge)
+            curve = QPainterPath(start)
+            curve.cubicTo(start + chord * 0.25 + bulge, end - chord * 0.25 + bulge, end)
+            if _fsm_path_clear(curve, obstacles):
+                return curve
+    return straight
+
+
+def _fsm_arrow_head(path):
+    tip = path.pointAtPercent(1.0)
+    direction = _fsm_unit(tip - path.pointAtPercent(0.94))
+    if direction.isNull():
+        direction = QPointF(1.0, 0.0)
+    normal = QPointF(-direction.y(), direction.x())
+    base = tip - direction * 15.0
+    return QPolygonF([tip, base + normal * 7.0, base - normal * 7.0])
+
+
+class FsmGraphView(QGraphicsView):
+    """Zoomable FSM graph: the current state in green (red for Error), the
+    last transition's endpoints in amber and its edge highlighted."""
+
+    def __init__(self, parent=None):
+        self._scene = QGraphicsScene()
+        super().__init__(self._scene, parent)
+        self.setRenderHint(QPainter.Antialiasing, True)
+        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        self._payload = None
+        self._nodes = {}   # state id -> (ellipse item, group)
+        self._edges = []   # (from, to, path item, arrow item)
+        self._current = ''
+        self._last_from = ''
+        self._last_to = ''
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
+        self.zoom(1.15 if delta > 0 else 1.0 / 1.15)
+        event.accept()
+
+    def zoom(self, factor):
+        self.scale(factor, factor)
+
+    def fit(self):
+        self.resetTransform()
+        self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
+
+    def set_graph(self, payload):
+        """Rebuild the scene from a parsed /fsm/graph payload."""
+        # The graph is latched and republished on every restart; skip the
+        # (Python-slow) edge routing when nothing changed.
+        if payload == self._payload:
+            return
+        self._payload = payload
+        self._scene.clear()
+        self._nodes = {}
+        self._edges = []
+
+        rx, ry = _FSM_NODE_W / 2.0, _FSM_NODE_H / 2.0
+        label_font = QFont('Sans Serif', 12, QFont.Bold)
+        for state in payload.get('states', []):
+            state_id = state.get('id', '')
+            if not state_id:
+                continue
+            x = float(state.get('x', 0.0))
+            y = float(state.get('y', 0.0))
+            group = state.get('group', '')
+            ellipse = self._scene.addEllipse(
+                QRectF(x, y, _FSM_NODE_W, _FSM_NODE_H),
+                QPen(QColor('#56616F'), 1.5), QBrush(_fsm_group_color(group)))
+            ellipse.setZValue(1.0)
+            text = self._scene.addSimpleText(state.get('label', state_id), label_font)
+            text.setBrush(QBrush(Qt.black))
+            bounds = text.boundingRect()
+            text.setPos(x + (_FSM_NODE_W - bounds.width()) / 2.0,
+                        y + (_FSM_NODE_H - bounds.height()) / 2.0)
+            text.setZValue(2.0)
+            self._nodes[state_id] = (ellipse, group)
+
+        m = _FSM_OBSTACLE_MARGIN
+        for edge in payload.get('edges', []):
+            src, dst = edge.get('from', ''), edge.get('to', '')
+            if src not in self._nodes or dst not in self._nodes:
+                continue
+            # Every node except this edge's own endpoints is an obstacle.
+            obstacles = [
+                item.rect().adjusted(-m, -m, m, m)
+                for state_id, (item, _) in self._nodes.items()
+                if state_id not in (src, dst)
+            ]
+            path = _fsm_edge_path(
+                self._nodes[src][0].rect().center(), self._nodes[dst][0].rect().center(),
+                rx, ry, obstacles)
+            pen = QPen(QColor(_FSM_EDGE_COLOR), 1.5)
+            path_item = self._scene.addPath(path, pen)
+            path_item.setZValue(0.0)
+            arrow_item = self._scene.addPolygon(
+                _fsm_arrow_head(path), pen, QBrush(QColor(_FSM_EDGE_COLOR)))
+            arrow_item.setZValue(0.5)
+            self._edges.append((src, dst, path_item, arrow_item))
+
+        self._scene.setSceneRect(self._scene.itemsBoundingRect().adjusted(-80.0, -80.0, 80.0, 80.0))
+        self._restyle()
+        self.fit()
+
+    def set_highlight(self, current, last_from, last_to):
+        self._current = current or ''
+        self._last_from = last_from or ''
+        self._last_to = last_to or ''
+        self._restyle()
+
+    def _restyle(self):
+        for state_id, (item, group) in self._nodes.items():
+            fill, border, width = _fsm_group_color(group), QColor('#56616F'), 1.5
+            if state_id == self._current:
+                if state_id == 'Error':
+                    fill, border = QColor('#F3B4B4'), QColor('#9D2323')
+                else:
+                    fill, border = QColor('#84D39A'), QColor('#1E6F43')
+                width = 3.0
+            elif state_id in (self._last_from, self._last_to):
+                fill, border, width = QColor('#F6E2A1'), QColor('#8C6A12'), 2.0
+            item.setBrush(QBrush(fill))
+            item.setPen(QPen(border, width))
+
+        for src, dst, path_item, arrow_item in self._edges:
+            active = (src == self._last_from and dst == self._last_to)
+            color = QColor(_FSM_EDGE_ACTIVE_COLOR if active else _FSM_EDGE_COLOR)
+            pen = QPen(color, 3.0 if active else 1.5)
+            path_item.setPen(pen)
+            arrow_item.setPen(pen)
+            arrow_item.setBrush(QBrush(color))
+
 
 class RobotControlUI(QMainWindow):
     def __init__(self):
@@ -137,6 +352,32 @@ class RobotControlUI(QMainWindow):
         # FSM processes
         self.fsm_launch_process = None
         self.fsm_node_process = None
+
+        # FSM restart (fsm_node's /fsm/restart). The current state comes from
+        # /fsm/current_state (latched, republished every tick); the button is
+        # only live while the node sits in Error or Finished.
+        self._fsm_current_state = None
+        self._fsm_restart_pending = False
+        fsm_state_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.fsm_current_state_subscriber = self.node.create_subscription(
+            String, '/fsm/current_state', self._on_fsm_current_state, fsm_state_qos)
+        self.fsm_restart_publisher = self.node.create_publisher(String, '/fsm/restart', 10)
+
+        # FSM telemetry (same /fsm/* JSON topics as the RViz FsmPanel). Status
+        # and graph are latched like the current state; transitions are not.
+        self._fsm_status = {}
+        self._fsm_transition = None  # (from, to, reason)
+        self.fsm_status_subscriber = self.node.create_subscription(
+            String, '/fsm/status', self._on_fsm_status, fsm_state_qos)
+        self.fsm_graph_subscriber = self.node.create_subscription(
+            String, '/fsm/graph', self._on_fsm_graph, fsm_state_qos)
+        self.fsm_transition_subscriber = self.node.create_subscription(
+            String, '/fsm/transition', self._on_fsm_transition,
+            QoSProfile(depth=20, reliability=ReliabilityPolicy.RELIABLE))
 
         # FSM log buffer (html, plain_text, add_newline) for filter rebuilds
         self.fsm_log_entries = []
@@ -5527,6 +5768,26 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         options_row.addStretch()
         fsm_tab_layout.addLayout(options_row)
+        # ── Restart row: new run from Error/Finished, robot stack kept up ──
+        # (The FSM state it depends on is shown in the status panel below.)
+        restart_row = QHBoxLayout()
+        restart_row.addWidget(QLabel("Restart at:"))
+        self.fsm_restart_combo = QComboBox()
+        # fsm_node's RESTART_TARGET_STATES: ObjectID onward. Initialization and
+        # CreateMap are refused by the node (mapping replaces the running stack).
+        self.fsm_restart_combo.addItems(self.FSM_RESTART_TARGETS)
+        self.fsm_restart_combo.setCurrentText("GeometryReconstruction")
+        restart_row.addWidget(self.fsm_restart_combo)
+        self.btn_fsm_restart = QPushButton("Restart")
+        self.btn_fsm_restart.setToolTip(
+            "Start a new run at the chosen state without stopping fsm_node or the\n"
+            "robot stack. Only available while the FSM is in Error or Finished.\n"
+            "Wall prompts are answered in the input box below, as on a normal start.\n"
+            "The arm is not folded first: check it is clear after an arm-state error.")
+        self.btn_fsm_restart.clicked.connect(self._restart_fsm)
+        restart_row.addWidget(self.btn_fsm_restart)
+        restart_row.addStretch()
+        fsm_tab_layout.addLayout(restart_row)
 
         # ── Status header ──
         fsm_status_header = QHBoxLayout()
@@ -5551,7 +5812,12 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         btn_clear_fsm_status.setMaximumWidth(80)
         fsm_status_header.addWidget(btn_clear_fsm_status)
 
-        fsm_tab_layout.addLayout(fsm_status_header)
+        # ── Split: output log (left) | status + graph (right) ──
+        fsm_split = QSplitter(Qt.Horizontal)
+        fsm_log_pane = QWidget()
+        fsm_log_layout = QVBoxLayout(fsm_log_pane)
+        fsm_log_layout.setContentsMargins(0, 0, 0, 0)
+        fsm_log_layout.addLayout(fsm_status_header)
 
         # ── Status output (full width, wrapped) ──
         self.fsm_status_text = QTextEdit()
@@ -5565,7 +5831,14 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         )
         font_metrics = QFontMetrics(self.fsm_status_text.font())
         self.fsm_status_text.setTabStopDistance(font_metrics.horizontalAdvance(' ') * 8)
-        fsm_tab_layout.addWidget(self.fsm_status_text, 1)
+        fsm_log_layout.addWidget(self.fsm_status_text, 1)
+        fsm_split.addWidget(fsm_log_pane)
+        fsm_split.addWidget(self._create_fsm_telemetry_pane())
+        fsm_split.setStretchFactor(0, 3)
+        fsm_split.setStretchFactor(1, 2)
+        fsm_split.setChildrenCollapsible(False)
+        fsm_tab_layout.addWidget(fsm_split, 1)
+        self._update_fsm_restart_ui()
 
         # ── Stdin input row ──
         stdin_row = QHBoxLayout()
@@ -5583,6 +5856,182 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         fsm_tab_layout.addLayout(stdin_row)
 
         return fsm_tab
+
+    def _create_fsm_telemetry_pane(self):
+        """Status fields and state graph from the /fsm/* telemetry topics."""
+        pane = QWidget()
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        status_group = QGroupBox("FSM Status")
+        form = QFormLayout(status_group)
+        self.fsm_current_state_label = QLabel("—")
+        self.fsm_current_state_label.setStyleSheet("font-weight: bold;")
+        self.fsm_transition_label = QLabel("—")
+        self.fsm_phase_label = QLabel("—")
+        self.fsm_summary_label = QLabel("—")
+        self.fsm_elapsed_label = QLabel("—")
+        self.fsm_progress_label = QLabel("—")
+        for label in (self.fsm_transition_label, self.fsm_summary_label):
+            label.setWordWrap(True)
+        form.addRow("Current state:", self.fsm_current_state_label)
+        form.addRow("Last transition:", self.fsm_transition_label)
+        form.addRow("Phase:", self.fsm_phase_label)
+        form.addRow("Summary:", self.fsm_summary_label)
+        form.addRow("Elapsed:", self.fsm_elapsed_label)
+        form.addRow("Progress:", self.fsm_progress_label)
+        layout.addWidget(status_group)
+
+        graph_group = QGroupBox("FSM Graph")
+        graph_layout = QVBoxLayout(graph_group)
+        zoom_row = QHBoxLayout()
+        zoom_row.addWidget(QLabel("Mouse wheel to zoom"))
+        zoom_row.addStretch()
+        self.fsm_graph_view = FsmGraphView()
+        self.fsm_graph_view.setMinimumSize(280, 280)
+        for text, action in (
+            ("-", lambda: self.fsm_graph_view.zoom(1.0 / 1.15)),
+            ("Reset", self.fsm_graph_view.fit),
+            ("+", lambda: self.fsm_graph_view.zoom(1.15)),
+        ):
+            button = QPushButton(text)
+            button.setMaximumWidth(60)
+            button.clicked.connect(action)
+            zoom_row.addWidget(button)
+        graph_layout.addLayout(zoom_row)
+        graph_layout.addWidget(self.fsm_graph_view, 1)
+        layout.addWidget(graph_group, 1)
+        return pane
+
+    # States fsm_node accepts on /fsm/restart (its RESTART_TARGET_STATES).
+    FSM_RESTART_TARGETS = [
+        "ObjectID", "WallLinesComputation", "GeometryReconstruction",
+        "ComputeWallPoints", "WallTargetSelection", "NavigateToTarget",
+        "ArmUnfolding", "ScanWall", "SensorDataProcessing", "SendDataToPokeye",
+        "ArmFolding", "ScanFloor", "ScanCeiling", "HomePosition",
+    ]
+    FSM_TERMINAL_STATES = ("Error", "Finished")
+
+    def _on_fsm_current_state(self, msg):
+        state = msg.data
+        if state != self._fsm_current_state:
+            # Any change ends a pending restart: it either moved the FSM or the
+            # FSM was (re)started from scratch.
+            self._fsm_restart_pending = False
+        self._fsm_current_state = state
+        self._update_fsm_restart_ui()
+
+    def _update_fsm_restart_ui(self):
+        state = self._fsm_current_state
+        running = self.fsm_node_process is not None
+        self.fsm_current_state_label.setText(state if (running and state) else "\u2014")
+        colour = {"Error": "#f47067", "Finished": "#57ab5a"}.get(state if running else None, "")
+        self.fsm_current_state_label.setStyleSheet(
+            f"font-weight: bold; color: {colour};" if colour else "font-weight: bold;")
+        self.btn_fsm_restart.setEnabled(
+            running and state in self.FSM_TERMINAL_STATES and not self._fsm_restart_pending)
+        # Every change of state or of the node's lifecycle passes through here.
+        self._update_fsm_telemetry_ui()
+
+    def _on_fsm_status(self, msg):
+        try:
+            payload = json.loads(msg.data)
+        except ValueError:
+            return
+        if isinstance(payload, dict):
+            self._fsm_status = payload
+            self._update_fsm_telemetry_ui()
+
+    def _on_fsm_transition(self, msg):
+        try:
+            payload = json.loads(msg.data)
+        except ValueError:
+            return
+        if isinstance(payload, dict):
+            self._fsm_transition = (
+                str(payload.get('from') or '?'),
+                str(payload.get('to') or '?'),
+                str(payload.get('reason') or ''),
+            )
+            self._update_fsm_telemetry_ui()
+
+    def _on_fsm_graph(self, msg):
+        try:
+            payload = json.loads(msg.data)
+        except ValueError:
+            return
+        if isinstance(payload, dict):
+            self.fsm_graph_view.set_graph(payload)
+            self._update_fsm_telemetry_ui()
+
+    def _reset_fsm_telemetry(self):
+        """Forget the last node's status and transition (the graph layout is
+        kept: it is the same for every run)."""
+        self._fsm_status = {}
+        self._fsm_transition = None
+
+    def _update_fsm_telemetry_ui(self):
+        # Like the state label: only shown for the fsm_node this UI started.
+        running = self.fsm_node_process is not None
+        status = self._fsm_status if running else {}
+        transition = self._fsm_transition if running else None
+        dash = "\u2014"
+
+        if transition:
+            src, dst, reason = transition
+            text = f"{src} \u2192 {dst}" + (f" [{reason}]" if reason else "")
+        else:
+            text = dash
+        self.fsm_transition_label.setText(text)
+
+        self.fsm_phase_label.setText(str(status.get('phase') or dash))
+        self.fsm_summary_label.setText(str(status.get('summary') or dash))
+        colour = {'error': '#f47067', 'warn': '#e3b341'}.get(status.get('level'), '')
+        self.fsm_summary_label.setStyleSheet(f"color: {colour};" if colour else "")
+
+        elapsed = status.get('elapsed_s')
+        if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
+            self.fsm_elapsed_label.setText(f"{elapsed:.1f} s")
+        else:
+            self.fsm_elapsed_label.setText(dash)
+
+        progress = status.get('progress')
+        if isinstance(progress, dict) and (
+                progress.get('current') is not None or progress.get('total') is not None):
+            current, total = progress.get('current'), progress.get('total')
+            self.fsm_progress_label.setText(
+                f"{'?' if current is None else current} / {'?' if total is None else total}")
+        else:
+            self.fsm_progress_label.setText(dash)
+
+        self.fsm_graph_view.set_highlight(
+            self._fsm_current_state if running else None,
+            transition[0] if transition else None,
+            transition[1] if transition else None,
+        )
+
+    def _restart_fsm(self):
+        """Ask the running fsm_node for a new run at the chosen state."""
+        target = self.fsm_restart_combo.currentText()
+        if self.fsm_node_process is None or self._fsm_current_state not in self.FSM_TERMINAL_STATES:
+            self._update_fsm_restart_ui()
+            return
+        self.fsm_restart_publisher.publish(String(data=json.dumps({"state": target})))
+        self._fsm_append_log(
+            f"<b style='color: #57ab5a;'>\u21bb Restart at {target} requested "
+            f"(from {self._fsm_current_state})</b>",
+            f"\u21bb Restart at {target} requested (from {self._fsm_current_state})",
+        )
+        # Held until /fsm/current_state changes. A refused restart leaves the
+        # state as it was (the reason is in the FSM output), so re-arm after a
+        # while in that case.
+        self._fsm_restart_pending = True
+        self._update_fsm_restart_ui()
+        QTimer.singleShot(5000, self._clear_fsm_restart_pending)
+
+    def _clear_fsm_restart_pending(self):
+        self._fsm_restart_pending = False
+        self._update_fsm_restart_ui()
 
     def _on_fsm_state_changed(self, state):
         offline = (state == "SensorDataProcessing")
@@ -6009,6 +6458,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         msg = f"fsm_node exited (code {exit_code})"
         self._fsm_append_log(f"<span style='color: {color};'>{msg}</span>", msg)
         process.deleteLater()
+        self._fsm_current_state = None
+        self._reset_fsm_telemetry()
+        self._update_fsm_restart_ui()
         if self.fsm_launch_process is None:
             self.btn_fsm_start.setText("Start FSM")
             self.btn_fsm_start.setStyleSheet("")
@@ -6019,6 +6471,12 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.btn_fsm_send_input.setEnabled(enabled)
         if not enabled:
             self.fsm_stdin_input.clear()
+            # The node is gone: forget its last state (latched, so a new node
+            # republishes its own) and disarm the restart.
+            self._fsm_current_state = None
+            self._fsm_restart_pending = False
+            self._reset_fsm_telemetry()
+        self._update_fsm_restart_ui()
 
     def _send_fsm_input(self):
         text = self.fsm_stdin_input.text()
