@@ -2501,8 +2501,8 @@ start of the line / column (= X and Y coordinate)
                     'label': 'Connect to probe',
                     'method': 'POST',
                     'path': '/probe/connect',
-                    'body': {'serialNumber': 'GP88-007-0081'},
-                    'description': 'Connect to the GPR probe using the provided serial number.',
+                    'body': {'serialNumber': 'GP88-007-0081', 'ip': '192.168.1.99'},
+                    'description': 'Connect to the GPR probe at its static IP using the provided serial number (no manual accept on the GP App).',
                     'tooltip': probe_connect_tooltip,
                 },
                 {
@@ -2735,8 +2735,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         gpr_base_url_layout = QHBoxLayout()
         gpr_base_url_layout.addWidget(QLabel("Base URL:"))
-        self.gpr_base_url_input = QLineEdit("http://192.168.42.53:9000")
-        self.gpr_base_url_input.setPlaceholderText("http://192.168.42.53:9000")
+        self.gpr_base_url_input = QLineEdit("http://192.168.1.239:9000")
+        self.gpr_base_url_input.setPlaceholderText("http://192.168.1.239:9000")
         self.gpr_base_url_input.setToolTip("Base URL for the GPR HTTP server.")
         gpr_base_url_layout.addWidget(self.gpr_base_url_input)
         gpr_base_url_layout.addStretch()
