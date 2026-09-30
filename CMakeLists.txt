@@ -75,6 +75,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/HyperspectralConfig.srv"
   "srv/SendPosition.srv"
   "srv/ScriptCommand.srv"
+  "srv/PredictMaterial.srv"
+  "srv/SendPokeyeTargets.srv"
   DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs shape_msgs std_msgs
 )
 
@@ -140,6 +142,8 @@ install(CODE "
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/arduino_sensors_sim.py \${LIB_DIR}/arduino_sensors_sim)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/wall_parallel_controller.py \${LIB_DIR}/wall_parallel_controller)
   execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/test_hyperspectral_client.py \${LIB_DIR}/test_hyperspectral_client)
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/ml_inference_node.py \${LIB_DIR}/ml_inference_node)
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_CURRENT_SOURCE_DIR}/sensors/inspection_manager.py \${LIB_DIR}/inspection_manager)
 ")
 
 # Install launch files
