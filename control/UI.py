@@ -6299,6 +6299,20 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         # ── Options row (GPR bridge) ──
         options_row = QHBoxLayout()
 
+        # GPR in the sweep. Ticked leaves fsm_node's own default (probe on for
+        # the real robot, off in sim); unticked forces gpr_enabled:=false, e.g.
+        # to sweep with the camera alone. Forcing true is deliberately not
+        # offered: in sim ScanWall would try to reach the GP8800 and fail.
+        self.fsm_gpr_check = QCheckBox("GPR in sweep")
+        self.fsm_gpr_check.setChecked(True)
+        self.fsm_gpr_check.setToolTip(
+            "Drive the GPR probe during the wall sweeps.\n"
+            "Unticked: fsm_node -p gpr_enabled:=false (the trigger bridge is not\n"
+            "started either). The probe is never driven in sim.")
+        self.fsm_gpr_check.toggled.connect(self._on_fsm_gpr_toggled)
+        options_row.addWidget(self.fsm_gpr_check)
+        options_row.addSpacing(16)
+
         # GPR trigger bridge (ESP32 fake encoder on Oliwall_2G). Off by default:
         # it is only useful with the real probe on the robot, and a node with
         # nothing to talk to is wasted Jetson time. Ticked, the box starts the
@@ -6318,7 +6332,37 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.fsm_gpr_ip_input.setMaximumWidth(130)
         self.fsm_gpr_ip_input.setToolTip("ESP32 address on Oliwall_2G (DHCP reservation).")
         options_row.addWidget(self.fsm_gpr_ip_input)
-        self._on_fsm_gpr_bridge_toggled(self.fsm_gpr_bridge_check.isChecked())
+        self._on_fsm_gpr_toggled(self.fsm_gpr_check.isChecked())
+
+        # Hyperspectral camera: ScanWall samples it during every wall sweep and
+        # SensorDataProcessing classifies what it recorded. Off by default, like
+        # the FSM's own hyperspectral_enabled. The box does not start the camera:
+        # hyperspectral_node needs the operator for its calibration, so it is
+        # started and calibrated from the Sensors tab (or a terminal) first.
+        options_row.addSpacing(16)
+        self.fsm_hyperspectral_check = QCheckBox("Hyperspectral camera")
+        self.fsm_hyperspectral_check.setToolTip(
+            "Sample the hyperspectral camera during every wall sweep\n"
+            "(fsm_node -p hyperspectral_enabled:=true).\n"
+            "Start and calibrate hyperspectral_node in the Sensors tab first:\n"
+            "without a calibration the FSM skips the camera and the GPR carries on.")
+        options_row.addWidget(self.fsm_hyperspectral_check)
+        # Plate travel between two captures (hyperspectral_sample_spacing_m).
+        # The FSM's own default is 0.10 m; the UI asks for 0.5 m.
+        self.fsm_hyperspectral_spacing_input = QDoubleSpinBox()
+        self.fsm_hyperspectral_spacing_input.setRange(0.05, 5.0)
+        self.fsm_hyperspectral_spacing_input.setSingleStep(0.05)
+        self.fsm_hyperspectral_spacing_input.setDecimals(2)
+        self.fsm_hyperspectral_spacing_input.setSuffix(" m")
+        self.fsm_hyperspectral_spacing_input.setValue(0.5)
+        self.fsm_hyperspectral_spacing_input.setToolTip(
+            "Sensor-plate travel between two hyperspectral captures\n"
+            "(fsm_node -p hyperspectral_sample_spacing_m).")
+        options_row.addWidget(self.fsm_hyperspectral_spacing_input)
+        self.fsm_hyperspectral_check.toggled.connect(
+            self.fsm_hyperspectral_spacing_input.setEnabled)
+        self.fsm_hyperspectral_spacing_input.setEnabled(
+            self.fsm_hyperspectral_check.isChecked())
 
         options_row.addStretch()
         fsm_tab_layout.addLayout(options_row)
@@ -6632,11 +6676,23 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         key, value = data
         return ['--ros-args', '-p', f'{key}:={value}']
 
+    def _on_fsm_gpr_toggled(self, checked):
+        # No GPR, no bridge: grey the bridge box out rather than untick it, so
+        # the operator's choice comes back with the GPR.
+        self.fsm_gpr_bridge_check.setEnabled(bool(checked))
+        self._on_fsm_gpr_bridge_toggled(self.fsm_gpr_bridge_check.isChecked())
+
     def _on_fsm_gpr_bridge_toggled(self, checked):
-        self.fsm_gpr_ip_input.setEnabled(bool(checked))
+        self.fsm_gpr_ip_input.setEnabled(bool(checked) and self.fsm_gpr_check.isChecked())
+
+    def _fsm_gpr_override(self):
+        """``['-p', ...]`` keeping the GPR out of the sweep when unticked."""
+        if self.fsm_gpr_check.isChecked():
+            return []
+        return ['-p', 'gpr_enabled:=false']
 
     def _fsm_gpr_bridge_enabled(self):
-        return self.fsm_gpr_bridge_check.isChecked()
+        return self.fsm_gpr_check.isChecked() and self.fsm_gpr_bridge_check.isChecked()
 
     def _fsm_gpr_bridge_launch_args(self):
         """Launch arguments that start the bridge from task_planner.launch.py."""
@@ -6644,6 +6700,14 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             return []
         ip = self.fsm_gpr_ip_input.text().strip()
         return ['gpr_trigger_bridge:=true', f'gpr_receiver_ip:={ip}']
+
+    def _fsm_hyperspectral_override(self):
+        """``['-p', ...]`` making ScanWall sample the camera during the sweeps."""
+        if not self.fsm_hyperspectral_check.isChecked():
+            return []
+        spacing = self.fsm_hyperspectral_spacing_input.value()
+        return ['-p', 'hyperspectral_enabled:=true',
+                '-p', f'hyperspectral_sample_spacing_m:={spacing:g}']
 
     def _fsm_gpr_bridge_override(self):
         """``['-p', ...]`` making fsm_node refuse a sweep on a dead link."""
@@ -6673,6 +6737,16 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 "GPR trigger bridge is ticked but the ESP32 IP is empty; fill it in or untick the box.",
             )
             return
+
+        # Not a refusal: the camera may be running from a terminal.
+        if self.fsm_hyperspectral_check.isChecked() and 'hyperspectral_camera' not in self.process_map:
+            self._fsm_append_log(
+                "<span style='color: #e0b44c;'>Hyperspectral camera is ticked but "
+                "hyperspectral_node is not running from the Sensors tab; start and "
+                "calibrate it there before the first sweep.</span>",
+                "Hyperspectral camera is ticked but hyperspectral_node is not running from the "
+                "Sensors tab; start and calibrate it there before the first sweep.",
+            )
 
         self.btn_fsm_start.setText("Stop FSM")
         self.btn_fsm_start.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
@@ -6708,7 +6782,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             # configured. Hence --ros-args rather than another '--' option, and
             # it must stay last so nothing follows it into ROS's arg parser.
             '--ros-args', '-p', f'sweep_use_wbc:={wbc}',
+            *self._fsm_gpr_override(),
             *self._fsm_gpr_bridge_override(),
+            *self._fsm_hyperspectral_override(),
         ] + self._fsm_session_override(state)
         QTimer.singleShot(3000, lambda: self._start_fsm_node(node_args))
 
