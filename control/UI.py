@@ -4658,8 +4658,14 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             if pid:
                 try:
                     os.kill(pid, signal.SIGINT)
-                    # Longer wait for mapping to save rtabmap.db
-                    wait_ms = 5000 if 'mapping' in process_key else 3000
+                    # The controller manager deactivates the column first,
+                    # and its retract blocks ~5 s; only then does the base
+                    # disable the drives via PDO (~0.3 s more). Escalating
+                    # earlier kills it mid-shutdown, and the drives latch
+                    # error 50 until the next start. Mapping also needs the
+                    # time to save rtabmap.db. waitForFinished() returns as
+                    # soon as the launch exits.
+                    wait_ms = 10000
                     if 'mapping' in process_key:
                         self._log_append(status_text, "💾 Saving mapping database... (waiting for shutdown)")
                     process.waitForFinished(wait_ms)
