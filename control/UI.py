@@ -6319,10 +6319,13 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         # bridge from task_planner.launch.py (gpr_trigger_bridge:=true, so it
         # dies with the rest of the launch on Stop) and hands fsm_node
         # gpr_trigger_bridge_required so a sweep refuses to start on a dead link.
+        # Unticked, the probe runs on its own wheel: gpr_trigger_publish:=false.
         self.fsm_gpr_bridge_check = QCheckBox("GPR trigger bridge")
         self.fsm_gpr_bridge_check.setToolTip(
             "Start gpr_trigger_bridge (/gpr/trigger -> UDP -> ESP32) with the FSM\n"
             "and require the board to answer before every wall sweep.\n"
+            "Unticked: the GPR runs on its own wheel and no triggers are sent\n"
+            "(plate travel and unseated stretches are still recorded).\n"
             "Real robot only; leave off in sim and when the GPR is not mounted.")
         self.fsm_gpr_bridge_check.toggled.connect(self._on_fsm_gpr_bridge_toggled)
         options_row.addWidget(self.fsm_gpr_bridge_check)
@@ -6710,9 +6713,11 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 '-p', f'hyperspectral_sample_spacing_m:={spacing:g}']
 
     def _fsm_gpr_bridge_override(self):
-        """``['-p', ...]`` making fsm_node refuse a sweep on a dead link."""
+        """``['-p', ...]``: with the bridge, make fsm_node refuse a sweep on a
+        dead link; without it the probe runs on its own wheel, so no triggers
+        (plate travel and unseated stretches are still recorded)."""
         if not self._fsm_gpr_bridge_enabled():
-            return []
+            return ['-p', 'gpr_trigger_publish:=false']
         return ['-p', 'gpr_trigger_bridge_required:=true']
 
     def _toggle_fsm(self):
