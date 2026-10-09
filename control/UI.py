@@ -1456,7 +1456,7 @@ class RobotControlUI(QMainWindow):
         full_control_tab_layout.addLayout(full_control_terminal_status_layout)
         # Add Full Control tab after Joint Control
         tabs.addTab(full_control_tab, "Full Control")
-        tabs.addTab(self._create_gpr_api_test_tab(), "GPR API Test")
+        tabs.addTab(self._create_gpr_api_test_tab(), "Sensors")
         tabs.addTab(self._create_fsm_tab(), "FSM")
 
         # Connect tab change signal to check joint states when Joint Control tab is activated
@@ -2742,8 +2742,8 @@ start of the line / column (= X and Y coordinate)
                     'label': 'Connect to probe',
                     'method': 'POST',
                     'path': '/probe/connect',
-                    'body': {'serialNumber': 'GP88-007-0081'},
-                    'description': 'Connect to the GPR probe using the provided serial number.',
+                    'body': {'serialNumber': 'GP88-007-0081', 'ip': '192.168.1.99'},
+                    'description': 'Connect to the GPR probe at its static IP using the provided serial number (no manual accept on the GP App).',
                     'tooltip': probe_connect_tooltip,
                 },
                 {
@@ -2970,27 +2970,226 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         }
 
     def _create_gpr_api_test_tab(self):
-        """Create the GPR API test tab UI."""
+        """Create the Sensors tab UI (GPR API test + hyperspectral camera)."""
         gpr_tab = QWidget()
         gpr_tab_layout = QVBoxLayout(gpr_tab)
 
+        sensors_layout = QHBoxLayout()
+        gpr_tab_layout.addLayout(sensors_layout)
+
+        gpr_panel = QGroupBox("GPR API Test")
+        gpr_panel_layout = QVBoxLayout()
+        gpr_panel.setLayout(gpr_panel_layout)
+        sensors_layout.addWidget(gpr_panel, 1)
+
+        hyperspectral_panel = QGroupBox("Hyperspectral")
+        hyperspectral_panel_layout = QVBoxLayout()
+        hyperspectral_panel.setLayout(hyperspectral_panel_layout)
+
+        hyperspectral_buttons_layout = QHBoxLayout()
+
+        self.btn_hyperspectral_camera = QPushButton("Camera and Calibration")
+        self.btn_hyperspectral_camera.setToolTip("ros2 run arm_control hyperspectral_node")
+        self.btn_hyperspectral_camera.clicked.connect(
+            lambda: self._toggle_sensors_process(
+                'hyperspectral_camera',
+                self.btn_hyperspectral_camera,
+                'Camera & Calibration',
+                'ros2',
+                ['run', 'arm_control', 'hyperspectral_node'],
+            )
+        )
+        hyperspectral_buttons_layout.addWidget(self.btn_hyperspectral_camera)
+
+        self.btn_hyperspectral_inference = QPushButton("AI Inference")
+        self.btn_hyperspectral_inference.setToolTip("ros2 run arm_control ml_inference_node")
+        self.btn_hyperspectral_inference.clicked.connect(
+            lambda: self._toggle_sensors_process(
+                'hyperspectral_inference',
+                self.btn_hyperspectral_inference,
+                'AI Inference',
+                'ros2',
+                ['run', 'arm_control', 'ml_inference_node'],
+            )
+        )
+        hyperspectral_buttons_layout.addWidget(self.btn_hyperspectral_inference)
+        hyperspectral_panel_layout.addLayout(hyperspectral_buttons_layout)
+
+        inspection_manager_box = QGroupBox("Inspection Manager")
+        inspection_manager_layout = QVBoxLayout()
+        inspection_manager_box.setLayout(inspection_manager_layout)
+
+        focus_speed_layout = QHBoxLayout()
+        focus_speed_layout.addWidget(QLabel("Focus Speed:"))
+        self.focus_speed_combo = QComboBox()
+        self.focus_speed_combo.addItem("140000 (Default)", 140000)
+        self.focus_speed_combo.addItem("80000", 80000)
+        self.focus_speed_combo.addItem("210000", 210000)
+        self.focus_speed_combo.addItem("Custom", None)
+        self.focus_speed_combo.currentIndexChanged.connect(self._update_focus_speed_controls)
+        focus_speed_layout.addWidget(self.focus_speed_combo)
+
+        self.focus_speed_input = QLineEdit("140000")
+        self.focus_speed_input.setValidator(QIntValidator(1, 10000000, self))
+        self.focus_speed_input.setPlaceholderText("Enter focus speed")
+        self.focus_speed_input.setMaximumWidth(140)
+        self.focus_speed_input.setVisible(False)
+        self.focus_speed_input.textChanged.connect(self._update_focus_speed_controls)
+        focus_speed_layout.addWidget(self.focus_speed_input)
+
+        self.btn_focus_optical_calibration = QPushButton("Focusing and Optical Calibration Test")
+        self.btn_focus_optical_calibration.clicked.connect(self.toggle_focus_optical_calibration_test)
+        focus_speed_layout.addWidget(self.btn_focus_optical_calibration)
+        inspection_manager_layout.addLayout(focus_speed_layout)
+
+        collect_separator = QFrame()
+        collect_separator.setFrameShape(QFrame.HLine)
+        collect_separator.setFrameShadow(QFrame.Sunken)
+        inspection_manager_layout.addWidget(collect_separator)
+
+        collect_row_one = QHBoxLayout()
+        self.collect_training_label_input = QLineEdit()
+        self.collect_training_label_input.setPlaceholderText("Fusta")
+        self.collect_training_label_input.textChanged.connect(self._update_collect_training_controls)
+        collect_row_one.addWidget(QLabel("Label:"))
+        collect_row_one.addWidget(self.collect_training_label_input)
+
+        self.collect_training_zone_input = QLineEdit()
+        self.collect_training_zone_input.setPlaceholderText("wall1")
+        self.collect_training_zone_input.textChanged.connect(self._update_collect_training_controls)
+        collect_row_one.addWidget(QLabel("Zone:"))
+        collect_row_one.addWidget(self.collect_training_zone_input)
+        inspection_manager_layout.addLayout(collect_row_one)
+
+        collect_row_two = QHBoxLayout()
+        self.collect_training_captures_input = QSpinBox()
+        self.collect_training_captures_input.setRange(1, 999)
+        self.collect_training_captures_input.setValue(5)
+        self.collect_training_captures_input.valueChanged.connect(self._update_collect_training_controls)
+        collect_row_two.addWidget(QLabel("Captures:"))
+        collect_row_two.addWidget(self.collect_training_captures_input)
+
+        self.collect_training_delay_input = QDoubleSpinBox()
+        self.collect_training_delay_input.setRange(0.0, 60.0)
+        self.collect_training_delay_input.setDecimals(2)
+        self.collect_training_delay_input.setSingleStep(0.1)
+        self.collect_training_delay_input.setValue(0.7)
+        self.collect_training_delay_input.setSuffix(" s")
+        self.collect_training_delay_input.valueChanged.connect(self._update_collect_training_controls)
+        collect_row_two.addWidget(QLabel("Capture Delay:"))
+        collect_row_two.addWidget(self.collect_training_delay_input)
+        inspection_manager_layout.addLayout(collect_row_two)
+
+        collect_row_three = QHBoxLayout()
+        self.collect_training_plot_combo = QComboBox()
+        self.collect_training_plot_combo.addItem("False", False)
+        self.collect_training_plot_combo.addItem("True", True)
+        self.collect_training_plot_combo.currentIndexChanged.connect(self._update_collect_training_controls)
+        collect_row_three.addWidget(QLabel("Plot:"))
+        collect_row_three.addWidget(self.collect_training_plot_combo)
+
+        self.collect_training_bracket_combo = QComboBox()
+        self.collect_training_bracket_combo.addItem("False", False)
+        self.collect_training_bracket_combo.addItem("True", True)
+        self.collect_training_bracket_combo.currentIndexChanged.connect(self._update_collect_training_controls)
+        collect_row_three.addWidget(QLabel("Bracket:"))
+        collect_row_three.addWidget(self.collect_training_bracket_combo)
+        inspection_manager_layout.addLayout(collect_row_three)
+
+        self.btn_capture_training_data = QPushButton("Capture data for training")
+        self.btn_capture_training_data.clicked.connect(self.toggle_capture_training_data)
+        inspection_manager_layout.addWidget(self.btn_capture_training_data)
+
+        predict_separator = QFrame()
+        predict_separator.setFrameShape(QFrame.HLine)
+        predict_separator.setFrameShadow(QFrame.Sunken)
+        inspection_manager_layout.addWidget(predict_separator)
+
+        predict_row_one = QHBoxLayout()
+        self.daily_inspection_x_input = QDoubleSpinBox()
+        self.daily_inspection_x_input.setRange(-1000.0, 1000.0)
+        self.daily_inspection_x_input.setDecimals(3)
+        self.daily_inspection_x_input.setSingleStep(0.1)
+        self.daily_inspection_x_input.setValue(0.0)
+        self.daily_inspection_x_input.valueChanged.connect(self._update_daily_inspection_controls)
+        predict_row_one.addWidget(QLabel("X:"))
+        predict_row_one.addWidget(self.daily_inspection_x_input)
+
+        self.daily_inspection_y_input = QDoubleSpinBox()
+        self.daily_inspection_y_input.setRange(-1000.0, 1000.0)
+        self.daily_inspection_y_input.setDecimals(3)
+        self.daily_inspection_y_input.setSingleStep(0.1)
+        self.daily_inspection_y_input.setValue(0.0)
+        self.daily_inspection_y_input.valueChanged.connect(self._update_daily_inspection_controls)
+        predict_row_one.addWidget(QLabel("Y:"))
+        predict_row_one.addWidget(self.daily_inspection_y_input)
+
+        self.daily_inspection_z_input = QDoubleSpinBox()
+        self.daily_inspection_z_input.setRange(-1000.0, 1000.0)
+        self.daily_inspection_z_input.setDecimals(3)
+        self.daily_inspection_z_input.setSingleStep(0.1)
+        self.daily_inspection_z_input.setValue(0.0)
+        self.daily_inspection_z_input.valueChanged.connect(self._update_daily_inspection_controls)
+        predict_row_one.addWidget(QLabel("Z:"))
+        predict_row_one.addWidget(self.daily_inspection_z_input)
+        inspection_manager_layout.addLayout(predict_row_one)
+
+        predict_row_two = QHBoxLayout()
+        self.daily_inspection_zone_input = QLineEdit()
+        self.daily_inspection_zone_input.setPlaceholderText("wall1")
+        self.daily_inspection_zone_input.textChanged.connect(self._update_daily_inspection_controls)
+        predict_row_two.addWidget(QLabel("Zone:"))
+        predict_row_two.addWidget(self.daily_inspection_zone_input)
+
+        self.daily_inspection_captures_input = QSpinBox()
+        self.daily_inspection_captures_input.setRange(1, 999)
+        self.daily_inspection_captures_input.setValue(5)
+        self.daily_inspection_captures_input.valueChanged.connect(self._update_daily_inspection_controls)
+        predict_row_two.addWidget(QLabel("Captures:"))
+        predict_row_two.addWidget(self.daily_inspection_captures_input)
+        inspection_manager_layout.addLayout(predict_row_two)
+
+        predict_row_three = QHBoxLayout()
+        self.daily_inspection_plot_combo = QComboBox()
+        self.daily_inspection_plot_combo.addItem("False", False)
+        self.daily_inspection_plot_combo.addItem("True", True)
+        self.daily_inspection_plot_combo.currentIndexChanged.connect(self._update_daily_inspection_controls)
+        predict_row_three.addWidget(QLabel("Plot:"))
+        predict_row_three.addWidget(self.daily_inspection_plot_combo)
+        predict_row_three.addStretch()
+        inspection_manager_layout.addLayout(predict_row_three)
+
+        self.btn_daily_inspection = QPushButton("Daily Inspection")
+        self.btn_daily_inspection.clicked.connect(self.toggle_daily_inspection)
+        inspection_manager_layout.addWidget(self.btn_daily_inspection)
+
+        hyperspectral_panel_layout.addWidget(inspection_manager_box)
+        self._update_focus_speed_controls()
+        self._update_collect_training_controls()
+        self._update_daily_inspection_controls()
+
+        hyperspectral_panel_layout.addStretch()
+        sensors_layout.addWidget(hyperspectral_panel, 1)
+
         gpr_base_url_layout = QHBoxLayout()
         gpr_base_url_layout.addWidget(QLabel("Base URL:"))
-        self.gpr_base_url_input = QLineEdit("http://192.168.42.53:9000")
-        self.gpr_base_url_input.setPlaceholderText("http://192.168.42.53:9000")
+        self.gpr_base_url_input = QLineEdit("http://192.168.1.239:9000")
+        self.gpr_base_url_input.setPlaceholderText("http://192.168.1.239:9000")
         self.gpr_base_url_input.setToolTip("Base URL for the GPR HTTP server.")
         gpr_base_url_layout.addWidget(self.gpr_base_url_input)
         gpr_base_url_layout.addStretch()
-        gpr_tab_layout.addLayout(gpr_base_url_layout)
+        gpr_panel_layout.addLayout(gpr_base_url_layout)
 
         gpr_groups_layout = QGridLayout()
         gpr_groups_layout.setHorizontalSpacing(12)
         gpr_groups_layout.setVerticalSpacing(12)
+        # Two columns: the GPR panel now shares the tab width with the
+        # hyperspectral panel, so 'presets' drops to its own row.
         group_positions = [
             ('probe', 'Probe', 0, 0),
             ('line', 'Line', 0, 1),
-            ('presets', 'Presets', 0, 2),
             ('measurements', 'Measurements', 1, 0),
+            ('presets', 'Presets', 2, 0),
             ('export', 'Export', 1, 1),
         ]
         for group_key, title, row, col in group_positions:
@@ -2998,7 +3197,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         gpr_groups_layout.setColumnStretch(0, 1)
         gpr_groups_layout.setColumnStretch(1, 1)
         gpr_groups_layout.setColumnStretch(2, 1)
-        gpr_tab_layout.addLayout(gpr_groups_layout)
+        gpr_panel_layout.addLayout(gpr_groups_layout)
 
         self.gpr_status_text = QTextEdit()
         self.gpr_status_text.setReadOnly(True)
@@ -3012,7 +3211,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.gpr_status_text.setTabStopDistance(tab_width)
 
         gpr_status_header = QHBoxLayout()
-        gpr_status_header.addWidget(QLabel("GPR API Test - Curl Command + Response"))
+        gpr_status_header.addWidget(QLabel("Sensors - Command Output"))
         gpr_status_header.addStretch()
         gpr_status_header.addWidget(QLabel("Filter:"))
         self.gpr_search_input = QLineEdit()
@@ -3035,6 +3234,25 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         gpr_tab_layout.addLayout(gpr_status_header)
         gpr_tab_layout.addWidget(self.gpr_status_text, 1)
+
+        sensors_input_row = QHBoxLayout()
+        sensors_input_row.addWidget(QLabel("Send input:"))
+        self.sensors_stdin_input = QLineEdit()
+        self.sensors_stdin_input.setPlaceholderText(
+            "Type input for a running hyperspectral process and press Enter (leave blank to send Enter)..."
+        )
+        self.sensors_stdin_input.setEnabled(False)
+        self.sensors_stdin_input.returnPressed.connect(self._send_sensors_input)
+        self.sensors_stdin_input.installEventFilter(self)
+        sensors_input_row.addWidget(self.sensors_stdin_input)
+
+        self.btn_sensors_send_input = QPushButton("Send")
+        self.btn_sensors_send_input.setMaximumWidth(70)
+        self.btn_sensors_send_input.setEnabled(False)
+        self.btn_sensors_send_input.clicked.connect(self._send_sensors_input)
+        sensors_input_row.addWidget(self.btn_sensors_send_input)
+        gpr_tab_layout.addLayout(sensors_input_row)
+
         return gpr_tab
 
     def _create_gpr_group_box(self, group_key, title):
@@ -3057,6 +3275,336 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         self.gpr_group_combos[group_key] = request_combo
         return group_box
+
+    def _toggle_sensors_process(self, process_key, button, name, program, args):
+        """Toggle a Sensors-tab process and stream output to the shared status pane."""
+        if process_key in self.process_map:
+            process = self.process_map[process_key]
+            try:
+                process.finished.disconnect()
+            except Exception:
+                pass
+
+            process.terminate()
+            process.waitForFinished(3000)
+            if process.state() == QProcess.Running:
+                process.kill()
+                process.waitForFinished(2000)
+
+            if process_key in self.process_map:
+                del self.process_map[process_key]
+            self._remove_sensors_process_key(process_key)
+            process.deleteLater()
+
+            button.setStyleSheet("")
+            self._log_append(self.gpr_status_text, f"⏹ Stopped {name}")
+            self._sensors_set_input_enabled(self._get_active_sensors_input_process() is not None)
+            return
+
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        process.readyReadStandardOutput.connect(lambda: self._handle_sensors_output(process))
+        process.finished.connect(
+            lambda: self._on_sensors_process_finished(process_key, button, name)
+        )
+
+        cmd_str = program + ' ' + ' '.join(args)
+        self._log_append(self.gpr_status_text, f"<b style='color: #57ab5a;'>▶ {cmd_str}</b>")
+
+        process.start(program, args)
+        self.process_map[process_key] = process
+        self._remember_sensors_process_key(process_key)
+        button.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self._sensors_set_input_enabled(True)
+
+    def _handle_sensors_output(self, process):
+        """Append Sensors-tab process output to the shared status pane."""
+        output = process.readAllStandardOutput().data().decode()
+        if output:
+            for line in output.split('\n'):
+                if 'process has died' in line and 'exit code -9' in line:
+                    continue
+                self._log_append(self.gpr_status_text, self._ansi_to_html(line))
+
+    def _on_sensors_process_finished(self, process_key, button, name):
+        """Reset Sensors-tab process button state when a process exits."""
+        if process_key in self.process_map:
+            process = self.process_map.pop(process_key)
+            self._remove_sensors_process_key(process_key)
+            button.setStyleSheet("")
+            self._log_append(self.gpr_status_text, f"⚠ {name} exited")
+            process.deleteLater()
+            self._sensors_set_input_enabled(self._get_active_sensors_input_process() is not None)
+
+    def _remember_sensors_process_key(self, process_key):
+        """Track Sensors-tab process start order for stdin routing."""
+        if not hasattr(self, '_sensors_process_order'):
+            self._sensors_process_order = []
+        self._remove_sensors_process_key(process_key)
+        self._sensors_process_order.append(process_key)
+
+    def _remove_sensors_process_key(self, process_key):
+        """Drop a Sensors-tab process key from the stdin routing order."""
+        if not hasattr(self, '_sensors_process_order'):
+            return
+        self._sensors_process_order = [key for key in self._sensors_process_order if key != process_key]
+
+    def _get_active_sensors_input_process(self):
+        """Return the most recent running Sensors-tab process that can receive stdin."""
+        candidate_keys = getattr(self, '_sensors_process_order', [])
+        for process_key in reversed(candidate_keys):
+            process = self.process_map.get(process_key)
+            if process is not None and process.state() == QProcess.Running:
+                return process
+        return None
+
+    def _sensors_set_input_enabled(self, enabled: bool):
+        """Enable or disable the Sensors-tab stdin controls."""
+        if hasattr(self, 'sensors_stdin_input'):
+            self.sensors_stdin_input.setEnabled(enabled)
+            if not enabled:
+                self.sensors_stdin_input.clear()
+        if hasattr(self, 'btn_sensors_send_input'):
+            self.btn_sensors_send_input.setEnabled(enabled)
+
+    def _send_sensors_input(self):
+        """Send user input to the active Sensors-tab process, allowing blank Enter sends."""
+        target = self._get_active_sensors_input_process()
+        if target is None:
+            self._log_append(
+                self.gpr_status_text,
+                "<span style='color: #f47067;'>⚠ No running hyperspectral process to send input to</span>",
+            )
+            self._sensors_set_input_enabled(False)
+            return
+
+        text = self.sensors_stdin_input.text()
+        target.write((text + '\n').encode())
+        display_text = text if text else '<ENTER>'
+        self._log_append(
+            self.gpr_status_text,
+            f"<span style='color: #76e3ea;'>▷ {html.escape(display_text)}</span>",
+        )
+        self.sensors_stdin_input.clear()
+
+    def eventFilter(self, obj, event):
+        """Handle Enter/Return explicitly for the Sensors stdin field."""
+        if (
+            obj is getattr(self, 'sensors_stdin_input', None)
+            and event.type() == QEvent.KeyPress
+            and event.key() in (Qt.Key_Return, Qt.Key_Enter)
+        ):
+            self._send_sensors_input()
+            return True
+        return super().eventFilter(obj, event)
+
+    def _get_focus_speed_value(self):
+        """Return the currently selected focus speed for the inspection manager focus test."""
+        selected_value = self.focus_speed_combo.currentData() if hasattr(self, 'focus_speed_combo') else 140000
+        if selected_value is not None:
+            return selected_value
+
+        custom_text = self.focus_speed_input.text().strip() if hasattr(self, 'focus_speed_input') else ''
+        if custom_text.isdigit():
+            return int(custom_text)
+        return 140000
+
+    def _update_focus_speed_controls(self):
+        """Keep the focus-speed controls and tooltip in sync with the selected value."""
+        if not hasattr(self, 'focus_speed_combo'):
+            return
+
+        is_custom = self.focus_speed_combo.currentData() is None
+        if hasattr(self, 'focus_speed_input'):
+            self.focus_speed_input.setVisible(is_custom)
+
+        focus_speed = self._get_focus_speed_value()
+        command = (
+            'ros2 run arm_control inspection_manager '
+            f'--mode focus --focus-speed {focus_speed}'
+        )
+        if hasattr(self, 'btn_focus_optical_calibration'):
+            self.btn_focus_optical_calibration.setToolTip(command)
+
+    def toggle_focus_optical_calibration_test(self):
+        """Toggle the inspection manager focus-mode test using the selected focus speed."""
+        focus_speed = self._get_focus_speed_value()
+        self._toggle_sensors_process(
+            'inspection_manager_focus_test',
+            self.btn_focus_optical_calibration,
+            'Focusing and Optical Calibration Test',
+            'ros2',
+            ['run', 'arm_control', 'inspection_manager', '--mode', 'focus', '--focus-speed', str(focus_speed)],
+        )
+
+    def _format_collect_training_delay(self):
+        """Return the capture-delay value without unnecessary trailing zeroes."""
+        delay_value = self.collect_training_delay_input.value() if hasattr(self, 'collect_training_delay_input') else 0.7
+        return f"{delay_value:.2f}".rstrip('0').rstrip('.')
+
+    @staticmethod
+    def _format_float_argument(value):
+        """Return a compact string representation for a float CLI argument."""
+        return f"{value:.3f}".rstrip('0').rstrip('.')
+
+    def _build_collect_training_args(self, include_placeholder_values=False):
+        """Build the inspection_manager collect-mode arguments from the UI state."""
+        label = ''
+        zone = ''
+        if hasattr(self, 'collect_training_label_input'):
+            label = self.collect_training_label_input.text().strip()
+        if hasattr(self, 'collect_training_zone_input'):
+            zone = self.collect_training_zone_input.text().strip()
+
+        if include_placeholder_values:
+            if not label and hasattr(self, 'collect_training_label_input'):
+                label = self.collect_training_label_input.placeholderText().strip()
+            if not zone and hasattr(self, 'collect_training_zone_input'):
+                zone = self.collect_training_zone_input.placeholderText().strip()
+
+        args = ['run', 'arm_control', 'inspection_manager', '--mode', 'collect']
+        if label:
+            args.extend(['--label', label])
+        if zone:
+            args.extend(['--zone', zone])
+
+        if hasattr(self, 'collect_training_captures_input'):
+            captures = self.collect_training_captures_input.value()
+            if captures != 5:
+                args.extend(['--captures', str(captures)])
+
+        if hasattr(self, 'collect_training_delay_input'):
+            delay_value = self.collect_training_delay_input.value()
+            if abs(delay_value - 0.7) > 1e-9:
+                args.extend(['--capture-delay', self._format_collect_training_delay()])
+
+        if hasattr(self, 'collect_training_plot_combo') and self.collect_training_plot_combo.currentData():
+            args.append('--plot')
+        if hasattr(self, 'collect_training_bracket_combo') and self.collect_training_bracket_combo.currentData():
+            args.append('--bracket')
+
+        return args
+
+    def _update_collect_training_controls(self):
+        """Keep the collect-mode button tooltip aligned with the current form values."""
+        if not hasattr(self, 'btn_capture_training_data'):
+            return
+
+        args = self._build_collect_training_args(include_placeholder_values=True)
+        command = 'ros2 ' + ' '.join(shlex.quote(arg) for arg in args)
+        self.btn_capture_training_data.setToolTip(command)
+
+    def toggle_capture_training_data(self):
+        """Toggle inspection_manager collect mode using the current training-capture form values."""
+        label = self.collect_training_label_input.text().strip() if hasattr(self, 'collect_training_label_input') else ''
+        zone = self.collect_training_zone_input.text().strip() if hasattr(self, 'collect_training_zone_input') else ''
+
+        if not label or not zone:
+            QMessageBox.warning(
+                self,
+                'Capture data for training',
+                'Label and Zone are required before starting the training capture.',
+            )
+            return
+
+        self._toggle_sensors_process(
+            'inspection_manager_collect_training',
+            self.btn_capture_training_data,
+            'Capture data for training',
+            'ros2',
+            self._build_collect_training_args(),
+        )
+
+    def _build_daily_inspection_args(self, include_placeholder_values=False):
+        """Build the inspection_manager predict-mode arguments from the UI state."""
+        x_value = self.daily_inspection_x_input.value() if hasattr(self, 'daily_inspection_x_input') else 0.0
+        y_value = self.daily_inspection_y_input.value() if hasattr(self, 'daily_inspection_y_input') else 0.0
+        z_value = self.daily_inspection_z_input.value() if hasattr(self, 'daily_inspection_z_input') else 0.0
+
+        zone = ''
+        if hasattr(self, 'daily_inspection_zone_input'):
+            zone = self.daily_inspection_zone_input.text().strip()
+        if include_placeholder_values and not zone and hasattr(self, 'daily_inspection_zone_input'):
+            zone = self.daily_inspection_zone_input.placeholderText().strip()
+
+        args = [
+            'run',
+            'arm_control',
+            'inspection_manager',
+            self._format_float_argument(x_value),
+            self._format_float_argument(y_value),
+            self._format_float_argument(z_value),
+            '--mode',
+            'predict',
+        ]
+
+        if zone:
+            args.extend(['--zone', zone])
+
+        if hasattr(self, 'daily_inspection_captures_input'):
+            captures = self.daily_inspection_captures_input.value()
+            if captures != 5:
+                args.extend(['--captures', str(captures)])
+
+        if hasattr(self, 'daily_inspection_plot_combo') and self.daily_inspection_plot_combo.currentData():
+            args.append('--plot')
+
+        return args
+
+    def _update_daily_inspection_controls(self):
+        """Keep the predict-mode button tooltip aligned with the current form values."""
+        if not hasattr(self, 'btn_daily_inspection'):
+            return
+
+        args = self._build_daily_inspection_args(include_placeholder_values=True)
+        command = 'ros2 ' + ' '.join(shlex.quote(arg) for arg in args)
+        self.btn_daily_inspection.setToolTip(command)
+
+    def toggle_daily_inspection(self):
+        """Toggle inspection_manager predict mode using the current daily inspection form values."""
+        zone = self.daily_inspection_zone_input.text().strip() if hasattr(self, 'daily_inspection_zone_input') else ''
+        if not zone:
+            QMessageBox.warning(
+                self,
+                'Daily Inspection',
+                'Zone is required before starting the daily inspection.',
+            )
+            return
+
+        self._toggle_sensors_process(
+            'inspection_manager_daily_inspection',
+            self.btn_daily_inspection,
+            'Daily Inspection',
+            'ros2',
+            self._build_daily_inspection_args(),
+        )
+
+    def _populate_gpr_request_combo(self, combo, requests):
+        """Populate a GPR request combobox with tooltip metadata."""
+        for request in requests:
+            combo.addItem(request['label'], request)
+            item_index = combo.count() - 1
+            combo.setItemData(item_index, request.get('tooltip', request['description']), Qt.ToolTipRole)
+
+        combo.currentIndexChanged.connect(lambda _, c=combo: self._update_gpr_combo_tooltip(c))
+        self._update_gpr_combo_tooltip(combo)
+
+    def _update_gpr_combo_tooltip(self, combo):
+        """Keep the combobox tooltip aligned with the selected request."""
+        request = combo.currentData()
+        combo.setToolTip(request.get('tooltip', request['description']) if request else "")
+
+    def _get_gpr_download_dir(self):
+        """Return the directory used for downloaded GPR API artifacts."""
+        return os.path.expanduser('~/Downloads/GP_API_Test')
+
+    def _build_gpr_download_path(self, request):
+        """Build a timestamped download path for file-based GPR API responses."""
+        download_dir = self._get_gpr_download_dir()
+        safe_stem = request['path'].strip('/').replace('/', '_') or 'gpr_download'
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        extension = request['download_extension']
+        return os.path.join(download_dir, f'{safe_stem}_{timestamp}.{extension}')
 
     def _populate_gpr_request_combo(self, combo, requests):
         """Populate a GPR request combobox with tooltip metadata."""
@@ -4110,8 +4658,14 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             if pid:
                 try:
                     os.kill(pid, signal.SIGINT)
-                    # Longer wait for mapping to save rtabmap.db
-                    wait_ms = 5000 if 'mapping' in process_key else 3000
+                    # The controller manager deactivates the column first,
+                    # and its retract blocks ~5 s; only then does the base
+                    # disable the drives via PDO (~0.3 s more). Escalating
+                    # earlier kills it mid-shutdown, and the drives latch
+                    # error 50 until the next start. Mapping also needs the
+                    # time to save rtabmap.db. waitForFinished() returns as
+                    # soon as the launch exits.
+                    wait_ms = 10000
                     if 'mapping' in process_key:
                         self._log_append(status_text, "💾 Saving mapping database... (waiting for shutdown)")
                     process.waitForFinished(wait_ms)
@@ -5742,6 +6296,79 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         controls_row.addStretch()
         fsm_tab_layout.addLayout(controls_row)
 
+        # ── Options row (GPR bridge) ──
+        options_row = QHBoxLayout()
+
+        # GPR in the sweep. Ticked leaves fsm_node's own default (probe on for
+        # the real robot, off in sim); unticked forces gpr_enabled:=false, e.g.
+        # to sweep with the camera alone. Forcing true is deliberately not
+        # offered: in sim ScanWall would try to reach the GP8800 and fail.
+        self.fsm_gpr_check = QCheckBox("GPR in sweep")
+        self.fsm_gpr_check.setChecked(True)
+        self.fsm_gpr_check.setToolTip(
+            "Drive the GPR probe during the wall sweeps.\n"
+            "Unticked: fsm_node -p gpr_enabled:=false (the trigger bridge is not\n"
+            "started either). The probe is never driven in sim.")
+        self.fsm_gpr_check.toggled.connect(self._on_fsm_gpr_toggled)
+        options_row.addWidget(self.fsm_gpr_check)
+        options_row.addSpacing(16)
+
+        # GPR trigger bridge (ESP32 fake encoder on Oliwall_2G). Off by default:
+        # it is only useful with the real probe on the robot, and a node with
+        # nothing to talk to is wasted Jetson time. Ticked, the box starts the
+        # bridge from task_planner.launch.py (gpr_trigger_bridge:=true, so it
+        # dies with the rest of the launch on Stop) and hands fsm_node
+        # gpr_trigger_bridge_required so a sweep refuses to start on a dead link.
+        # Unticked, the probe runs on its own wheel: gpr_trigger_publish:=false.
+        self.fsm_gpr_bridge_check = QCheckBox("GPR trigger bridge")
+        self.fsm_gpr_bridge_check.setToolTip(
+            "Start gpr_trigger_bridge (/gpr/trigger -> UDP -> ESP32) with the FSM\n"
+            "and require the board to answer before every wall sweep.\n"
+            "Unticked: the GPR runs on its own wheel and no triggers are sent\n"
+            "(plate travel and unseated stretches are still recorded).\n"
+            "Real robot only; leave off in sim and when the GPR is not mounted.")
+        self.fsm_gpr_bridge_check.toggled.connect(self._on_fsm_gpr_bridge_toggled)
+        options_row.addWidget(self.fsm_gpr_bridge_check)
+        # Pre-filled with task_planner.launch.py's gpr_receiver_ip default.
+        self.fsm_gpr_ip_input = QLineEdit("192.168.1.166")
+        self.fsm_gpr_ip_input.setPlaceholderText("ESP32 IP")
+        self.fsm_gpr_ip_input.setMaximumWidth(130)
+        self.fsm_gpr_ip_input.setToolTip("ESP32 address on Oliwall_2G (DHCP reservation).")
+        options_row.addWidget(self.fsm_gpr_ip_input)
+        self._on_fsm_gpr_toggled(self.fsm_gpr_check.isChecked())
+
+        # Hyperspectral camera: ScanWall samples it during every wall sweep and
+        # SensorDataProcessing classifies what it recorded. Off by default, like
+        # the FSM's own hyperspectral_enabled. The box does not start the camera:
+        # hyperspectral_node needs the operator for its calibration, so it is
+        # started and calibrated from the Sensors tab (or a terminal) first.
+        options_row.addSpacing(16)
+        self.fsm_hyperspectral_check = QCheckBox("Hyperspectral camera")
+        self.fsm_hyperspectral_check.setToolTip(
+            "Sample the hyperspectral camera during every wall sweep\n"
+            "(fsm_node -p hyperspectral_enabled:=true).\n"
+            "Start and calibrate hyperspectral_node in the Sensors tab first:\n"
+            "without a calibration the FSM skips the camera and the GPR carries on.")
+        options_row.addWidget(self.fsm_hyperspectral_check)
+        # Plate travel between two captures (hyperspectral_sample_spacing_m).
+        # The FSM's own default is 0.10 m; the UI asks for 0.5 m.
+        self.fsm_hyperspectral_spacing_input = QDoubleSpinBox()
+        self.fsm_hyperspectral_spacing_input.setRange(0.05, 5.0)
+        self.fsm_hyperspectral_spacing_input.setSingleStep(0.05)
+        self.fsm_hyperspectral_spacing_input.setDecimals(2)
+        self.fsm_hyperspectral_spacing_input.setSuffix(" m")
+        self.fsm_hyperspectral_spacing_input.setValue(0.5)
+        self.fsm_hyperspectral_spacing_input.setToolTip(
+            "Sensor-plate travel between two hyperspectral captures\n"
+            "(fsm_node -p hyperspectral_sample_spacing_m).")
+        options_row.addWidget(self.fsm_hyperspectral_spacing_input)
+        self.fsm_hyperspectral_check.toggled.connect(
+            self.fsm_hyperspectral_spacing_input.setEnabled)
+        self.fsm_hyperspectral_spacing_input.setEnabled(
+            self.fsm_hyperspectral_check.isChecked())
+
+        options_row.addStretch()
+        fsm_tab_layout.addLayout(options_row)
         # ── Restart row: new run from Error/Finished, robot stack kept up ──
         # (The FSM state it depends on is shown in the status panel below.)
         restart_row = QHBoxLayout()
@@ -6052,6 +6679,47 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         key, value = data
         return ['--ros-args', '-p', f'{key}:={value}']
 
+    def _on_fsm_gpr_toggled(self, checked):
+        # No GPR, no bridge: grey the bridge box out rather than untick it, so
+        # the operator's choice comes back with the GPR.
+        self.fsm_gpr_bridge_check.setEnabled(bool(checked))
+        self._on_fsm_gpr_bridge_toggled(self.fsm_gpr_bridge_check.isChecked())
+
+    def _on_fsm_gpr_bridge_toggled(self, checked):
+        self.fsm_gpr_ip_input.setEnabled(bool(checked) and self.fsm_gpr_check.isChecked())
+
+    def _fsm_gpr_override(self):
+        """``['-p', ...]`` keeping the GPR out of the sweep when unticked."""
+        if self.fsm_gpr_check.isChecked():
+            return []
+        return ['-p', 'gpr_enabled:=false']
+
+    def _fsm_gpr_bridge_enabled(self):
+        return self.fsm_gpr_check.isChecked() and self.fsm_gpr_bridge_check.isChecked()
+
+    def _fsm_gpr_bridge_launch_args(self):
+        """Launch arguments that start the bridge from task_planner.launch.py."""
+        if not self._fsm_gpr_bridge_enabled():
+            return []
+        ip = self.fsm_gpr_ip_input.text().strip()
+        return ['gpr_trigger_bridge:=true', f'gpr_receiver_ip:={ip}']
+
+    def _fsm_hyperspectral_override(self):
+        """``['-p', ...]`` making ScanWall sample the camera during the sweeps."""
+        if not self.fsm_hyperspectral_check.isChecked():
+            return []
+        spacing = self.fsm_hyperspectral_spacing_input.value()
+        return ['-p', 'hyperspectral_enabled:=true',
+                '-p', f'hyperspectral_sample_spacing_m:={spacing:g}']
+
+    def _fsm_gpr_bridge_override(self):
+        """``['-p', ...]``: with the bridge, make fsm_node refuse a sweep on a
+        dead link; without it the probe runs on its own wheel, so no triggers
+        (plate travel and unseated stretches are still recorded)."""
+        if not self._fsm_gpr_bridge_enabled():
+            return ['-p', 'gpr_trigger_publish:=false']
+        return ['-p', 'gpr_trigger_bridge_required:=true']
+
     def _toggle_fsm(self):
         """Start or stop the FSM launch + node pair."""
         if self.fsm_launch_process is not None or self.fsm_node_process is not None:
@@ -6065,12 +6733,33 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         state = self.fsm_state_combo.currentText()
         wbc = self.fsm_wbc_combo.currentText()
 
+        # The bridge exits at once without a receiver_ip; better to say so
+        # here than to have the sweep fail later on "no bridge status".
+        if self._fsm_gpr_bridge_enabled() and not self.fsm_gpr_ip_input.text().strip():
+            self._fsm_append_log(
+                "<span style='color: #f47067;'>GPR trigger bridge is ticked but the "
+                "ESP32 IP is empty; fill it in or untick the box.</span>",
+                "GPR trigger bridge is ticked but the ESP32 IP is empty; fill it in or untick the box.",
+            )
+            return
+
+        # Not a refusal: the camera may be running from a terminal.
+        if self.fsm_hyperspectral_check.isChecked() and 'hyperspectral_camera' not in self.process_map:
+            self._fsm_append_log(
+                "<span style='color: #e0b44c;'>Hyperspectral camera is ticked but "
+                "hyperspectral_node is not running from the Sensors tab; start and "
+                "calibrate it there before the first sweep.</span>",
+                "Hyperspectral camera is ticked but hyperspectral_node is not running from the "
+                "Sensors tab; start and calibrate it there before the first sweep.",
+            )
+
         self.btn_fsm_start.setText("Stop FSM")
         self.btn_fsm_start.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         self._fsm_set_input_enabled(True)
 
         # ── Step 1: launch file ──
-        launch_args = ['launch', 'task_planner_fsm', 'task_planner.launch.py']
+        launch_args = ['launch', 'task_planner_fsm', 'task_planner.launch.py'] \
+            + self._fsm_gpr_bridge_launch_args()
         self._fsm_append_log(
             f"<b style='color: #57ab5a;'>▶ ros2 {' '.join(launch_args)}</b>",
             f"▶ ros2 {' '.join(launch_args)}",
@@ -6098,6 +6787,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             # configured. Hence --ros-args rather than another '--' option, and
             # it must stay last so nothing follows it into ROS's arg parser.
             '--ros-args', '-p', f'sweep_use_wbc:={wbc}',
+            *self._fsm_gpr_override(),
+            *self._fsm_gpr_bridge_override(),
+            *self._fsm_hyperspectral_override(),
         ] + self._fsm_session_override(state)
         QTimer.singleShot(3000, lambda: self._start_fsm_node(node_args))
 
