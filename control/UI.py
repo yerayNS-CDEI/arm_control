@@ -4960,14 +4960,20 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
     }
 
     def _build_localization_indicator(self, parent_layout):
-        """Add a Localization indicator row (same look as the status indicators)."""
+        """Add a Localization indicator row (same look as the status indicators).
+
+        In a QFormLayout the name goes in the form's label column, unstyled
+        like the other rows there.
+        """
+        in_form = isinstance(parent_layout, QFormLayout)
         row = QHBoxLayout()
         icon = QLabel("○")
         icon.setStyleSheet("color: #8b949e; font-size: 16pt; font-weight: bold;")
         icon.setFixedWidth(24)
         icon.setAlignment(Qt.AlignCenter)
         name = QLabel("Localization:")
-        name.setStyleSheet("font-weight: bold;")
+        if not in_form:
+            name.setStyleSheet("font-weight: bold;")
         value = QLabel("—")
         value.setStyleSheet("color: #8b949e;")
         value.setWordWrap(True)
@@ -4982,9 +4988,13 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         for widget in (icon, name, value):
             widget.setToolTip(tooltip)
         row.addWidget(icon)
-        row.addWidget(name)
-        row.addWidget(value, 1)
-        parent_layout.addLayout(row)
+        if in_form:
+            row.addWidget(value, 1)
+            parent_layout.addRow(name, row)
+        else:
+            row.addWidget(name)
+            row.addWidget(value, 1)
+            parent_layout.addLayout(row)
         self.localization_indicators.append((icon, value))
 
     def _refresh_localization_indicators(self):
@@ -6545,6 +6555,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         form.addRow("Summary:", self.fsm_summary_label)
         form.addRow("Elapsed:", self.fsm_elapsed_label)
         form.addRow("Progress:", self.fsm_progress_label)
+        self._build_localization_indicator(form)
         layout.addWidget(status_group)
 
         graph_group = QGroupBox("FSM Graph")
