@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
 from UI_utils import localization_monitor
+from UI_utils.map_view import MapView
 from geometry_msgs.msg import Pose
 from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray, String
 from sensor_msgs.msg import JointState
@@ -1468,6 +1469,7 @@ class RobotControlUI(QMainWindow):
         tabs.addTab(full_control_tab, "Full Control")
         tabs.addTab(self._create_gpr_api_test_tab(), "Sensors")
         tabs.addTab(self._create_fsm_tab(), "FSM")
+        tabs.addTab(self._create_map_tab(), "Map")
 
         # Connect tab change signal to check joint states when Joint Control tab is activated
         tabs.currentChanged.connect(lambda index: self._on_tab_changed(index, tabs))
@@ -1480,6 +1482,10 @@ class RobotControlUI(QMainWindow):
         self.localization_timer = QTimer()
         self.localization_timer.timeout.connect(self._refresh_localization_indicators)
         self.localization_timer.start(500)  # 2 Hz
+
+        self.map_timer = QTimer()
+        self.map_timer.timeout.connect(self._refresh_map_tab)
+        self.map_timer.start(200)  # 5 Hz, no-op while the Map tab is hidden
         
         # Initial UI update for consistent visuals
         self._update_emergency_stop_button_ui()
@@ -6024,6 +6030,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
     def closeEvent(self, event):
         self.timer.stop()
         self.localization_timer.stop()
+        self.map_timer.stop()
         self.localization_monitor.stop()
 
         # Detach every QProcess from this window so Qt does NOT send SIGTERM
@@ -6578,6 +6585,62 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         graph_layout.addWidget(self.fsm_graph_view, 1)
         layout.addWidget(graph_group, 1)
         return pane
+
+    def _create_map_tab(self):
+        """2D map with the robot, Nav2 path/goal and detected walls (RViz stand-in)."""
+        map_tab = QWidget()
+        layout = QVBoxLayout(map_tab)
+
+        toolbar = QHBoxLayout()
+        self.map_follow_check = QCheckBox("Follow robot")
+        self.map_follow_check.setChecked(True)
+        toolbar.addWidget(self.map_follow_check)
+        toolbar.addSpacing(16)
+        toolbar.addWidget(QLabel("Mouse wheel to zoom, drag to pan"))
+        toolbar.addStretch()
+        self.map_summary_label = QLabel("—")
+        self.map_summary_label.setStyleSheet("color: #8b949e;")
+        toolbar.addWidget(self.map_summary_label)
+        toolbar.addSpacing(16)
+
+        state_colors = {state: color for state, (_, color, _) in self._LOCALIZATION_STYLES.items()}
+        self.map_view = MapView(self.localization_monitor, state_colors)
+        self.map_view.setMinimumSize(400, 300)
+        self.map_follow_check.toggled.connect(
+            lambda checked: setattr(self.map_view, 'follow_robot', checked))
+        for text, action in (
+            ("-", lambda: self.map_view.zoom(1.0 / 1.15)),
+            ("Fit map", self._fit_map_view),
+            ("+", lambda: self.map_view.zoom(1.15)),
+        ):
+            button = QPushButton(text)
+            button.setMaximumWidth(80)
+            button.clicked.connect(action)
+            toolbar.addWidget(button)
+        layout.addLayout(toolbar)
+
+        legend = QLabel(
+            "Robot arrow + σ circle in the Localization colour · "
+            "<span style='color:#1f6feb;'>━ Nav2 path, ▷ goal</span> · walls: "
+            "<span style='color:#2ea043;'>━ refined</span> "
+            "<span style='color:#d29922;'>━ unrefined</span> "
+            "<span style='color:#d63ad6;'>━ two-sided</span>")
+        legend.setTextFormat(Qt.RichText)
+        layout.addWidget(legend)
+        self._build_localization_indicator(layout)
+        layout.addWidget(self.map_view, 1)
+        return map_tab
+
+    def _fit_map_view(self):
+        # Fitting shows the whole map, so stop re-centring on the robot.
+        self.map_follow_check.setChecked(False)
+        self.map_view.fit()
+
+    def _refresh_map_tab(self):
+        if not self.map_view.isVisible():
+            return
+        state, _ = self.localization_monitor.snapshot()
+        self.map_summary_label.setText(self.map_view.refresh(state))
 
     # States fsm_node accepts on /fsm/restart (its RESTART_TARGET_STATES).
     FSM_RESTART_TARGETS = [

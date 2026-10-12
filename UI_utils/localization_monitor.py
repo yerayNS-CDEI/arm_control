@@ -15,11 +15,17 @@ Signals used (checked against rtabmap_ros CoreWrapper / OdometryROS):
 - /rtabmap/odom carries pose covariance 9999 when ICP odometry is lost.
 - Mem/IncrementalMemory on /rtabmap/rtabmap tells mapping from localization
   (in mapping mode localization_pose is published too, but means nothing).
+
+robot_pose() gives the robot in the map frame without a /tf subscription:
+localization_pose = map->odom * odom at its stamp, so each one fixes map->odom
+and the latest odometry carries the pose forward at odometry rate.
 """
 
+import bisect
 import math
 import threading
 import time
+from collections import deque
 
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
@@ -39,6 +45,7 @@ SIGMA_OK = 0.25             # (m) above this the pose is shown as uncertain
 DRIFT_DISTANCE = 2.0        # (m) driven on odometry without a correction before warning
 ODOM_TIMEOUT = 2.0          # (s) no odometry for this long -> odometry missing
 MAX_ODOM_STEP = 1.0         # (m) larger odometry jumps are resets, not motion
+ODOM_BUFFER_SIZE = 100      # odometry poses kept to match localization_pose stamps
 GRAPH_POLL_PERIOD = 1.0     # (s) rtabmap node presence check
 MODE_POLL_PERIOD = 5.0      # (s) mapping/localization mode can change at runtime
 
@@ -52,6 +59,25 @@ UNCERTAIN = 'uncertain'
 LOCALIZED = 'localized'
 
 
+def _yaw(q):
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def _compose(a, b):
+    """2D pose composition a * b, poses as (x, y, yaw)."""
+    c, s = math.cos(a[2]), math.sin(a[2])
+    return (a[0] + c * b[0] - s * b[1], a[1] + s * b[0] + c * b[1], a[2] + b[2])
+
+
+def _inverse(a):
+    c, s = math.cos(a[2]), math.sin(a[2])
+    return (-c * a[0] - s * a[1], s * a[0] - c * a[1], -a[2])
+
+
+def _stamp_ns(stamp):
+    return stamp.sec * 1_000_000_000 + stamp.nanosec
+
+
 class LocalizationMonitor:
     """Tracks RTAB-Map localization health; thread-safe snapshot() for the UI."""
 
@@ -63,6 +89,8 @@ class LocalizationMonitor:
         self._odom_lost = False
         self._last_odom_xy = None
         self._odom_distance = 0.0   # cumulative distance driven on odometry
+        self._odom_pose = None      # latest (x, y, yaw) in the odom frame
+        self._odom_buffer = deque(maxlen=ODOM_BUFFER_SIZE)  # (stamp_ns, pose)
         self._last_mode_poll = 0.0
         self._mode_future = None
 
@@ -101,6 +129,7 @@ class LocalizationMonitor:
         self._sigma = None              # None until the first match
         self._last_correction_time = None
         self._correction_distance = 0.0
+        self._map_to_odom = (0.0, 0.0, 0.0)
 
     # ── callbacks (executor thread) ──
 
@@ -113,7 +142,10 @@ class LocalizationMonitor:
                 self._last_odom_xy = None
                 return
             self._odom_lost = False
-            xy = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+            pose = msg.pose.pose
+            self._odom_pose = (pose.position.x, pose.position.y, _yaw(pose.orientation))
+            self._odom_buffer.append((_stamp_ns(msg.header.stamp), self._odom_pose))
+            xy = self._odom_pose[:2]
             if self._last_odom_xy is not None:
                 step = math.hypot(xy[0] - self._last_odom_xy[0], xy[1] - self._last_odom_xy[1])
                 if step < MAX_ODOM_STEP:
@@ -123,6 +155,11 @@ class LocalizationMonitor:
     def _on_localization_pose(self, msg):
         cov = msg.pose.covariance
         with self._lock:
+            odom = self._odom_at(_stamp_ns(msg.header.stamp))
+            if odom is not None:
+                pose = msg.pose.pose
+                located = (pose.position.x, pose.position.y, _yaw(pose.orientation))
+                self._map_to_odom = _compose(located, _inverse(odom))
             if cov[0] >= BAD_COVARIANCE:
                 self._sigma = None
                 return
@@ -134,6 +171,17 @@ class LocalizationMonitor:
                 self._last_correction_time = time.monotonic()
                 self._correction_distance = self._odom_distance
             self._sigma = sigma
+
+    def _odom_at(self, stamp_ns):
+        """Buffered odometry pose closest to stamp_ns (lock held), or None."""
+        if not self._odom_buffer:
+            return None
+        stamps = [stamp for stamp, _ in self._odom_buffer]
+        i = bisect.bisect_left(stamps, stamp_ns)
+        nearest = min(
+            (j for j in (i - 1, i) if 0 <= j < len(stamps)),
+            key=lambda j: abs(stamps[j] - stamp_ns))
+        return self._odom_buffer[nearest][1]
 
     def _poll_rtabmap(self):
         present = any(
@@ -169,6 +217,13 @@ class LocalizationMonitor:
             self._mode = 'mapping' if incremental else 'localization'
 
     # ── UI thread ──
+
+    def robot_pose(self):
+        """Return ((x, y, yaw) in the map frame, sigma or None), or None without odometry."""
+        with self._lock:
+            if self._odom_pose is None:
+                return None
+            return _compose(self._map_to_odom, self._odom_pose), self._sigma
 
     def snapshot(self):
         """Return (state, detail) where state is one of the module constants."""
