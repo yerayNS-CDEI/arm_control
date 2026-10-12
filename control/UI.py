@@ -22,6 +22,7 @@ from PyQt5.QtGui import (
 from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
+from UI_utils import localization_monitor
 from geometry_msgs.msg import Pose
 from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray, String
 from sensor_msgs.msg import JointState
@@ -378,6 +379,11 @@ class RobotControlUI(QMainWindow):
         self.fsm_transition_subscriber = self.node.create_subscription(
             String, '/fsm/transition', self._on_fsm_transition,
             QoSProfile(depth=20, reliability=ReliabilityPolicy.RELIABLE))
+
+        # RTAB-Map localization health (replaces watching RViz). Runs on its
+        # own executor thread; the indicators are repainted by a 2 Hz timer.
+        self.localization_monitor = localization_monitor.LocalizationMonitor()
+        self.localization_indicators = []
 
         # FSM log buffer (html, plain_text, add_newline) for filter rebuilds
         self.fsm_log_entries = []
@@ -789,6 +795,8 @@ class RobotControlUI(QMainWindow):
         self.btn_view_map.clicked.connect(self.toggle_view_map)
         self.btn_view_map.setToolTip("rtabmap-databaseViewer rtabmap.db")
         mapping_loc_layout.addWidget(self.btn_view_map)
+
+        self._build_localization_indicator(mapping_loc_layout)
  
         mapping_loc_layout.addStretch()
         base_boxes_layout.addWidget(mapping_loc_box)
@@ -1197,6 +1205,8 @@ class RobotControlUI(QMainWindow):
         self.btn_full_control_exploration.setToolTip("ros2 run navi_wall explore --ros-args --params-file config/explore_params.yaml")
         full_control_mapping_layout.addWidget(self.btn_full_control_exploration)
 
+        self._build_localization_indicator(full_control_mapping_layout)
+
         full_control_position_separator = QFrame()
         full_control_position_separator.setFrameShape(QFrame.HLine)
         full_control_position_separator.setFrameShadow(QFrame.Sunken)
@@ -1466,6 +1476,10 @@ class RobotControlUI(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self._spin_ros)
         self.timer.start(100)  # 10 Hz
+
+        self.localization_timer = QTimer()
+        self.localization_timer.timeout.connect(self._refresh_localization_indicators)
+        self.localization_timer.start(500)  # 2 Hz
         
         # Initial UI update for consistent visuals
         self._update_emergency_stop_button_ui()
@@ -4934,6 +4948,54 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             indicators[key] = (icon, value)
         return indicators
 
+    # icon, colour, label per localization_monitor state
+    _LOCALIZATION_STYLES = {
+        localization_monitor.OFFLINE:       ("○", "#8b949e", "OFFLINE"),
+        localization_monitor.MAPPING:       ("●", "#539bf5", "MAPPING"),
+        localization_monitor.NO_ODOM:       ("●", "#f47067", "NO ODOMETRY"),
+        localization_monitor.ODOM_LOST:     ("⛔", "#f47067", "ODOMETRY LOST"),
+        localization_monitor.NOT_LOCALIZED: ("●", "#f47067", "NOT LOCALIZED"),
+        localization_monitor.UNCERTAIN:     ("●", "#d29922", "UNCERTAIN"),
+        localization_monitor.LOCALIZED:     ("●", "#2ea043", "LOCALIZED"),
+    }
+
+    def _build_localization_indicator(self, parent_layout):
+        """Add a Localization indicator row (same look as the status indicators)."""
+        row = QHBoxLayout()
+        icon = QLabel("○")
+        icon.setStyleSheet("color: #8b949e; font-size: 16pt; font-weight: bold;")
+        icon.setFixedWidth(24)
+        icon.setAlignment(Qt.AlignCenter)
+        name = QLabel("Localization:")
+        name.setStyleSheet("font-weight: bold;")
+        value = QLabel("—")
+        value.setStyleSheet("color: #8b949e;")
+        value.setWordWrap(True)
+        tooltip = (
+            "RTAB-Map localization health, from /rtabmap/localization_pose and /rtabmap/odom.\n"
+            f"Green: σ ≤ {localization_monitor.SIGMA_OK} m and a map correction within "
+            f"the last {localization_monitor.DRIFT_DISTANCE} m driven.\n"
+            "Amber: dead-reckoning on odometry for too long, or σ too large.\n"
+            "Red: never matched the map yet, or odometry lost/missing.\n"
+            "Blue: RTAB-Map is mapping, not localizing."
+        )
+        for widget in (icon, name, value):
+            widget.setToolTip(tooltip)
+        row.addWidget(icon)
+        row.addWidget(name)
+        row.addWidget(value, 1)
+        parent_layout.addLayout(row)
+        self.localization_indicators.append((icon, value))
+
+    def _refresh_localization_indicators(self):
+        state, detail = self.localization_monitor.snapshot()
+        symbol, color, label = self._LOCALIZATION_STYLES[state]
+        for icon, value in self.localization_indicators:
+            icon.setText(symbol)
+            icon.setStyleSheet(f"color: {color}; font-size: 16pt; font-weight: bold;")
+            value.setText(f"{label} — {detail}")
+            value.setStyleSheet(f"color: {color};")
+
     def _update_status_indicator(self, command, response, status_text):
         """Update icon/value labels based on the dashboard response."""
         if command not in ('robotmode', 'safetystatus', 'programState'):
@@ -5951,6 +6013,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
     def closeEvent(self, event):
         self.timer.stop()
+        self.localization_timer.stop()
+        self.localization_monitor.stop()
 
         # Detach every QProcess from this window so Qt does NOT send SIGTERM
         # to the underlying OS processes when the window is destroyed.
