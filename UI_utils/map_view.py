@@ -13,7 +13,8 @@ executor thread (through a guard condition) so they never race its spin.
 
 In goal mode a press-drag-release on the map picks a pose like RViz's
 "2D Goal Pose" tool (press = position, drag = heading) and emits
-goal_selected; the owner publishes it.
+goal_selected; the owner publishes it. Shift + left-drag rotates the view
+about its centre.
 
 The local costmap is a small rolling window (~120x120 cells at 2 Hz) in the
 odom frame; it is placed with LocalizationMonitor's map->odom, like the robot.
@@ -24,6 +25,7 @@ import threading
 import time
 
 import numpy as np
+from scipy import ndimage
 from PyQt5.QtCore import Qt, QPointF, QRectF, pyqtSignal
 from PyQt5.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
@@ -52,6 +54,10 @@ MAP_REDRAW_PERIOD = 2.0     # (s) at most one grid -> image conversion per perio
 ROBOT_LENGTH = 0.7          # (m) drawn robot arrow
 SCENE_MARGIN = 20.0         # (m) pannable space around the map
 GOAL_MIN_DRAG = 0.05        # (m) shorter drags keep the heading at 0 (+x), as in RViz
+ROTATE_DEAD_ZONE = 10       # (px) around the view centre, where the drag angle is unstable
+FIT_BLOCK = 1.0             # (m) fit() looks for the mapped area in blocks of this size,
+FIT_MIN_KNOWN = 0.5         #     those at least this fraction known, largest connected group
+FIT_MARGIN = 8              # (px) left around the fitted area
 
 _LATCHED = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                       durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -214,6 +220,10 @@ class MapView(QGraphicsView):
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
+        # Panning is by drag; scroll bars that come and go as the view rotates or
+        # zooms resize the viewport, shifting the map and spoiling fit().
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setBackgroundBrush(QBrush(UNKNOWN_COLOR))
         self._monitor = monitor
         self._state_colors = state_colors
@@ -224,6 +234,7 @@ class MapView(QGraphicsView):
         self._grid_drawn_at = 0.0
         self._walls_version = 0
         self._fitted = False
+        self._fit_grid = None       # (cells, resolution, origin x, origin y) for fit()
 
         self._map_item = self._scene.addPixmap(QPixmap())
         self._map_item.setTransformationMode(Qt.FastTransformation)  # crisp cells
@@ -261,6 +272,10 @@ class MapView(QGraphicsView):
             self._arrow(), goal_pen, QBrush(QColor(232, 89, 12, 60)))
         self._goal_preview_item.setZValue(5)
         self._goal_preview_item.hide()
+
+        self._rotating = False
+        self._rotate_from = None    # cursor angle (deg) about the view centre while rotating
+        self._rotate_cursor = None  # viewport cursor to restore afterwards
 
     @staticmethod
     def _pen(color, width):
@@ -317,7 +332,31 @@ class MapView(QGraphicsView):
             return 0.0
         return math.atan2(y - py, x - px)
 
+    # ── Shift + left-drag rotates about the view centre ──
+
+    def _cursor_angle(self, event):
+        """Cursor angle (deg, clockwise on screen) about the view centre, None near it."""
+        centre = self.viewport().rect().center()
+        dx, dy = event.pos().x() - centre.x(), event.pos().y() - centre.y()
+        if math.hypot(dx, dy) < ROTATE_DEAD_ZONE:
+            return None
+        return math.degrees(math.atan2(dy, dx))
+
+    def _rotate_view(self, degrees):
+        anchor = self.transformationAnchor()
+        self.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
+        self.rotate(degrees)
+        self.setTransformationAnchor(anchor)
+
     def mousePressEvent(self, event):
+        if (event.button() == Qt.LeftButton and event.modifiers() & Qt.ShiftModifier
+                and self._goal_press is None):
+            self._rotating = True
+            self._rotate_from = self._cursor_angle(event)
+            self._rotate_cursor = self.viewport().cursor()
+            self.viewport().setCursor(Qt.SizeAllCursor)
+            event.accept()
+            return
         if self._goal_mode and event.button() == Qt.LeftButton:
             self._goal_press = self._map_point(event)
             self._goal_preview_item.setPos(_scene(*self._goal_press))
@@ -328,6 +367,14 @@ class MapView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._rotating:
+            angle = self._cursor_angle(event)
+            if angle is not None and self._rotate_from is not None:
+                self._rotate_view((angle - self._rotate_from + 180.0) % 360.0 - 180.0)
+            if angle is not None:
+                self._rotate_from = angle
+            event.accept()
+            return
         if self._goal_press is not None:
             yaw = self._goal_yaw(*self._map_point(event))
             self._goal_preview_item.setRotation(-math.degrees(yaw))
@@ -336,6 +383,11 @@ class MapView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._rotating and event.button() == Qt.LeftButton:
+            self._rotating = False
+            self.viewport().setCursor(self._rotate_cursor)
+            event.accept()
+            return
         if self._goal_press is not None and event.button() == Qt.LeftButton:
             x, y = self._goal_press
             yaw = self._goal_yaw(*self._map_point(event))
@@ -368,11 +420,54 @@ class MapView(QGraphicsView):
         self.scale(factor, factor)
 
     def fit(self):
-        rect = self._map_item.sceneBoundingRect()
-        if rect.isEmpty():
+        """Fit the mapped area to the view, keeping the rotation.
+
+        RTAB-Map's grid also spans sparse speckle (seen through windows and
+        doors), so the whole grid can be twice the size of what was mapped.
+        """
+        points = None if self._fit_grid is None else self._mapped_area(*self._fit_grid)
+        if points is None:
             rect = self._scene.itemsBoundingRect()
-        if not rect.isEmpty():
-            self.fitInView(rect, Qt.KeepAspectRatio)
+            if rect.isEmpty():
+                return
+            points = np.array([[rect.left(), rect.top()], [rect.right(), rect.bottom()],
+                               [rect.left(), rect.bottom()], [rect.right(), rect.top()]])
+        t = self.transform()
+        scale = math.hypot(t.m11(), t.m12())
+        if scale == 0.0:
+            return
+        c, s = t.m11() / scale, t.m12() / scale
+        # Extent in the view's orientation, so a rotated map is fitted tightly.
+        u = c * points[:, 0] - s * points[:, 1]
+        v = s * points[:, 0] + c * points[:, 1]
+        du, dv = u.max() - u.min(), v.max() - v.min()
+        viewport = self.viewport().rect()
+        width, height = viewport.width() - 2 * FIT_MARGIN, viewport.height() - 2 * FIT_MARGIN
+        if width <= 0 or height <= 0 or (du == 0.0 and dv == 0.0):
+            return
+        scale = min(width / du if du > 0.0 else math.inf, height / dv if dv > 0.0 else math.inf)
+        self.setTransform(QTransform(c * scale, s * scale, -s * scale, c * scale, 0.0, 0.0))
+        uc, vc = (u.max() + u.min()) / 2.0, (v.max() + v.min()) / 2.0
+        self.centerOn(c * uc + s * vc, -s * uc + c * vc)
+
+    @staticmethod
+    def _mapped_area(cells, res, ox, oy):
+        """Scene corners of the largest well-known area of the grid, or None if there is none."""
+        b = max(1, int(round(FIT_BLOCK / res)))
+        h, w = cells.shape[0] // b * b, cells.shape[1] // b * b
+        if h == 0 or w == 0:
+            return None
+        known = (cells[:h, :w] != 255).reshape(h // b, b, w // b, b).mean(axis=(1, 3))
+        labels, count = ndimage.label(known >= FIT_MIN_KNOWN, structure=np.ones((3, 3)))
+        if count == 0:
+            return None
+        largest = np.argmax(np.bincount(labels.ravel())[1:]) + 1
+        rows, cols = np.nonzero(labels == largest)
+        size = b * res
+        x0, y0 = ox + cols * size, oy + rows * size
+        xs = np.concatenate([x0, x0 + size, x0, x0 + size])
+        ys = np.concatenate([y0, y0, y0 + size, y0 + size])
+        return np.column_stack([xs, -ys])      # map frame -> scene (y down)
 
     # ── local costmap ──
 
@@ -442,6 +537,7 @@ class MapView(QGraphicsView):
         ox, oy = info.origin.position.x, info.origin.position.y
         self._map_item.setScale(res)
         self._map_item.setPos(ox, -(oy + h * res))
+        self._fit_grid = (cells, res, ox, oy)
         bounds = QRectF(ox, -(oy + h * res), w * res, h * res)
         self._scene.setSceneRect(bounds.adjusted(-SCENE_MARGIN, -SCENE_MARGIN, SCENE_MARGIN, SCENE_MARGIN))
         if not self._fitted:

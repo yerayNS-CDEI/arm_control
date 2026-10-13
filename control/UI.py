@@ -6613,7 +6613,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.map_goal_label = QLabel("")
         toolbar.addWidget(self.map_goal_label)
         toolbar.addSpacing(16)
-        toolbar.addWidget(QLabel("Mouse wheel to zoom, drag to pan"))
+        toolbar.addWidget(QLabel("Mouse wheel to zoom, drag to pan, Shift+drag to rotate"))
         toolbar.addStretch()
         self.map_summary_label = QLabel("—")
         self.map_summary_label.setStyleSheet("color: #8b949e;")
