@@ -69,6 +69,13 @@ class WallParallelController(Node):
         # have to guess flange/tool0/DH conventions.
         self.declare_parameter('tool0_frame', 'arm_tool0')
         self.declare_parameter('base_frame', 'arm_base')   # IK base frame (UR DH base)
+        # Roll of the plate about its own Z (the wall normal), rad, that the roll
+        # compensation holds. 0 keeps plate Y vertical (the default sweep); the
+        # FSM's cross-polarized GPR pass sets -pi/2, matching the
+        # 'unfolded_fsm_xpol' pose. It MUST match how the plate actually arrived:
+        # the roll compensation rebuilds the orientation from scratch, without
+        # max_step_deg, so a mismatch is a 90 deg wrist_3 snap in one goal.
+        self.declare_parameter('plate_roll', 0.0)
 
         self.control_rate = self.get_parameter('control_rate').value
         self.ideal_distance = self.get_parameter('ideal_distance').value
@@ -88,6 +95,7 @@ class WallParallelController(Node):
                 f"got '{self.output_mode}'")
         self.tool0_frame = self.get_parameter('tool0_frame').value
         self.base_frame = self.get_parameter('base_frame').value
+        self.plate_roll = float(self.get_parameter('plate_roll').value)
 
         # --- Sensor geometry (plate frame, metres) and noise model ----------
         # index -> (x, y) in plate frame. Layout matches both sim (sensor_plate.urdf.xacro
@@ -144,7 +152,8 @@ class WallParallelController(Node):
             f"WallParallelController up: mode={self.output_mode} "
             f"rate={self.control_rate}Hz kp={self.kp} ema={self.ema_alpha} "
             f"deadband={np.rad2deg(self.deadband):.2f}deg "
-            f"max_step={np.rad2deg(self.max_step):.2f}deg -> {out}")
+            f"max_step={np.rad2deg(self.max_step):.2f}deg "
+            f"plate_roll={np.rad2deg(self.plate_roll):.1f}deg -> {out}")
 
     # --- Callbacks ----------------------------------------------------------
     def distance_cb(self, msg):
@@ -316,7 +325,9 @@ class WallParallelController(Node):
             inc = R.from_euler('ZYX', [0.0, beta, gamma], degrees=False)
             goal_rot = curr_rot * inc
 
-            # Roll compensation: keep plate Y aligned with vertical (as in align node)
+            # Roll compensation: keep plate Y aligned with vertical (as in align node),
+            # then roll about the plate's own Z by plate_roll (0 unless the plate
+            # sweeps rotated, see the parameter).
             z_ee = goal_rot.apply([0, 0, 1])
             y_desired = np.array([0.0, 0.0, 1.0])
             y_proj = y_desired - np.dot(y_desired, z_ee) * z_ee
@@ -325,6 +336,8 @@ class WallParallelController(Node):
                 x_ee = np.cross(y_proj, z_ee); x_ee /= np.linalg.norm(x_ee)
                 y_ee = np.cross(z_ee, x_ee)
                 goal_rot = R.from_matrix(np.column_stack((x_ee, y_ee, z_ee)))
+                if self.plate_roll:
+                    goal_rot = goal_rot * R.from_euler('z', self.plate_roll)
 
         q = goal_rot.as_quat()
 
