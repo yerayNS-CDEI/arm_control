@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 2D map view for the control UI: RTAB-Map's occupancy grid with the robot,
-Nav2's path/goal and the detected walls drawn on top (an RViz stand-in that
-costs a QGraphicsScene instead of an OpenGL point-cloud renderer).
+Nav2's path/goal, its local costmap and the detected walls drawn on top (an
+RViz stand-in that costs a QGraphicsScene instead of an OpenGL point-cloud
+renderer).
 
 The robot pose and localization state come from LocalizationMonitor. The
 other topics are subscribed only while the view is visible: rtabmap only
@@ -13,6 +14,9 @@ executor thread (through a guard condition) so they never race its spin.
 In goal mode a press-drag-release on the map picks a pose like RViz's
 "2D Goal Pose" tool (press = position, drag = heading) and emits
 goal_selected; the owner publishes it.
+
+The local costmap is a small rolling window (~120x120 cells at 2 Hz) in the
+odom frame; it is placed with LocalizationMonitor's map->odom, like the robot.
 """
 
 import math
@@ -23,6 +27,7 @@ import numpy as np
 from PyQt5.QtCore import Qt, QPointF, QRectF, pyqtSignal
 from PyQt5.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
+    QTransform,
 )
 from PyQt5.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsView
 from rclpy.exceptions import InvalidHandle
@@ -41,6 +46,7 @@ MAP_TOPIC = '/map'
 PLAN_TOPIC = '/plan'
 NAV_STATUS_TOPIC = '/navigate_to_pose/_action/status'
 WALLS_TOPIC = '/wall_detection_node/walls'
+LOCAL_COSTMAP_TOPIC = '/local_costmap/costmap'
 
 MAP_REDRAW_PERIOD = 2.0     # (s) at most one grid -> image conversion per period
 ROBOT_LENGTH = 0.7          # (m) drawn robot arrow
@@ -68,7 +74,23 @@ def _grid_lut():
     return lut
 
 
+def _costmap_lut():
+    """ARGB per costmap value as Nav2 publishes it (0 free, 1-98 cost, 99 inscribed,
+    100 lethal, -1 unknown); free and unknown are transparent."""
+    lut = np.zeros(256, dtype=np.uint32)
+    t = (np.arange(1, 99) - 1) / 97.0                       # low cost blue -> high cost red
+    r = (255 * t).astype(np.uint32)
+    g = (200 * (1.0 - np.abs(2.0 * t - 1.0))).astype(np.uint32)
+    b = (255 * (1.0 - t)).astype(np.uint32)
+    a = (60 + 120 * t).astype(np.uint32)
+    lut[1:99] = (a << 24) | (r << 16) | (g << 8) | b
+    lut[99] = 0xC000BCD4                                    # inscribed: cyan
+    lut[100] = 0xE06F42C1                                   # lethal: purple
+    return lut
+
+
 _LUT = _grid_lut()
+_COSTMAP_LUT = _costmap_lut()
 UNKNOWN_COLOR = QColor('#8a9099')
 
 
@@ -87,11 +109,27 @@ class MapOverlays:
         self.nav_active = False
         self.walls = []             # [(sx, sy, ex, ey, refined, two_sided)]
         self.walls_version = 0
+        self.costmap = None         # latest local costmap OccupancyGrid
+        self.costmap_version = 0
+        self._costmap_enabled = True
+        self._costmap_subscription = None
         self._guard = node.create_guard_condition(self._sync_subscriptions)
 
     def set_active(self, active):
         """Subscribe (True) or unsubscribe (False); safe from the UI thread."""
         self._active = active
+        self._trigger_sync()
+
+    def set_costmap_enabled(self, enabled):
+        """Subscribe to the local costmap only while it is shown; safe from the UI thread."""
+        self._costmap_enabled = enabled
+        if enabled:
+            with self._lock:    # never draw a costmap left over from before
+                self.costmap = None
+                self.costmap_version += 1
+        self._trigger_sync()
+
+    def _trigger_sync(self):
         try:
             self._guard.trigger()
         except InvalidHandle:
@@ -112,11 +150,23 @@ class MapOverlays:
             for subscription in self._subscriptions:
                 self._node.destroy_subscription(subscription)
             self._subscriptions = []
+        want_costmap = self._active and self._costmap_enabled
+        if want_costmap and self._costmap_subscription is None:
+            self._costmap_subscription = self._node.create_subscription(
+                OccupancyGrid, LOCAL_COSTMAP_TOPIC, self._on_costmap, _LATCHED)
+        elif not want_costmap and self._costmap_subscription is not None:
+            self._node.destroy_subscription(self._costmap_subscription)
+            self._costmap_subscription = None
 
     def _on_map(self, msg):
         with self._lock:
             self.grid = msg
             self.grid_version += 1
+
+    def _on_costmap(self, msg):
+        with self._lock:
+            self.costmap = msg
+            self.costmap_version += 1
 
     def _on_plan(self, msg):
         path = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
@@ -148,6 +198,7 @@ class MapOverlays:
                 'path': self.path if self.nav_active else [],
                 'goal': self.goal if self.nav_active else None,
                 'walls': self.walls, 'walls_version': self.walls_version,
+                'costmap': self.costmap, 'costmap_version': self.costmap_version,
             }
 
 
@@ -178,6 +229,14 @@ class MapView(QGraphicsView):
         self._map_item.setTransformationMode(Qt.FastTransformation)  # crisp cells
         self._map_item.setZValue(0)
         self._wall_items = []
+
+        self.show_costmap = True
+        self._costmap_version = 0
+        self._costmap_geometry = None   # (frame_id, resolution, origin x, top y) of the drawn costmap
+        self._costmap_item = self._scene.addPixmap(QPixmap())
+        self._costmap_item.setTransformationMode(Qt.FastTransformation)
+        self._costmap_item.setZValue(0.5)
+        self._costmap_item.hide()
 
         self._path_item = self._scene.addPath(self._polyline([]), self._pen('#1f6feb', 2))
         self._path_item.setZValue(2)
@@ -315,6 +374,14 @@ class MapView(QGraphicsView):
         if not rect.isEmpty():
             self.fitInView(rect, Qt.KeepAspectRatio)
 
+    # ── local costmap ──
+
+    def set_costmap_visible(self, visible):
+        self.show_costmap = visible
+        self.overlays.set_costmap_enabled(visible)
+        if not visible:
+            self._costmap_item.hide()
+
     # ── drawing ──
 
     def refresh(self, state):
@@ -322,6 +389,7 @@ class MapView(QGraphicsView):
         data = self.overlays.snapshot()
         self._update_grid(data['grid'], data['grid_version'])
         self._update_walls(data['walls'], data['walls_version'])
+        self._update_costmap(data['costmap'], data['costmap_version'])
         self._path_item.setPath(self._polyline(data['path']))
         if data['goal'] is not None:
             gx, gy, gyaw = data['goal']
@@ -340,6 +408,14 @@ class MapView(QGraphicsView):
             info = grid.info
             parts.append(f'map {info.width * info.resolution:.0f}×'
                          f'{info.height * info.resolution:.0f} m @ {info.resolution:.2f} m')
+        costmap = data['costmap']
+        if self.show_costmap:
+            if costmap is None:
+                parts.append(f'waiting for {LOCAL_COSTMAP_TOPIC}')
+            else:
+                info = costmap.info
+                parts.append(f'costmap {info.width * info.resolution:.0f}×'
+                             f'{info.height * info.resolution:.0f} m')
         if WallArray is None:
             parts.append('walls: navi_wall not built')
         else:
@@ -371,6 +447,36 @@ class MapView(QGraphicsView):
         if not self._fitted:
             self._fitted = True
             self.fit()
+
+    def _update_costmap(self, costmap, version):
+        if not self.show_costmap or costmap is None:
+            self._costmap_item.hide()
+            return
+        if version != self._costmap_version:
+            self._costmap_version = version
+            info = costmap.info
+            w, h, res = info.width, info.height, info.resolution
+            if w == 0 or h == 0:
+                self._costmap_geometry = None
+            else:
+                cells = np.asarray(costmap.data, dtype=np.int8)[:w * h].view(np.uint8).reshape(h, w)
+                argb = np.ascontiguousarray(_COSTMAP_LUT[cells][::-1])   # row 0 = top = max y
+                image = QImage(argb.data, w, h, 4 * w, QImage.Format_ARGB32).copy()
+                self._costmap_item.setPixmap(QPixmap.fromImage(image))
+                self._costmap_geometry = (costmap.header.frame_id.lstrip('/'), res,
+                                          info.origin.position.x, info.origin.position.y + h * res)
+        if self._costmap_geometry is None:
+            self._costmap_item.hide()
+            return
+        # Re-placed every refresh: map->odom moves with each localization match.
+        frame, res, ox, top = self._costmap_geometry
+        tx, ty, th = (0.0, 0.0, 0.0) if frame == 'map' else self._monitor.map_to_odom()
+        c, s = math.cos(th), math.sin(th)
+        # Image pixel (u, v) -> frame (ox + u res, top - v res) -> map -> scene (y down).
+        self._costmap_item.setTransform(QTransform(
+            c * res, -s * res, s * res, c * res,
+            tx + c * ox - s * top, -(ty + s * ox + c * top)))
+        self._costmap_item.show()
 
     def _update_walls(self, walls, version):
         if version == self._walls_version:

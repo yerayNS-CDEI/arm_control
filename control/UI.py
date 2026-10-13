@@ -6597,6 +6597,12 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.map_follow_check = QCheckBox("Follow robot")
         self.map_follow_check.setChecked(True)
         toolbar.addWidget(self.map_follow_check)
+        self.map_costmap_check = QCheckBox("Local costmap")
+        self.map_costmap_check.setChecked(True)
+        self.map_costmap_check.setToolTip(
+            "Nav2's /local_costmap/costmap (rolling window around the robot, ~2 Hz).\n"
+            "Subscribed only while shown and the Map tab is visible.")
+        toolbar.addWidget(self.map_costmap_check)
         toolbar.addSpacing(16)
         self.map_goal_button = QPushButton("2D Goal Pose")
         self.map_goal_button.setCheckable(True)
@@ -6619,6 +6625,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.map_view.setMinimumSize(400, 300)
         self.map_follow_check.toggled.connect(
             lambda checked: setattr(self.map_view, 'follow_robot', checked))
+        self.map_costmap_check.toggled.connect(self.map_view.set_costmap_visible)
         self.map_goal_button.toggled.connect(self.map_view.set_goal_mode)
         self.map_view.goal_selected.connect(self._publish_map_goal)
         for text, action in (
@@ -6637,7 +6644,10 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             "<span style='color:#1f6feb;'>━ Nav2 path, ▷ goal</span> · walls: "
             "<span style='color:#2ea043;'>━ refined</span> "
             "<span style='color:#d29922;'>━ unrefined</span> "
-            "<span style='color:#d63ad6;'>━ two-sided</span>")
+            "<span style='color:#d63ad6;'>━ two-sided</span> · costmap: "
+            "<span style='color:#1f78ff;'>■</span>→<span style='color:#ff3300;'>■</span> cost "
+            "<span style='color:#00bcd4;'>■ inscribed</span> "
+            "<span style='color:#6f42c1;'>■ lethal</span>")
         legend.setTextFormat(Qt.RichText)
         layout.addWidget(legend)
         self._build_localization_indicator(layout)
