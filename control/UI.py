@@ -6612,13 +6612,20 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         toolbar.addWidget(self.map_goal_button)
         self.map_goal_label = QLabel("")
         toolbar.addWidget(self.map_goal_label)
-        toolbar.addSpacing(16)
-        toolbar.addWidget(QLabel("Mouse wheel to zoom, drag to pan, Shift+drag to rotate"))
         toolbar.addStretch()
+
+        # Hint and summary in their own row, shrinkable: as minimum widths they
+        # widened the whole window when the tab was shown (and the summary
+        # changes on every refresh).
+        info_row = QHBoxLayout()
+        hint = QLabel("Mouse wheel to zoom, drag to pan, Shift+drag to rotate")
+        hint.setMinimumWidth(1)
+        info_row.addWidget(hint)
+        info_row.addStretch()
         self.map_summary_label = QLabel("—")
         self.map_summary_label.setStyleSheet("color: #8b949e;")
-        toolbar.addWidget(self.map_summary_label)
-        toolbar.addSpacing(16)
+        self.map_summary_label.setMinimumWidth(1)
+        info_row.addWidget(self.map_summary_label)
 
         state_colors = {state: color for state, (_, color, _) in self._LOCALIZATION_STYLES.items()}
         self.map_view = MapView(self.localization_monitor, state_colors)
@@ -6638,6 +6645,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             button.clicked.connect(action)
             toolbar.addWidget(button)
         layout.addLayout(toolbar)
+        layout.addLayout(info_row)
 
         legend = QLabel(
             "Robot arrow + σ circle in the Localization colour · "
@@ -6649,6 +6657,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             "<span style='color:#00bcd4;'>■ inscribed</span> "
             "<span style='color:#6f42c1;'>■ lethal</span>")
         legend.setTextFormat(Qt.RichText)
+        legend.setWordWrap(True)
         layout.addWidget(legend)
         self._build_localization_indicator(layout)
         layout.addWidget(self.map_view, 1)
