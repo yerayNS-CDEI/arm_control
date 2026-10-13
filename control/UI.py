@@ -24,7 +24,7 @@ from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
 from UI_utils import localization_monitor
 from UI_utils.map_view import MapView
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, PoseStamped
 from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray, String
 from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
@@ -368,6 +368,8 @@ class RobotControlUI(QMainWindow):
         self.fsm_current_state_subscriber = self.node.create_subscription(
             String, '/fsm/current_state', self._on_fsm_current_state, fsm_state_qos)
         self.fsm_restart_publisher = self.node.create_publisher(String, '/fsm/restart', 10)
+        # Map tab goals, same topic as RViz's "2D Goal Pose" (bt_navigator follows it).
+        self.nav_goal_publisher = self.node.create_publisher(PoseStamped, '/goal_pose', 10)
 
         # FSM telemetry (same /fsm/* JSON topics as the RViz FsmPanel). Status
         # and graph are latched like the current state; transitions are not.
@@ -6596,6 +6598,15 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.map_follow_check.setChecked(True)
         toolbar.addWidget(self.map_follow_check)
         toolbar.addSpacing(16)
+        self.map_goal_button = QPushButton("2D Goal Pose")
+        self.map_goal_button.setCheckable(True)
+        self.map_goal_button.setToolTip(
+            "Click on the map for the goal position, drag for its heading (Esc to abort).\n"
+            "Publishes /goal_pose like RViz; it preempts any Nav2 goal in progress.")
+        toolbar.addWidget(self.map_goal_button)
+        self.map_goal_label = QLabel("")
+        toolbar.addWidget(self.map_goal_label)
+        toolbar.addSpacing(16)
         toolbar.addWidget(QLabel("Mouse wheel to zoom, drag to pan"))
         toolbar.addStretch()
         self.map_summary_label = QLabel("—")
@@ -6608,6 +6619,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.map_view.setMinimumSize(400, 300)
         self.map_follow_check.toggled.connect(
             lambda checked: setattr(self.map_view, 'follow_robot', checked))
+        self.map_goal_button.toggled.connect(self.map_view.set_goal_mode)
+        self.map_view.goal_selected.connect(self._publish_map_goal)
         for text, action in (
             ("-", lambda: self.map_view.zoom(1.0 / 1.15)),
             ("Fit map", self._fit_map_view),
@@ -6635,6 +6648,19 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         # Fitting shows the whole map, so stop re-centring on the robot.
         self.map_follow_check.setChecked(False)
         self.map_view.fit()
+
+    def _publish_map_goal(self, x, y, yaw):
+        msg = PoseStamped()
+        msg.header.frame_id = 'map'
+        msg.header.stamp = self.node.get_clock().now().to_msg()
+        msg.pose.position.x = x
+        msg.pose.position.y = y
+        msg.pose.orientation.z = math.sin(yaw / 2.0)
+        msg.pose.orientation.w = math.cos(yaw / 2.0)
+        self.nav_goal_publisher.publish(msg)
+        self.map_goal_button.setChecked(False)  # one goal per click, as in RViz
+        self.map_goal_label.setText(
+            f"sent ({x:.2f}, {y:.2f}) m, {math.degrees(yaw):.0f}°")
 
     def _refresh_map_tab(self):
         if not self.map_view.isVisible():

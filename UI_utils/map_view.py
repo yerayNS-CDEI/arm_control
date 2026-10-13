@@ -9,6 +9,10 @@ other topics are subscribed only while the view is visible: rtabmap only
 assembles /map while it has a subscriber, and in mapping mode it republishes
 it on every update. Subscriptions are created and destroyed on the monitor's
 executor thread (through a guard condition) so they never race its spin.
+
+In goal mode a press-drag-release on the map picks a pose like RViz's
+"2D Goal Pose" tool (press = position, drag = heading) and emits
+goal_selected; the owner publishes it.
 """
 
 import math
@@ -16,7 +20,7 @@ import threading
 import time
 
 import numpy as np
-from PyQt5.QtCore import Qt, QPointF, QRectF
+from PyQt5.QtCore import Qt, QPointF, QRectF, pyqtSignal
 from PyQt5.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
 )
@@ -41,6 +45,7 @@ WALLS_TOPIC = '/wall_detection_node/walls'
 MAP_REDRAW_PERIOD = 2.0     # (s) at most one grid -> image conversion per period
 ROBOT_LENGTH = 0.7          # (m) drawn robot arrow
 SCENE_MARGIN = 20.0         # (m) pannable space around the map
+GOAL_MIN_DRAG = 0.05        # (m) shorter drags keep the heading at 0 (+x), as in RViz
 
 _LATCHED = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                       durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -149,6 +154,8 @@ class MapOverlays:
 class MapView(QGraphicsView):
     """Zoomable map; refresh() is driven by the owner's timer while visible."""
 
+    goal_selected = pyqtSignal(float, float, float)     # x, y, yaw in the map frame
+
     def __init__(self, monitor, state_colors, parent=None):
         self._scene = QGraphicsScene()
         super().__init__(self._scene, parent)
@@ -187,6 +194,15 @@ class MapView(QGraphicsView):
         self._robot_item.hide()
         self._sigma_item.hide()
 
+        self._goal_mode = False
+        self._goal_press = None     # (x, y) in the map frame while placing a goal
+        goal_pen = self._pen('#e8590c', 2)
+        goal_pen.setStyle(Qt.DashLine)
+        self._goal_preview_item = self._scene.addPolygon(
+            self._arrow(), goal_pen, QBrush(QColor(232, 89, 12, 60)))
+        self._goal_preview_item.setZValue(5)
+        self._goal_preview_item.hide()
+
     @staticmethod
     def _pen(color, width):
         pen = QPen(QColor(color), width)
@@ -219,6 +235,65 @@ class MapView(QGraphicsView):
     def hideEvent(self, event):
         self.overlays.set_active(False)
         super().hideEvent(event)
+
+    # ── 2D goal pose (RViz-style press, drag for heading, release) ──
+
+    def set_goal_mode(self, enabled):
+        self._goal_mode = enabled
+        self._goal_press = None
+        self._goal_preview_item.hide()
+        self.setDragMode(QGraphicsView.NoDrag if enabled else QGraphicsView.ScrollHandDrag)
+        if enabled:
+            self.viewport().setCursor(Qt.CrossCursor)
+        else:
+            self.viewport().unsetCursor()
+
+    def _map_point(self, event):
+        p = self.mapToScene(event.pos())
+        return p.x(), -p.y()
+
+    def _goal_yaw(self, x, y):
+        px, py = self._goal_press
+        if math.hypot(x - px, y - py) < GOAL_MIN_DRAG:
+            return 0.0
+        return math.atan2(y - py, x - px)
+
+    def mousePressEvent(self, event):
+        if self._goal_mode and event.button() == Qt.LeftButton:
+            self._goal_press = self._map_point(event)
+            self._goal_preview_item.setPos(_scene(*self._goal_press))
+            self._goal_preview_item.setRotation(0.0)
+            self._goal_preview_item.show()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._goal_press is not None:
+            yaw = self._goal_yaw(*self._map_point(event))
+            self._goal_preview_item.setRotation(-math.degrees(yaw))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._goal_press is not None and event.button() == Qt.LeftButton:
+            x, y = self._goal_press
+            yaw = self._goal_yaw(*self._map_point(event))
+            self._goal_press = None
+            self._goal_preview_item.hide()
+            event.accept()
+            self.goal_selected.emit(x, y, yaw)
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if self._goal_mode and event.key() == Qt.Key_Escape:
+            self._goal_press = None
+            self._goal_preview_item.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     # ── zoom (same feel as the FSM graph) ──
 
@@ -339,5 +414,5 @@ class MapView(QGraphicsView):
             self._sigma_item.show()
         else:
             self._sigma_item.hide()
-        if self.follow_robot:
+        if self.follow_robot and self._goal_press is None:   # keep the map still while aiming
             self.centerOn(_scene(x, y))
