@@ -562,7 +562,7 @@ class RobotControlUI(QMainWindow):
         # Full Robot tab additionally exposes the FSM named poses so they can be
         # commanded manually without running the FSM.
         self.full_control_position_names = self.position_names + [
-            'unfolded_fsm', 'folded_fsm'
+            'unfolded_fsm', 'unfolded_fsm_xpol', 'folded_fsm'
         ]
         self.position_dropdown = QComboBox()
         self.position_dropdown.addItems(self.position_names)
