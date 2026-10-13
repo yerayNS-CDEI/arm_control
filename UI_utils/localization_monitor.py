@@ -225,6 +225,11 @@ class LocalizationMonitor:
                 return None
             return _compose(self._map_to_odom, self._odom_pose), self._sigma
 
+    def map_to_odom(self):
+        """Return map->odom as (x, y, yaw); identity until the first localization_pose."""
+        with self._lock:
+            return self._map_to_odom
+
     def snapshot(self):
         """Return (state, detail) where state is one of the module constants."""
         now = time.monotonic()

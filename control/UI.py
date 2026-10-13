@@ -6597,6 +6597,12 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.map_follow_check = QCheckBox("Follow robot")
         self.map_follow_check.setChecked(True)
         toolbar.addWidget(self.map_follow_check)
+        self.map_costmap_check = QCheckBox("Local costmap")
+        self.map_costmap_check.setChecked(True)
+        self.map_costmap_check.setToolTip(
+            "Nav2's /local_costmap/costmap (rolling window around the robot, ~2 Hz).\n"
+            "Subscribed only while shown and the Map tab is visible.")
+        toolbar.addWidget(self.map_costmap_check)
         toolbar.addSpacing(16)
         self.map_goal_button = QPushButton("2D Goal Pose")
         self.map_goal_button.setCheckable(True)
@@ -6606,19 +6612,27 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         toolbar.addWidget(self.map_goal_button)
         self.map_goal_label = QLabel("")
         toolbar.addWidget(self.map_goal_label)
-        toolbar.addSpacing(16)
-        toolbar.addWidget(QLabel("Mouse wheel to zoom, drag to pan"))
         toolbar.addStretch()
+
+        # Hint and summary in their own row, shrinkable: as minimum widths they
+        # widened the whole window when the tab was shown (and the summary
+        # changes on every refresh).
+        info_row = QHBoxLayout()
+        hint = QLabel("Mouse wheel to zoom, drag to pan, Shift+drag to rotate")
+        hint.setMinimumWidth(1)
+        info_row.addWidget(hint)
+        info_row.addStretch()
         self.map_summary_label = QLabel("—")
         self.map_summary_label.setStyleSheet("color: #8b949e;")
-        toolbar.addWidget(self.map_summary_label)
-        toolbar.addSpacing(16)
+        self.map_summary_label.setMinimumWidth(1)
+        info_row.addWidget(self.map_summary_label)
 
         state_colors = {state: color for state, (_, color, _) in self._LOCALIZATION_STYLES.items()}
         self.map_view = MapView(self.localization_monitor, state_colors)
         self.map_view.setMinimumSize(400, 300)
         self.map_follow_check.toggled.connect(
             lambda checked: setattr(self.map_view, 'follow_robot', checked))
+        self.map_costmap_check.toggled.connect(self.map_view.set_costmap_visible)
         self.map_goal_button.toggled.connect(self.map_view.set_goal_mode)
         self.map_view.goal_selected.connect(self._publish_map_goal)
         for text, action in (
@@ -6631,14 +6645,19 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             button.clicked.connect(action)
             toolbar.addWidget(button)
         layout.addLayout(toolbar)
+        layout.addLayout(info_row)
 
         legend = QLabel(
             "Robot arrow + σ circle in the Localization colour · "
             "<span style='color:#1f6feb;'>━ Nav2 path, ▷ goal</span> · walls: "
             "<span style='color:#2ea043;'>━ refined</span> "
             "<span style='color:#d29922;'>━ unrefined</span> "
-            "<span style='color:#d63ad6;'>━ two-sided</span>")
+            "<span style='color:#d63ad6;'>━ two-sided</span> · costmap: "
+            "<span style='color:#1f78ff;'>■</span>→<span style='color:#ff3300;'>■</span> cost "
+            "<span style='color:#00bcd4;'>■ inscribed</span> "
+            "<span style='color:#6f42c1;'>■ lethal</span>")
         legend.setTextFormat(Qt.RichText)
+        legend.setWordWrap(True)
         layout.addWidget(legend)
         self._build_localization_indicator(layout)
         layout.addWidget(self.map_view, 1)
