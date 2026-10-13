@@ -22,7 +22,9 @@ from PyQt5.QtGui import (
 from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
-from geometry_msgs.msg import Pose
+from UI_utils import localization_monitor
+from UI_utils.map_view import MapView
+from geometry_msgs.msg import Pose, PoseStamped
 from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray, String
 from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
@@ -366,6 +368,8 @@ class RobotControlUI(QMainWindow):
         self.fsm_current_state_subscriber = self.node.create_subscription(
             String, '/fsm/current_state', self._on_fsm_current_state, fsm_state_qos)
         self.fsm_restart_publisher = self.node.create_publisher(String, '/fsm/restart', 10)
+        # Map tab goals, same topic as RViz's "2D Goal Pose" (bt_navigator follows it).
+        self.nav_goal_publisher = self.node.create_publisher(PoseStamped, '/goal_pose', 10)
 
         # FSM telemetry (same /fsm/* JSON topics as the RViz FsmPanel). Status
         # and graph are latched like the current state; transitions are not.
@@ -378,6 +382,11 @@ class RobotControlUI(QMainWindow):
         self.fsm_transition_subscriber = self.node.create_subscription(
             String, '/fsm/transition', self._on_fsm_transition,
             QoSProfile(depth=20, reliability=ReliabilityPolicy.RELIABLE))
+
+        # RTAB-Map localization health (replaces watching RViz). Runs on its
+        # own executor thread; the indicators are repainted by a 2 Hz timer.
+        self.localization_monitor = localization_monitor.LocalizationMonitor()
+        self.localization_indicators = []
 
         # FSM log buffer (html, plain_text, add_newline) for filter rebuilds
         self.fsm_log_entries = []
@@ -789,6 +798,8 @@ class RobotControlUI(QMainWindow):
         self.btn_view_map.clicked.connect(self.toggle_view_map)
         self.btn_view_map.setToolTip("rtabmap-databaseViewer rtabmap.db")
         mapping_loc_layout.addWidget(self.btn_view_map)
+
+        self._build_localization_indicator(mapping_loc_layout)
  
         mapping_loc_layout.addStretch()
         base_boxes_layout.addWidget(mapping_loc_box)
@@ -1197,6 +1208,8 @@ class RobotControlUI(QMainWindow):
         self.btn_full_control_exploration.setToolTip("ros2 run navi_wall explore --ros-args --params-file config/explore_params.yaml")
         full_control_mapping_layout.addWidget(self.btn_full_control_exploration)
 
+        self._build_localization_indicator(full_control_mapping_layout)
+
         full_control_position_separator = QFrame()
         full_control_position_separator.setFrameShape(QFrame.HLine)
         full_control_position_separator.setFrameShadow(QFrame.Sunken)
@@ -1458,6 +1471,7 @@ class RobotControlUI(QMainWindow):
         tabs.addTab(full_control_tab, "Full Control")
         tabs.addTab(self._create_gpr_api_test_tab(), "Sensors")
         tabs.addTab(self._create_fsm_tab(), "FSM")
+        tabs.addTab(self._create_map_tab(), "Map")
 
         # Connect tab change signal to check joint states when Joint Control tab is activated
         tabs.currentChanged.connect(lambda index: self._on_tab_changed(index, tabs))
@@ -1466,6 +1480,14 @@ class RobotControlUI(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self._spin_ros)
         self.timer.start(100)  # 10 Hz
+
+        self.localization_timer = QTimer()
+        self.localization_timer.timeout.connect(self._refresh_localization_indicators)
+        self.localization_timer.start(500)  # 2 Hz
+
+        self.map_timer = QTimer()
+        self.map_timer.timeout.connect(self._refresh_map_tab)
+        self.map_timer.start(200)  # 5 Hz, no-op while the Map tab is hidden
         
         # Initial UI update for consistent visuals
         self._update_emergency_stop_button_ui()
@@ -4934,6 +4956,64 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             indicators[key] = (icon, value)
         return indicators
 
+    # icon, colour, label per localization_monitor state
+    _LOCALIZATION_STYLES = {
+        localization_monitor.OFFLINE:       ("○", "#8b949e", "OFFLINE"),
+        localization_monitor.MAPPING:       ("●", "#539bf5", "MAPPING"),
+        localization_monitor.NO_ODOM:       ("●", "#f47067", "NO ODOMETRY"),
+        localization_monitor.ODOM_LOST:     ("⛔", "#f47067", "ODOMETRY LOST"),
+        localization_monitor.NOT_LOCALIZED: ("●", "#f47067", "NOT LOCALIZED"),
+        localization_monitor.UNCERTAIN:     ("●", "#d29922", "UNCERTAIN"),
+        localization_monitor.LOCALIZED:     ("●", "#2ea043", "LOCALIZED"),
+    }
+
+    def _build_localization_indicator(self, parent_layout):
+        """Add a Localization indicator row (same look as the status indicators).
+
+        In a QFormLayout the name goes in the form's label column, unstyled
+        like the other rows there.
+        """
+        in_form = isinstance(parent_layout, QFormLayout)
+        row = QHBoxLayout()
+        icon = QLabel("○")
+        icon.setStyleSheet("color: #8b949e; font-size: 16pt; font-weight: bold;")
+        icon.setFixedWidth(24)
+        icon.setAlignment(Qt.AlignCenter)
+        name = QLabel("Localization:")
+        if not in_form:
+            name.setStyleSheet("font-weight: bold;")
+        value = QLabel("—")
+        value.setStyleSheet("color: #8b949e;")
+        value.setWordWrap(True)
+        tooltip = (
+            "RTAB-Map localization health, from /rtabmap/localization_pose and /rtabmap/odom.\n"
+            f"Green: σ ≤ {localization_monitor.SIGMA_OK} m and a map correction within "
+            f"the last {localization_monitor.DRIFT_DISTANCE} m driven.\n"
+            "Amber: dead-reckoning on odometry for too long, or σ too large.\n"
+            "Red: never matched the map yet, or odometry lost/missing.\n"
+            "Blue: RTAB-Map is mapping, not localizing."
+        )
+        for widget in (icon, name, value):
+            widget.setToolTip(tooltip)
+        row.addWidget(icon)
+        if in_form:
+            row.addWidget(value, 1)
+            parent_layout.addRow(name, row)
+        else:
+            row.addWidget(name)
+            row.addWidget(value, 1)
+            parent_layout.addLayout(row)
+        self.localization_indicators.append((icon, value))
+
+    def _refresh_localization_indicators(self):
+        state, detail = self.localization_monitor.snapshot()
+        symbol, color, label = self._LOCALIZATION_STYLES[state]
+        for icon, value in self.localization_indicators:
+            icon.setText(symbol)
+            icon.setStyleSheet(f"color: {color}; font-size: 16pt; font-weight: bold;")
+            value.setText(f"{label} — {detail}")
+            value.setStyleSheet(f"color: {color};")
+
     def _update_status_indicator(self, command, response, status_text):
         """Update icon/value labels based on the dashboard response."""
         if command not in ('robotmode', 'safetystatus', 'programState'):
@@ -5951,6 +6031,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
     def closeEvent(self, event):
         self.timer.stop()
+        self.localization_timer.stop()
+        self.map_timer.stop()
+        self.localization_monitor.stop()
 
         # Detach every QProcess from this window so Qt does NOT send SIGTERM
         # to the underlying OS processes when the window is destroyed.
@@ -6481,6 +6564,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         form.addRow("Summary:", self.fsm_summary_label)
         form.addRow("Elapsed:", self.fsm_elapsed_label)
         form.addRow("Progress:", self.fsm_progress_label)
+        self._build_localization_indicator(form)
         layout.addWidget(status_group)
 
         graph_group = QGroupBox("FSM Graph")
@@ -6503,6 +6587,86 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         graph_layout.addWidget(self.fsm_graph_view, 1)
         layout.addWidget(graph_group, 1)
         return pane
+
+    def _create_map_tab(self):
+        """2D map with the robot, Nav2 path/goal and detected walls (RViz stand-in)."""
+        map_tab = QWidget()
+        layout = QVBoxLayout(map_tab)
+
+        toolbar = QHBoxLayout()
+        self.map_follow_check = QCheckBox("Follow robot")
+        self.map_follow_check.setChecked(True)
+        toolbar.addWidget(self.map_follow_check)
+        toolbar.addSpacing(16)
+        self.map_goal_button = QPushButton("2D Goal Pose")
+        self.map_goal_button.setCheckable(True)
+        self.map_goal_button.setToolTip(
+            "Click on the map for the goal position, drag for its heading (Esc to abort).\n"
+            "Publishes /goal_pose like RViz; it preempts any Nav2 goal in progress.")
+        toolbar.addWidget(self.map_goal_button)
+        self.map_goal_label = QLabel("")
+        toolbar.addWidget(self.map_goal_label)
+        toolbar.addSpacing(16)
+        toolbar.addWidget(QLabel("Mouse wheel to zoom, drag to pan"))
+        toolbar.addStretch()
+        self.map_summary_label = QLabel("—")
+        self.map_summary_label.setStyleSheet("color: #8b949e;")
+        toolbar.addWidget(self.map_summary_label)
+        toolbar.addSpacing(16)
+
+        state_colors = {state: color for state, (_, color, _) in self._LOCALIZATION_STYLES.items()}
+        self.map_view = MapView(self.localization_monitor, state_colors)
+        self.map_view.setMinimumSize(400, 300)
+        self.map_follow_check.toggled.connect(
+            lambda checked: setattr(self.map_view, 'follow_robot', checked))
+        self.map_goal_button.toggled.connect(self.map_view.set_goal_mode)
+        self.map_view.goal_selected.connect(self._publish_map_goal)
+        for text, action in (
+            ("-", lambda: self.map_view.zoom(1.0 / 1.15)),
+            ("Fit map", self._fit_map_view),
+            ("+", lambda: self.map_view.zoom(1.15)),
+        ):
+            button = QPushButton(text)
+            button.setMaximumWidth(80)
+            button.clicked.connect(action)
+            toolbar.addWidget(button)
+        layout.addLayout(toolbar)
+
+        legend = QLabel(
+            "Robot arrow + σ circle in the Localization colour · "
+            "<span style='color:#1f6feb;'>━ Nav2 path, ▷ goal</span> · walls: "
+            "<span style='color:#2ea043;'>━ refined</span> "
+            "<span style='color:#d29922;'>━ unrefined</span> "
+            "<span style='color:#d63ad6;'>━ two-sided</span>")
+        legend.setTextFormat(Qt.RichText)
+        layout.addWidget(legend)
+        self._build_localization_indicator(layout)
+        layout.addWidget(self.map_view, 1)
+        return map_tab
+
+    def _fit_map_view(self):
+        # Fitting shows the whole map, so stop re-centring on the robot.
+        self.map_follow_check.setChecked(False)
+        self.map_view.fit()
+
+    def _publish_map_goal(self, x, y, yaw):
+        msg = PoseStamped()
+        msg.header.frame_id = 'map'
+        msg.header.stamp = self.node.get_clock().now().to_msg()
+        msg.pose.position.x = x
+        msg.pose.position.y = y
+        msg.pose.orientation.z = math.sin(yaw / 2.0)
+        msg.pose.orientation.w = math.cos(yaw / 2.0)
+        self.nav_goal_publisher.publish(msg)
+        self.map_goal_button.setChecked(False)  # one goal per click, as in RViz
+        self.map_goal_label.setText(
+            f"sent ({x:.2f}, {y:.2f}) m, {math.degrees(yaw):.0f}°")
+
+    def _refresh_map_tab(self):
+        if not self.map_view.isVisible():
+            return
+        state, _ = self.localization_monitor.snapshot()
+        self.map_summary_label.setText(self.map_view.refresh(state))
 
     # States fsm_node accepts on /fsm/restart (its RESTART_TARGET_STATES).
     FSM_RESTART_TARGETS = [
