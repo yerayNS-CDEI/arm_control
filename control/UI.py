@@ -68,6 +68,12 @@ def _make_dark_palette():
     return p
 
 
+# Jetson/PC2 split: task_planner_fsm's process_launcher, running on PC2, starts
+# the perception half of the stacks (stack:=perception) for this computer and
+# publishes their console output on <launcher>/output.
+PC2_LAUNCHER = '/process_launcher'
+
+
 # ── FSM graph view ──
 # Python port of the task_planner_fsm RViz panel's graph
 # (task_planner_fsm_rviz_panel/src/fsm_panel.cpp). Node positions and groups
@@ -382,6 +388,15 @@ class RobotControlUI(QMainWindow):
         self.fsm_transition_subscriber = self.node.create_subscription(
             String, '/fsm/transition', self._on_fsm_transition,
             QoSProfile(depth=20, reliability=ReliabilityPolicy.RELIABLE))
+
+        # Jetson/PC2 split. The launcher's service clients are created on first
+        # use; _pc2_keys maps a manual launch (process_map key) to the key its
+        # perception half runs under on PC2.
+        self._pc2_clients = {}
+        self._pc2_keys = {}
+        self.pc2_output_subscriber = self.node.create_subscription(
+            String, f'{PC2_LAUNCHER}/output', self._on_pc2_output,
+            QoSProfile(depth=200, reliability=ReliabilityPolicy.RELIABLE))
 
         # RTAB-Map localization health (replaces watching RViz). Runs on its
         # own executor thread; the indicators are repainted by a 2 Hz timer.
@@ -792,6 +807,13 @@ class RobotControlUI(QMainWindow):
         self.btn_launch_localization.clicked.connect(lambda: self.toggle_localization(controller_type_combo=self.controller_type_combo, headless_combo=self.base_headless_combo))
         self.btn_launch_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=base controller_type:=<type> headless:=<true/false>")
         mapping_loc_layout.addWidget(self.btn_launch_localization)
+        self.base_pc2_check = QCheckBox("Perception on PC2")
+        self.base_pc2_check.setToolTip(
+            "Start Mapping/Localization with the perception half (lidars, cameras,\n"
+            "rtabmap, Nav2) on PC2, through task_planner_fsm's process_launcher\n"
+            "there; this computer runs the control half. In sim the camera images\n"
+            "stay off (cameras:=false) so they do not flood the network.")
+        mapping_loc_layout.addWidget(self.base_pc2_check)
  
         # View map button
         self.btn_view_map = QPushButton("View map")
@@ -1197,6 +1219,13 @@ class RobotControlUI(QMainWindow):
         )
         self.btn_full_control_localization.setToolTip("ros2 launch navi_wall move_robot.launch.py sim:=<mode> mode:=full controller_type:=<type> hybrid_sim:=<true/false> planner_backend:=<moveit|legacy> [moveit_planning_pipeline:=<...> moveit_pose_planner_id:=<...>] headless:=<true/false>")
         full_control_mapping_layout.addWidget(self.btn_full_control_localization)
+        self.full_control_pc2_check = QCheckBox("Perception on PC2")
+        self.full_control_pc2_check.setToolTip(
+            "Start Mapping/Localization with the perception half (lidars, cameras,\n"
+            "rtabmap, Nav2) on PC2, through task_planner_fsm's process_launcher\n"
+            "there; this computer runs the control half. In sim the camera images\n"
+            "stay off (cameras:=false) so they do not flood the network.")
+        full_control_mapping_layout.addWidget(self.full_control_pc2_check)
 
         self.btn_full_control_nav2 = QPushButton("Launch Nav2")
         self.btn_full_control_nav2.clicked.connect(lambda: self.toggle_nav2(mode='full', button=self.btn_full_control_nav2, sim_combo=self.full_control_sim_mode_combo, controller_type_combo=self.full_control_controller_type_combo))
@@ -4038,7 +4067,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         process_key = f'{mode}_mapping' if mode != 'base' else 'mapping'
         display_name = 'Mapping'
         
-        self._toggle_base_process(process_key, button, display_name, 'ros2', args)
+        self._toggle_stack_process(process_key, button, display_name, args, sim_mode)
         
         if mode == 'full':
             self._update_tab_states_for_full_control()  
@@ -4090,7 +4119,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             localization_args.extend(self._get_moveit_launch_args(context='full'))
         localization_args.append(f'headless:={headless}')
 
-        self._toggle_base_process(process_key, button, display_name, 'ros2', localization_args)
+        self._toggle_stack_process(process_key, button, display_name, localization_args, sim_mode)
         if mode == 'full':
             self._update_tab_states_for_full_control()
         
@@ -4816,8 +4845,126 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 self._update_tab_states_for_arm()
 
  
+    # ── Jetson/PC2 split ──────────────────────────────────────────────────
+    # With a tab's "Perception on PC2" box ticked, Mapping and Localization
+    # start their launch here with stack:=control and the same launch on PC2,
+    # through task_planner_fsm's process_launcher, with stack:=perception
+    # (lidars, cameras, rtabmap, Nav2). Stopping saves rtabmap on PC2, stops
+    # PC2's half, then this computer's half: the order the FSM uses, so Nav2
+    # stops commanding the base before the base goes down.
+
+    def _on_pc2_output(self, msg):
+        """A console line from a launch that process_launcher runs on PC2."""
+        key, sep, line = msg.data.partition('| ')
+        if not sep or not line.strip():
+            return
+        html_line = "<span style='color:#986ee2;'>[PC2]</span> " + self._ansi_to_html(line)
+        for process_key, remote_key in self._pc2_keys.items():
+            if remote_key == key:
+                widget = (self.full_control_status_text if process_key.startswith('full')
+                          else self.base_status_text)
+                self._log_append(widget, html_line)
+                return
+        # Anything else was started by the FSM.
+        self._fsm_append_log(html_line, f"[PC2] {line}")
+
+    def _pc2_call(self, name, srv_type, request, timeout):
+        """Call a process_launcher service on PC2 without freezing the UI.
+
+        Returns the response, or None when the launcher did not answer.
+        """
+        client = self._pc2_clients.get(name)
+        if client is None:
+            client = self.node.create_client(srv_type, f'{PC2_LAUNCHER}/{name}')
+            self._pc2_clients[name] = client
+        if not client.wait_for_service(timeout_sec=3.0):
+            return None
+        future = client.call_async(request)
+        deadline = time.time() + timeout
+        while not future.done() and time.time() < deadline:
+            try:
+                if rclpy.ok():
+                    rclpy.spin_once(self.node, timeout_sec=0.05)
+            except Exception:
+                pass
+            QApplication.processEvents()
+        return future.result() if future.done() else None
+
+    def _pc2_split_requested(self, process_key):
+        box = self.full_control_pc2_check if process_key.startswith('full') else self.base_pc2_check
+        return box.isChecked()
+
+    def _toggle_stack_process(self, process_key, button, name, args, sim_mode):
+        """_toggle_base_process for Mapping/Localization, split across PC2 when asked."""
+        status_text = self.full_control_status_text if process_key.startswith('full') else self.base_status_text
+        if process_key in self.process_map:
+            remote_key = self._pc2_keys.pop(process_key, None)
+            if remote_key:
+                self._pc2_stop(remote_key, status_text, save_rtabmap='mapping' in process_key,
+                               button=button)
+            self._toggle_base_process(process_key, button, name, 'ros2', args)
+            return
+        if not self._pc2_split_requested(process_key):
+            self._toggle_base_process(process_key, button, name, 'ros2', args)
+            return
+
+        from navi_wall.srv import StartLaunch
+        # Sim only: Gazebo runs on this computer, so the raw camera images would
+        # cross the network and flood it; on the robot the cameras are on PC2.
+        extra = ['cameras:=false'] if sim_mode == 'true' else []
+        remote_key = f'ui_{process_key}'
+        remote_cmd = ['ros2', *args, *extra, 'stack:=perception']
+        self._log_append(status_text, f"<b style='color:#986ee2;'>▶ [PC2] {html.escape(' '.join(remote_cmd))}</b>")
+        button.setEnabled(False)
+        try:
+            res = self._pc2_call('start', StartLaunch,
+                                 StartLaunch.Request(key=remote_key, cmd=remote_cmd), 15.0)
+        finally:
+            button.setEnabled(True)
+        if res is None or not res.success:
+            reason = res.message if res is not None else (
+                f"no answer from {PC2_LAUNCHER}; is process_launcher running on PC2?")
+            self._log_append(status_text, f"<span style='color:#f47067;'>✗ PC2 did not start: "
+                                          f"{html.escape(reason)}</span>")
+            return
+        self._pc2_keys[process_key] = remote_key
+        self._toggle_base_process(process_key, button, name, 'ros2',
+                                  [*args, *extra, 'stack:=control'])
+
+    def _pc2_stop(self, remote_key, status_text, save_rtabmap, button=None):
+        """Stop PC2's half of a manual launch, saving rtabmap there first."""
+        from navi_wall.srv import SaveRtabmap, StopLaunch
+        if button is not None:
+            button.setEnabled(False)
+        try:
+            if save_rtabmap:
+                self._log_append(status_text, "💾 Saving mapping database on PC2... (waiting for rtabmap)")
+                res = self._pc2_call('save_rtabmap', SaveRtabmap, SaveRtabmap.Request(timeout=180.0), 200.0)
+                if res is not None and res.success:
+                    self._log_append(status_text, "✓ PC2: rtabmap saved.")
+                else:
+                    reason = res.message if res is not None else "no answer from the launcher"
+                    self._log_append(status_text, f"<span style='color:#f47067;'>⚠ PC2: "
+                                                  f"{html.escape(reason)}</span>")
+            res = self._pc2_call('stop', StopLaunch,
+                                 StopLaunch.Request(key=remote_key, timeout=10.0), 60.0)
+            if res is not None and res.success:
+                self._log_append(status_text, f"⏹ PC2: {html.escape(res.message)}")
+            else:
+                self._log_append(status_text, "<span style='color:#f47067;'>⚠ PC2 did not confirm "
+                                              "the stop; check process_launcher there.</span>")
+        finally:
+            if button is not None:
+                button.setEnabled(True)
+
     def _on_base_process_finished(self, process_key, button, name):
         """Handle when a base process finishes unexpectedly"""
+        remote_key = self._pc2_keys.pop(process_key, None)
+        if remote_key:
+            # This computer's half died: don't leave PC2's half running alone.
+            status_text = (self.full_control_status_text if process_key.startswith('full')
+                           else self.base_status_text)
+            self._pc2_stop(remote_key, status_text, save_rtabmap='mapping' in process_key)
         if process_key in self.process_map:
             del self.process_map[process_key]
             button.setText(self._get_base_process_start_text(process_key, name))
@@ -6452,6 +6599,33 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         options_row.addStretch()
         fsm_tab_layout.addLayout(options_row)
+
+        # ── Jetson/PC2 split row ──
+        # The perception half of the FSM's stacks (lidars, cameras, rtabmap,
+        # Nav2) runs on PC2 under task_planner_fsm's process_launcher; its
+        # console output comes back into this log marked [PC2].
+        split_row = QHBoxLayout()
+        self.fsm_pc2_check = QCheckBox("Perception on PC2")
+        self.fsm_pc2_check.setToolTip(
+            "Run the perception half of the FSM's stacks on PC2\n"
+            f"(fsm_node -p perception_launcher:={PC2_LAUNCHER}).\n"
+            "process_launcher must be running on PC2, with the same\n"
+            "ROS_DOMAIN_ID and Fast DDS profile as this computer.")
+        split_row.addWidget(self.fsm_pc2_check)
+        split_row.addSpacing(16)
+        # Sim only: Gazebo runs here, so the raw camera images would cross the
+        # network (~30 MB/s of fragmented UDP) and flood it. On the robot the
+        # cameras are plugged into PC2 and this stays off.
+        self.fsm_no_cameras_check = QCheckBox("Sim: no camera images")
+        self.fsm_no_cameras_check.setToolTip(
+            "Run the stacks without the RealSense images (lidar-only rtabmap)\n"
+            "(fsm_node -p stack_launch_args:=cameras:=false).\n"
+            "For the two-computer sim test only; leave off on the robot.")
+        self.fsm_no_cameras_check.setEnabled(False)
+        self.fsm_pc2_check.toggled.connect(self.fsm_no_cameras_check.setEnabled)
+        split_row.addWidget(self.fsm_no_cameras_check)
+        split_row.addStretch()
+        fsm_tab_layout.addLayout(split_row)
         # ── Restart row: new run from Error/Finished, robot stack kept up ──
         # (The FSM state it depends on is shown in the status panel below.)
         restart_row = QHBoxLayout()
@@ -6887,6 +7061,15 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         ip = self.fsm_gpr_ip_input.text().strip()
         return ['gpr_trigger_bridge:=true', f'gpr_receiver_ip:={ip}']
 
+    def _fsm_split_override(self):
+        """``['-p', ...]`` sending the perception half of the stacks to PC2."""
+        if not self.fsm_pc2_check.isChecked():
+            return []
+        args = ['-p', f'perception_launcher:={PC2_LAUNCHER}']
+        if self.fsm_no_cameras_check.isChecked():
+            args += ['-p', 'stack_launch_args:=cameras:=false']
+        return args
+
     def _fsm_hyperspectral_override(self):
         """``['-p', ...]`` making ScanWall sample the camera during the sweeps."""
         if not self.fsm_hyperspectral_check.isChecked():
@@ -6970,6 +7153,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             # configured. Hence --ros-args rather than another '--' option, and
             # it must stay last so nothing follows it into ROS's arg parser.
             '--ros-args', '-p', f'sweep_use_wbc:={wbc}',
+            *self._fsm_split_override(),
             *self._fsm_gpr_override(),
             *self._fsm_gpr_bridge_override(),
             *self._fsm_hyperspectral_override(),
