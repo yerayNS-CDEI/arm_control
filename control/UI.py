@@ -72,6 +72,11 @@ def _make_dark_palette():
 # the perception half of the stacks (stack:=perception) for this computer and
 # publishes their console output on <launcher>/output.
 PC2_LAUNCHER = '/process_launcher'
+# The launches the FSM runs (partly) on PC2: task_planner_fsm's proc_utils.PLACEMENT.
+FSM_PC2_KEYS = ('mapping', 'nav_sim', 'explore')
+# Stop FSM waits this long for the FSM's own split teardown: rtabmap's save on
+# PC2 (the FSM allows it 180 s) and the remote stops of its launches.
+FSM_SPLIT_STOP_TIMEOUT_S = 300.0
 
 
 # ── FSM graph view ──
@@ -7285,6 +7290,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 "Sensors tab; start and calibrate it there before the first sweep.",
             )
 
+        # Stop FSM must then wait for the FSM's teardown on PC2 (see _stop_fsm).
+        self._fsm_split = self.fsm_pc2_check.isChecked()
         self.btn_fsm_start.setText("Stop FSM")
         self.btn_fsm_start.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         self._fsm_set_input_enabled(True)
@@ -7560,6 +7567,18 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         # mid-travel and leaves it extended.
         self._wait_for_column_retraction(control_pids)
 
+        if getattr(self, '_fsm_split', False):
+            # With the perception half on PC2 the FSM's own teardown saves
+            # rtabmap there and stops its launches through the launcher, which
+            # takes longer than the 3 s below: killing the FSM sooner left PC2's
+            # half running. Wait for it, then make sure from here as well.
+            self.btn_fsm_start.setEnabled(False)
+            try:
+                self._wait_for_fsm_split_teardown()
+                self._pc2_stop_fsm_launches()
+            finally:
+                self.btn_fsm_start.setEnabled(True)
+
         for proc in procs:
             proc.waitForFinished(3000)
 
@@ -7595,6 +7614,51 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             "<span style='color: #e3b341;'>⏹ FSM stopped</span>",
             "⏹ FSM stopped",
         )
+
+    def _wait_for_fsm_split_teardown(self):
+        """Wait for fsm_node to exit after its SIGINT, keeping the UI responsive."""
+        node_proc = self.fsm_node_process
+        if node_proc is None or node_proc.state() != QProcess.Running:
+            return
+        self._fsm_append_log(
+            "<span style='color:#986ee2;'>⏳ Waiting for the FSM to save rtabmap and stop its "
+            "half on PC2...</span>",
+            "⏳ Waiting for the FSM to save rtabmap and stop its half on PC2...")
+        deadline = time.time() + FSM_SPLIT_STOP_TIMEOUT_S
+        while node_proc.state() == QProcess.Running and time.time() < deadline:
+            QApplication.processEvents()
+            node_proc.waitForFinished(100)
+        if node_proc.state() == QProcess.Running:
+            msg = (f"⚠ The FSM did not finish its PC2 teardown within "
+                   f"{FSM_SPLIT_STOP_TIMEOUT_S:.0f} s; stopping PC2's half from here.")
+            self._fsm_append_log(f"<span style='color:#e3b341;'>{msg}</span>", msg)
+
+    def _pc2_stop_fsm_launches(self):
+        """Save rtabmap on PC2 and stop the FSM's launches there, if any is still
+        running (the FSM was killed, or its teardown failed). Nothing to do
+        when the FSM already did it."""
+        if not self._pc2_launcher_up():
+            return
+        from navi_wall.srv import LaunchStatus, SaveRtabmap, StopLaunch
+        left = []
+        for key in FSM_PC2_KEYS:
+            res = self._pc2_call('status', LaunchStatus, LaunchStatus.Request(key=key), 10.0)
+            if res is not None and res.known and res.running:
+                left.append(key)
+        if not left:
+            return
+        msg = f"PC2 still runs the FSM's {', '.join(left)}; saving rtabmap and stopping them."
+        self._fsm_append_log(f"<span style='color:#e3b341;'>⚠ {msg}</span>", f"⚠ {msg}")
+        res = self._pc2_call('save_rtabmap', SaveRtabmap, SaveRtabmap.Request(timeout=180.0), 200.0)
+        saved = "rtabmap saved" if res is not None and res.success else (
+            res.message if res is not None else "no answer from the launcher")
+        self._fsm_append_log(f"<span style='color:#986ee2;'>[PC2]</span> {html.escape(saved)}",
+                             f"[PC2] {saved}")
+        for key in left:
+            res = self._pc2_call('stop', StopLaunch, StopLaunch.Request(key=key, timeout=25.0), 90.0)
+            done = res.message if res is not None else f"'{key}': no answer from the launcher"
+            self._fsm_append_log(f"<span style='color:#986ee2;'>[PC2]</span> {html.escape(done)}",
+                                 f"[PC2] {done}")
 
     def _handle_fsm_output(self, process):
         """Stream output from a FSM process into the status pane."""
