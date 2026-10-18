@@ -4732,6 +4732,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 pass
 
             pid = process.processId()
+            # Taken now: once the launch exits, what it leaves behind is
+            # reparented and no longer found from its pid.
+            descendants = self._process_tree(pid) if pid else []
 
             # Try graceful SIGINT (Ctrl+C equivalent)
             if pid:
@@ -4779,6 +4782,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 or (self._is_robot_bringup_process(process_key) and uses_gazebo)
             ):
                 self._kill_gazebo_processes()
+
+            self._kill_launch_survivors(descendants, status_text)
 
             # Final cleanup
             if process_key in self.process_map:
@@ -4932,6 +4937,12 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                                button=button)
             self._toggle_base_process(process_key, button, name, 'ros2', args)
             return
+        # Fast DDS shared memory left by killed processes broke local delivery:
+        # robot_state_publisher's TF reached nobody. Only unused files go.
+        try:
+            subprocess.run(['fastdds', 'shm', 'clean'], capture_output=True, timeout=10)
+        except Exception:
+            pass
         if not self._pc2_split_requested(process_key):
             self._toggle_base_process(process_key, button, name, 'ros2', args)
             return
@@ -5006,6 +5017,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         if res is None:
             self._log_append(status_text, "<span style='color:#f47067;'>⚠ PC2 did not answer "
                                           "the process list</span>")
+            return []
+        if not res.pids:
+            self._log_append(status_text, "<span style='color:#986ee2;'>[PC2]</span> no ROS2 processes")
             return []
         entries = []
         for pid, command in zip(res.pids, res.commands):
@@ -6323,6 +6337,61 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             except:
                 pass
  
+    def _process_tree(self, pid):
+        """``(pid, command line)`` of every descendant of `pid`."""
+        found, todo = [], [pid]
+        while todo:
+            parent = todo.pop()
+            try:
+                children = subprocess.run(['pgrep', '-P', str(parent)], capture_output=True,
+                                          text=True, timeout=1).stdout.split()
+            except Exception:
+                children = []
+            for child in children:
+                command = self._cmdline(int(child))
+                if command is not None:
+                    found.append((int(child), command))
+                    todo.append(int(child))
+        return found
+
+    @staticmethod
+    def _cmdline(pid):
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                return f.read().replace(b'\0', b' ').decode(errors='replace').strip()
+        except OSError:
+            return None
+
+    def _kill_launch_survivors(self, tree, status_text):
+        """SIGTERM, then SIGKILL, the processes of a stopped launch that are still
+        running. ``ros2 launch`` can exit before its nodes do, and a node that
+        ignores SIGINT (octomap_server) was then left running, one more after
+        every stop. A pid whose command line changed was reused and is left
+        alone, and so is rtabmap: a local mapping save may still be writing
+        the database, and it exits by itself when done.
+        """
+        survivors = [(pid, cmd) for pid, cmd in tree
+                     if self._cmdline(pid) == cmd and 'rtabmap_slam' not in cmd]
+        if not survivors:
+            return
+        self._log_append(status_text, f"⚠ {len(survivors)} process(es) outlived the launch; "
+                                      f"terminating: {', '.join(str(p) for p, _ in survivors)}")
+        for pid, _ in survivors:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        deadline = time.time() + 3.0
+        while time.time() < deadline and any(self._cmdline(p) == c for p, c in survivors):
+            QApplication.processEvents()
+            time.sleep(0.1)
+        for pid, cmd in survivors:
+            if self._cmdline(pid) == cmd:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+
     def _cleanup_ros_children_of_pid(self, parent_pid):
         """Kill specific ROS child processes that are descendants of the given parent PID."""
         if not parent_pid:
