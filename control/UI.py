@@ -4298,6 +4298,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         """Clean up finished ps aux process"""
         if process_key in self.process_map:
             del self.process_map[process_key]
+        # Jetson/PC2 split: PC2's processes too, when its launcher is up.
+        self._pc2_list_processes(self.base_status_text)
 
     def _build_list_all_controllers_script(self):
         """Shell script that lists controllers for every detected controller_manager node."""
@@ -4983,6 +4985,54 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             if button is not None:
                 button.setEnabled(True)
 
+    def _pc2_launcher_up(self):
+        """Whether PC2's launcher, with its process services, is in the ROS
+        graph. Instant: a UI without a PC2 never waits for it."""
+        try:
+            names = {name for name, _ in self.node.get_service_names_and_types()}
+        except Exception:
+            return False
+        return f'{PC2_LAUNCHER}/list_processes' in names
+
+    def _pc2_list_processes(self, status_text):
+        """PC2's ROS processes (the same 'ros2|robot' filter as the local
+        list), logged to `status_text`, as process-list entries marked
+        host='PC2'. [] when PC2's launcher is not running."""
+        if not self._pc2_launcher_up():
+            return []
+        from navi_wall.srv import ListProcesses
+        self._log_append(status_text, "<b style='color:#986ee2;'>▶ [PC2] ROS2 processes</b>")
+        res = self._pc2_call('list_processes', ListProcesses, ListProcesses.Request(), 10.0)
+        if res is None:
+            self._log_append(status_text, "<span style='color:#f47067;'>⚠ PC2 did not answer "
+                                          "the process list</span>")
+            return []
+        entries = []
+        for pid, command in zip(res.pids, res.commands):
+            self._log_append(status_text, f"<span style='color:#986ee2;'>[PC2]</span> {pid} "
+                                          f"{html.escape(command)}")
+            entries.append({'pid': str(pid), 'command': command, 'host': 'PC2'})
+        return entries
+
+    def _pc2_kill(self, pids):
+        """SIGKILL processes on PC2 through its launcher, logging each result.
+        Returns (killed, failed) counts."""
+        from navi_wall.srv import KillProcesses
+        status = self.full_control_status_text
+        self._log_append(status, f"<b style='color:#d73a49;'>▶ [PC2] kill -9 "
+                                 f"{' '.join(str(p) for p in pids)}</b>")
+        res = self._pc2_call('kill_processes', KillProcesses,
+                             KillProcesses.Request(pids=[int(p) for p in pids]), 15.0)
+        if res is None:
+            self._log_append(status, "<span style='color:#d73a49;'>✗ PC2 did not answer the kill "
+                                     "request; is process_launcher running there?</span>")
+            return 0, len(pids)
+        for pid in res.killed_pids:
+            self._log_append(status, f"<span style='color:#57ab5a;'>✓ Killed PC2 PID {pid}</span>")
+        for error in res.errors:
+            self._log_append(status, f"<span style='color:#e3b341;'>⚠ PC2: {html.escape(error)}</span>")
+        return len(res.killed_pids), len(res.errors)
+
     def _on_base_process_finished(self, process_key, button, name):
         """Handle when a base process finishes unexpectedly"""
         remote_key = self._pc2_keys.pop(process_key, None)
@@ -5378,9 +5428,26 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         
         # Parse the accumulated process list and populate combobox
         self.populate_process_combo(self.ps_output_accumulator)
-        
+        self._add_pc2_processes_to_combo()
+
         if process_key in self.process_map:
             del self.process_map[process_key]
+
+    def _add_pc2_processes_to_combo(self):
+        """Append PC2's ROS processes (Jetson/PC2 split) after the local ones."""
+        pc2 = self._pc2_list_processes(self.full_control_status_text)
+        if not pc2:
+            return
+        if not self.current_process_list:
+            self.process_combo.clear()  # the "No processes found" placeholder
+        for info in pc2:
+            index = self.process_combo.count()
+            self.current_process_list.append(info)
+            self.process_combo.addItem(f"PC2 PID: {info['pid']}")
+            self.process_combo.setItemData(
+                index, f"PC2 PID: {info['pid']}\nCommand: {info['command']}", Qt.ToolTipRole)
+        self._log_append(self.full_control_status_text,
+                         f"<span style='color: #57ab5a;'>Found {len(pc2)} ROS2 processes on PC2</span>")
     
     def toggle_full_control_align_ee(self):
         """Toggle Align EE to Wall (Full Control tab)"""
@@ -6349,8 +6416,22 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         pid = process_info['pid']
         command = process_info['command']
 
-        # Confirm and kill
         from PyQt5.QtWidgets import QMessageBox
+        if process_info.get('host') == 'PC2':
+            # A PC2 pid means nothing here: only PC2's launcher may kill it.
+            reply = QMessageBox.question(
+                self,
+                'Confirm Kill Process on PC2',
+                f"Are you sure you want to kill process {pid} on PC2?\n\nCommand: {command[:100]}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self._pc2_kill([pid])
+                QTimer.singleShot(500, self.run_full_control_ps_ros)
+            return
+
+        # Confirm and kill
         reply = QMessageBox.question(
             self,
             'Confirm Kill Process',
@@ -6397,9 +6478,17 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         # Filter processes to kill (exclude UI and ros2 daemon)
         processes_to_kill = []
+        pc2_to_kill = []
         for process_info in self.current_process_list:
             pid = process_info['pid']
             command = process_info['command'].lower()
+
+            # PC2's processes go to PC2's launcher, never to os.kill here: the
+            # same number is a different process (maybe this UI) on this computer.
+            if process_info.get('host') == 'PC2':
+                if not ('ros2' in command and 'daemon' in command):
+                    pc2_to_kill.append(process_info)
+                continue
 
             # Skip our own process
             if int(pid) == ui_pid:
@@ -6415,18 +6504,21 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
             processes_to_kill.append(process_info)
 
-        if not processes_to_kill:
+        if not processes_to_kill and not pc2_to_kill:
             self._log_append(self.full_control_status_text,
                              "<span style='color: #d73a49;'>No processes to kill (all are protected)</span>")
             return
 
         # Confirm kill all
         from PyQt5.QtWidgets import QMessageBox
+        where = (f"{len(processes_to_kill)} here and {len(pc2_to_kill)} on PC2" if pc2_to_kill
+                 else f"{len(processes_to_kill)}")
+        spared = " and PC2's process launcher" if pc2_to_kill else ""
         reply = QMessageBox.question(
             self,
             'Confirm Kill All Processes',
-            f"Are you sure you want to kill {len(processes_to_kill)} process(es)?\n\n"
-            f"This will kill all detected processes except the UI and ros2 daemon.",
+            f"Are you sure you want to kill {where} process(es)?\n\n"
+            f"This will kill all detected processes except the UI, the ros2 daemon{spared}.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -6461,9 +6553,14 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                                      f"<span style='color: #d73a49;'>✗ Failed to kill PID {pid}: {str(e)}</span>")
                     failed_count += 1
 
+            if pc2_to_kill:
+                pc2_killed, pc2_failed = self._pc2_kill([info['pid'] for info in pc2_to_kill])
+                killed_count += pc2_killed
+                failed_count += pc2_failed
+
             self._log_append(self.full_control_status_text,
                              f"<b style='color: #57ab5a;'>Finished: {killed_count} killed, {failed_count} failed</b>")
-            
+
             # Refresh the process list after killing
             QTimer.singleShot(500, self.run_full_control_ps_ros)
  
