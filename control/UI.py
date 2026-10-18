@@ -379,7 +379,7 @@ class RobotControlUI(QMainWindow):
         self.fsm_current_state_subscriber = self.node.create_subscription(
             String, '/fsm/current_state', self._on_fsm_current_state, fsm_state_qos)
         self.fsm_restart_publisher = self.node.create_publisher(String, '/fsm/restart', 10)
-        # Map tab goals, same topic as RViz's "2D Goal Pose" (bt_navigator follows it).
+        # Viz tab goals, same topic as RViz's "2D Goal Pose" (bt_navigator follows it).
         self.nav_goal_publisher = self.node.create_publisher(PoseStamped, '/goal_pose', 10)
 
         # FSM telemetry (same /fsm/* JSON topics as the RViz FsmPanel). Status
@@ -1506,7 +1506,7 @@ class RobotControlUI(QMainWindow):
         tabs.addTab(full_control_tab, "Full Control")
         tabs.addTab(self._create_gpr_api_test_tab(), "Sensors")
         tabs.addTab(self._create_fsm_tab(), "FSM")
-        tabs.addTab(self._create_map_tab(), "Map")
+        tabs.addTab(self._create_map_tab(), "Viz")
 
         # Connect tab change signal to check joint states when Joint Control tab is activated
         tabs.currentChanged.connect(lambda index: self._on_tab_changed(index, tabs))
@@ -1522,7 +1522,7 @@ class RobotControlUI(QMainWindow):
 
         self.map_timer = QTimer()
         self.map_timer.timeout.connect(self._refresh_map_tab)
-        self.map_timer.start(200)  # 5 Hz, no-op while the Map tab is hidden
+        self.map_timer.start(200)  # 5 Hz, no-op while the Viz tab is hidden
         
         # Initial UI update for consistent visuals
         self._update_emergency_stop_button_ui()
@@ -6961,21 +6961,30 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         return pane
 
     def _create_map_tab(self):
-        """2D map with the robot, Nav2 path/goal and detected walls (RViz stand-in)."""
+        """Viz tab: 2D map with the robot, its footprint, Nav2 path/goal and detected walls (RViz stand-in)."""
         map_tab = QWidget()
         layout = QVBoxLayout(map_tab)
 
-        toolbar = QHBoxLayout()
+        # View options in a column left of the map.
+        options = QVBoxLayout()
         self.map_follow_check = QCheckBox("Follow robot")
         self.map_follow_check.setChecked(True)
-        toolbar.addWidget(self.map_follow_check)
+        options.addWidget(self.map_follow_check)
         self.map_costmap_check = QCheckBox("Local costmap")
         self.map_costmap_check.setChecked(True)
         self.map_costmap_check.setToolTip(
             "Nav2's /local_costmap/costmap (rolling window around the robot, ~2 Hz).\n"
-            "Subscribed only while shown and the Map tab is visible.")
-        toolbar.addWidget(self.map_costmap_check)
-        toolbar.addSpacing(16)
+            "Subscribed only while shown and the Viz tab is visible.")
+        options.addWidget(self.map_costmap_check)
+        self.map_footprint_check = QCheckBox("Footprint")
+        self.map_footprint_check.setChecked(True)
+        self.map_footprint_check.setToolTip(
+            "Nav2's /local_costmap/published_footprint (arm-aware when the\n"
+            "dynamic footprint publisher runs).")
+        options.addWidget(self.map_footprint_check)
+        options.addStretch()
+
+        toolbar = QHBoxLayout()
         self.map_goal_button = QPushButton("2D Goal Pose")
         self.map_goal_button.setCheckable(True)
         self.map_goal_button.setToolTip(
@@ -7005,6 +7014,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.map_follow_check.toggled.connect(
             lambda checked: setattr(self.map_view, 'follow_robot', checked))
         self.map_costmap_check.toggled.connect(self.map_view.set_costmap_visible)
+        self.map_footprint_check.toggled.connect(self.map_view.set_footprint_visible)
         self.map_goal_button.toggled.connect(self.map_view.set_goal_mode)
         self.map_view.goal_selected.connect(self._publish_map_goal)
         for text, action in (
@@ -7020,7 +7030,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         layout.addLayout(info_row)
 
         legend = QLabel(
-            "Robot arrow + σ circle in the Localization colour · "
+            "Robot arrow + σ circle in the Localization colour, "
+            "<span style='color:#22272e;'>▭ Nav2 footprint</span> · "
             "<span style='color:#1f6feb;'>━ Nav2 path, ▷ goal</span> · walls: "
             "<span style='color:#2ea043;'>━ refined</span> "
             "<span style='color:#d29922;'>━ unrefined</span> "
@@ -7032,7 +7043,10 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         legend.setWordWrap(True)
         layout.addWidget(legend)
         self._build_localization_indicator(layout)
-        layout.addWidget(self.map_view, 1)
+        map_row = QHBoxLayout()
+        map_row.addLayout(options)
+        map_row.addWidget(self.map_view, 1)
+        layout.addLayout(map_row, 1)
         return map_tab
 
     def _fit_map_view(self):

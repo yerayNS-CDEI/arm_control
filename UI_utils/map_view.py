@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 2D map view for the control UI: RTAB-Map's occupancy grid with the robot,
-Nav2's path/goal, its local costmap and the detected walls drawn on top (an
+its Nav2 footprint, Nav2's path/goal, its local costmap and the detected
+walls drawn on top (an
 RViz stand-in that costs a QGraphicsScene instead of an OpenGL point-cloud
 renderer).
 
@@ -18,6 +19,9 @@ about its centre.
 
 The local costmap is a small rolling window (~120x120 cells at 2 Hz) in the
 odom frame; it is placed with LocalizationMonitor's map->odom, like the robot.
+So is the footprint: the local costmap publishes it (with the arm-aware
+dynamic footprint when that runs) already at the robot's odom pose, at its
+update rate, so it can trail the arrow by a fraction of a second.
 """
 
 import math
@@ -35,6 +39,7 @@ from PyQt5.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsView
 from rclpy.exceptions import InvalidHandle
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from action_msgs.msg import GoalStatus, GoalStatusArray
+from geometry_msgs.msg import PolygonStamped
 from nav_msgs.msg import OccupancyGrid, Path
 
 try:
@@ -49,6 +54,8 @@ PLAN_TOPIC = '/plan'
 NAV_STATUS_TOPIC = '/navigate_to_pose/_action/status'
 WALLS_TOPIC = '/wall_detection_node/walls'
 LOCAL_COSTMAP_TOPIC = '/local_costmap/costmap'
+FOOTPRINT_TOPIC = '/local_costmap/published_footprint'
+FOOTPRINT_TIMEOUT = 2.0     # (s) hide the footprint when Nav2 stops publishing it
 
 MAP_REDRAW_PERIOD = 2.0     # (s) at most one grid -> image conversion per period
 ROBOT_LENGTH = 0.7          # (m) drawn robot arrow
@@ -101,7 +108,7 @@ UNKNOWN_COLOR = QColor('#8a9099')
 
 
 class MapOverlays:
-    """Latest /map, /plan, Nav2 goal status and walls, filled on the monitor thread."""
+    """Latest /map, /plan, Nav2 goal status, footprint and walls, filled on the monitor thread."""
 
     def __init__(self, node):
         self._node = node
@@ -117,6 +124,7 @@ class MapOverlays:
         self.walls_version = 0
         self.costmap = None         # latest local costmap OccupancyGrid
         self.costmap_version = 0
+        self.footprint = None       # (frame_id, [(x, y)], monotonic receive time)
         self._costmap_enabled = True
         self._costmap_subscription = None
         self._guard = node.create_guard_condition(self._sync_subscriptions)
@@ -148,6 +156,8 @@ class MapOverlays:
                 self._node.create_subscription(Path, PLAN_TOPIC, self._on_plan, QoSProfile(depth=1)),
                 self._node.create_subscription(
                     GoalStatusArray, NAV_STATUS_TOPIC, self._on_nav_status, _LATCHED),
+                self._node.create_subscription(
+                    PolygonStamped, FOOTPRINT_TOPIC, self._on_footprint, QoSProfile(depth=1)),
             ]
             if WallArray is not None:
                 self._subscriptions.append(self._node.create_subscription(
@@ -173,6 +183,11 @@ class MapOverlays:
         with self._lock:
             self.costmap = msg
             self.costmap_version += 1
+
+    def _on_footprint(self, msg):
+        points = [(p.x, p.y) for p in msg.polygon.points]
+        with self._lock:
+            self.footprint = (msg.header.frame_id.lstrip('/'), points, time.monotonic())
 
     def _on_plan(self, msg):
         path = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
@@ -205,6 +220,7 @@ class MapOverlays:
                 'goal': self.goal if self.nav_active else None,
                 'walls': self.walls, 'walls_version': self.walls_version,
                 'costmap': self.costmap, 'costmap_version': self.costmap_version,
+                'footprint': self.footprint,
             }
 
 
@@ -255,6 +271,12 @@ class MapView(QGraphicsView):
             self._arrow(), self._pen('#1f6feb', 2), QBrush(Qt.NoBrush))
         self._goal_item.setZValue(2)
         self._goal_item.hide()
+
+        self.show_footprint = True
+        self._footprint_item = self._scene.addPolygon(
+            QPolygonF(), self._pen('#22272e', 2), QBrush(QColor(34, 39, 46, 40)))
+        self._footprint_item.setZValue(2.5)
+        self._footprint_item.hide()
 
         self._sigma_item = self._scene.addEllipse(QRectF(), self._pen('#8b949e', 1))
         self._sigma_item.setZValue(3)
@@ -477,6 +499,13 @@ class MapView(QGraphicsView):
         if not visible:
             self._costmap_item.hide()
 
+    # ── footprint ──
+
+    def set_footprint_visible(self, visible):
+        self.show_footprint = visible
+        if not visible:
+            self._footprint_item.hide()
+
     # ── drawing ──
 
     def refresh(self, state):
@@ -493,6 +522,7 @@ class MapView(QGraphicsView):
             self._goal_item.show()
         else:
             self._goal_item.hide()
+        self._update_footprint(data['footprint'])
         self._update_robot(state)
 
         grid = data['grid']
@@ -573,6 +603,19 @@ class MapView(QGraphicsView):
             c * res, -s * res, s * res, c * res,
             tx + c * ox - s * top, -(ty + s * ox + c * top)))
         self._costmap_item.show()
+
+    def _update_footprint(self, footprint):
+        if not self.show_footprint or footprint is None or time.monotonic() - footprint[2] > FOOTPRINT_TIMEOUT \
+                or len(footprint[1]) < 3:
+            self._footprint_item.hide()
+            return
+        # Re-placed every refresh, like the costmap: map->odom moves with each match.
+        frame, points, _ = footprint
+        tx, ty, th = (0.0, 0.0, 0.0) if frame == 'map' else self._monitor.map_to_odom()
+        c, s = math.cos(th), math.sin(th)
+        self._footprint_item.setPolygon(QPolygonF(
+            [_scene(tx + c * x - s * y, ty + s * x + c * y) for x, y in points]))
+        self._footprint_item.show()
 
     def _update_walls(self, walls, version):
         if version == self._walls_version:
