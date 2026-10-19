@@ -6333,20 +6333,6 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         ])
         controls_row.addWidget(self.fsm_state_combo)
 
-        # Whole-body control for the ScanWall sweep. "true" replaces the Nav2
-        # position goal + wall_parallel_controller during a segment sweep with a
-        # single base+arm control law (task_planner_fsm/wbc). Passed through as
-        # the ctx flag the state reads; the FSM itself gates it to simulation.
-        controls_row.addSpacing(16)
-        controls_row.addWidget(QLabel("WBC:"))
-        self.fsm_wbc_combo = QComboBox()
-        self.fsm_wbc_combo.addItems(["false", "true"])
-        self.fsm_wbc_combo.setToolTip(
-            "Whole-body (base + arm) sweep in ScanWall instead of the Nav2 sweep.\n"
-            "Simulation only: on the real robot force_mode cannot run alongside\n"
-            "the streaming velocity controller it needs."
-        )
-        controls_row.addWidget(self.fsm_wbc_combo)
         # Recorded session for the offline SensorDataProcessing run. Only
         # meaningful for that state; the FSM's own fallback ("latest") is the
         # default, and a named session goes to fsm_node as the same parameter
@@ -6914,7 +6900,6 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         sim = self.fsm_sim_combo.currentText()
         planner = self.fsm_planner_combo.currentText()
         state = self.fsm_state_combo.currentText()
-        wbc = self.fsm_wbc_combo.currentText()
 
         # The bridge exits at once without a receiver_ip; better to say so
         # here than to have the sweep fail later on "no bridge status".
@@ -6965,11 +6950,11 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             '--planner-backend', planner,
             '--initial-state', state,
 
-            # sweep_use_wbc is not an fsm_node CLI flag: the node bridges every
+            # The sweep knobs are not fsm_node CLI flags: the node bridges every
             # ROS parameter into its ctx, which is how the per-state knobs are
             # configured. Hence --ros-args rather than another '--' option, and
             # it must stay last so nothing follows it into ROS's arg parser.
-            '--ros-args', '-p', f'sweep_use_wbc:={wbc}',
+            '--ros-args',
             *self._fsm_gpr_override(),
             *self._fsm_gpr_bridge_override(),
             *self._fsm_hyperspectral_override(),
