@@ -38,8 +38,12 @@ SENSOR_XY = np.array([
     [0.152,   0.17],    # 4: S2 ToF, top-right
     [0.00,   -0.172],   # 5: S3 ToF, bottom-mid
 ])
-# Per-sensor stddev (m), used as inverse-variance weights in the fit.
-SENSOR_SIGMA = np.array([0.010, 0.010, 0.010, 0.010, 0.010, 0.010])
+# Per-sensor stddev (m), used as inverse-variance weights in the fit: the
+# residual scatter measured against the arm's FK on 2026-09-17 once the reader's
+# per-sensor offsets are applied (sensors/plate_calibration.py) -- ultrasonics
+# 4-6 mm from their 1 cm quantisation, ToF 1.4-1.7 mm. Equal weights let one
+# ultrasonic count tilt the fitted plane by ~1 deg.
+SENSOR_SIGMA = np.array([0.006, 0.006, 0.006, 0.002, 0.002, 0.002])
 # Validity window (m): drop saturated / out-of-range readings. Shared with
 # task_planner_fsm's scan_wall so the FSM and the estimator agree on what counts
 # as a reading at all.
@@ -65,9 +69,10 @@ MIN_SENSORS_FOR_FIT = 3
 #
 # The test is the residual from the plane, not the spread of the raw ranges: a
 # steeply tilted plate has a large spread but small residuals, so a raw-range
-# gate eats legitimate readings exactly when the plate is worst aligned. At 3x the
-# 0.010 m sensor sigma this drops a sensor on 0.1% of noisy frames and catches
-# every edge outlier tested. Set 0 to disable and get the original, unguarded
+# gate eats legitimate readings exactly when the plate is worst aligned. Chosen
+# at 3x the original, uncalibrated 0.010 m sensor sigma, where it dropped a
+# sensor on 0.1% of noisy frames and caught every edge outlier tested; the
+# calibrated sigmas above are smaller, so it is looser than that now. Set 0 to disable and get the original, unguarded
 # behaviour back.
 DEFAULT_MAX_PLANE_RESIDUAL_M = 0.03
 # At most two of six may be discarded: beyond two bad readings the frame is not

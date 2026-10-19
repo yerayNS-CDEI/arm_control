@@ -31,6 +31,16 @@ from sensors.wall_alignment_estimator import (
 FLAT = 0.20
 
 
+@pytest.fixture
+def equal_weights(monkeypatch):
+    """The uncalibrated, equal per-sensor weights the residual gate was designed
+    against. With the calibrated ones (ToF ~3x more trusted than an ultrasonic)
+    an ultrasonic outlier already pulls the plain fit far less, so the tests that
+    document WHY the gate exists pin the weighting it was justified under."""
+    monkeypatch.setattr("sensors.wall_alignment_estimator.SENSOR_SIGMA",
+                        np.full(6, 0.010))
+
+
 def ranges(tilt_x_deg=0.0, tilt_y_deg=0.0, standoff=FLAT, noise=0.0, seed=0):
     """Ranges a plate tilted about the plate X and/or Y axes would report.
 
@@ -164,7 +174,7 @@ def test_a_sensor_that_missed_the_wall_is_rejected(bad):
 
 
 @pytest.mark.parametrize("bad", [0.40, 1.20])
-def test_without_the_gate_the_huber_fit_follows_the_outlier(bad):
+def test_without_the_gate_the_huber_fit_follows_the_outlier(bad, equal_weights):
     """Documents WHY the gate exists. IRLS gives no protection here: with six
     points the MAD is itself contaminated, so every weight stays near 1 and more
     iterations change nothing."""
@@ -173,6 +183,18 @@ def test_without_the_gate_the_huber_fit_follows_the_outlier(bad):
     fouled[2] = bad
     assert deflection(clean, fouled, max_residual=0.0) > 20.0
     assert deflection(clean, fouled, max_residual=0.0, iterations=30) > 20.0
+
+
+@pytest.mark.parametrize("bad", [0.40, 1.20])
+def test_the_calibrated_weights_alone_blunt_an_ultrasonic_outlier(bad):
+    """Calibrated sigmas (0.006 m ultrasonic, 0.002 m ToF): even ungated, one
+    ultrasonic past the wall edge deflects the fit by single degrees rather than
+    tens. The gate still takes it out entirely."""
+    clean = ranges(tilt_x_deg=6.0)
+    fouled = clean.copy()
+    fouled[2] = bad
+    assert deflection(clean, fouled, max_residual=0.0) < 10.0
+    assert deflection(clean, fouled) < 0.01
 
 
 @pytest.mark.parametrize("tilt", [-30.0, -20.0, -10.0, 0.0, 10.0, 20.0, 30.0])
@@ -259,7 +281,7 @@ def test_the_guard_costs_nothing_on_clean_frames():
     assert guarded == pytest.approx(plain, abs=0.15)
 
 
-def test_the_guard_transforms_accuracy_when_a_sensor_misses_the_wall():
+def test_the_guard_transforms_accuracy_when_a_sensor_misses_the_wall(equal_weights):
     """~39 deg of error becomes ~4 deg. This is the whole reason it exists."""
     guarded, plain = tilt_errors(1500, noise=0.010, outlier=True, seed=5)
     assert plain > 25.0
