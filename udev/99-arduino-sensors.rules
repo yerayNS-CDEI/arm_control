@@ -1,0 +1,17 @@
+# Stable name for the Arduino Uno that drives the HC-SR04 / VL6180 distance sensors.
+#
+# Without this the board lands on /dev/ttyACM0, /dev/ttyACM1, ... depending on which
+# index happens to be free when it enumerates, which breaks arm_control's
+# arduino_sensors node after any replug, USB reset or board auto-reset.
+#
+# Install:
+#   sudo cp 99-arduino-sensors.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# Verify:
+#   ls -l /dev/arduino_sensors
+#
+# 2a03:0043 = Arduino Srl Uno Rev3 (the board currently on this robot)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2a03", ATTRS{idProduct}=="0043", SYMLINK+="arduino_sensors", GROUP="dialout", MODE="0660"
+# 2341:0043 = Arduino SA Uno Rev3 (same board, other vendor ID; covers a spare)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0043", SYMLINK+="arduino_sensors", GROUP="dialout", MODE="0660"

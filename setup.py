@@ -23,6 +23,7 @@ setup(
     entry_points={
         'console_scripts': [
             # Control nodes
+            'arm_joy_node = control.arm_joy_node:main',
             'end_effector_pose_node = control.end_effector_pose_node:main',
             'example_move = control.example_move:main',
             'exhaustive_scan_node = control.exhaustive_scan_node:main',
@@ -37,7 +38,6 @@ setup(
             'send_and_monitor_trajectory = control.send_and_monitor_trajectory:main',
             'script_command_service_node = control.script_command_service_node:main',
             'UI = control.UI:main',
-            'inspection_manager = sensors.inspection_manager:main',
 
             # Planner nodes
             'base_placement_node = planner.base_placement_node:main',
@@ -55,6 +55,8 @@ setup(
             'align_ee_to_wall = sensors.align_ee_to_wall:main',
             'arduino_sensors = sensors.arduino_sensors:main',
             'test_hyperspectral_client = sensors.test_hyperspectral_client:main',
+            'ml_inference_node = sensors.ml_inference_node:main',
+            'inspection_manager = sensors.inspection_manager:main',
             'arduino_sensors_sim = sensors.arduino_sensors_sim:main',
             'wall_parallel_controller = sensors.wall_parallel_controller:main',
         ],

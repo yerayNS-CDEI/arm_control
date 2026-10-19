@@ -21,6 +21,7 @@
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>shape_msgs</depend>
   <depend>visualization_msgs</depend>
@@ -28,6 +29,7 @@
   
   <!-- Control dependencies -->
   <depend>control_msgs</depend>
+  <depend>controller_manager_msgs</depend>
   <depend>trajectory_msgs</depend>
   <depend>action_msgs</depend>
   <depend>builtin_interfaces</depend>
@@ -69,6 +71,7 @@
   
   <!-- External Python dependencies -->
   <depend>numpy</depend>
+  <depend>python3-scipy</depend>
   <depend>example_interfaces</depend>
   <depend>backward_ros</depend> <!-- for automatic backtrace -->
 

@@ -158,6 +158,20 @@ class PositionSenderNode(Node):
                 'joints': (-2.867, -2.101, 2.253, -0.203, 1.069, 0.076),
                 'pose': (0.5011, 0.5280,  0.51949,  0.2832,  0.6315, 0.6720, 0.2633)
             },
+            # unfolded_fsm with the sensor plate rolled -90 deg about its own Z
+            # (the wall normal): wrist_3 = 0.076 - pi/2, nothing else moves.
+            # The FSM's cross-polarized GPR pass sweeps in it. Always this one
+            # absolute pose, never "the current pose + 90", so every segment
+            # rolls the plate the same way and the cable/collision check done
+            # once covers them all. -90 puts the GPR (plate x = -0.08) ABOVE
+            # the plate centre; the FSM lowers the plate by the same amount.
+            # The roll is the FSM's CROSS_POL_PLATE_ROLL (scan_wall.py): keep
+            # the two in sync. Position unchanged (tool0 lies on the wrist_3
+            # axis); quaternion = unfolded_fsm's * Rz(-pi/2), checked with FK.
+            'unfolded_fsm_xpol': {
+                'joints': (-2.867, -2.101, 2.253, -0.203, 1.069, -1.4948),
+                'pose': (0.5011, 0.5280,  0.51949, -0.2463,  0.6468, 0.2890, 0.6614)
+            },
             'folded_fsm': {
                 'joints': (-1.273, -1.840, 2.028, 0.522, 1.251, -0.351),
                 'pose': (-0.470, 0.5028, 0.3145, -0.3495, 0.8295, 0.4148, -0.1320)
@@ -215,14 +229,14 @@ class PositionSenderNode(Node):
         # (joint-space linear interpolation, NOT collision-aware).  unfolded_fsm
         # is here because PTP would sweep the upper arm through the column /
         # plate / camera / lidar mounts during the ~180° shoulder_pan rotation.
-        self.aps_joint_positions = {'folded', 'unfolded', 'unfolded_fsm'}
+        self.aps_joint_positions = {'folded', 'unfolded', 'unfolded_fsm', 'unfolded_fsm_xpol'}
         # APS pose goals: pose-only positions where (a) random IK sampling at the goal
         # fails for OMPL (orientation is too constrained — "Unable to sample goal tree")
         # and (b) PTP's joint-space linear interpolation collides during the sweep
         # (arm_upper_arm_link vs arm_plate_link / camera / os_sensor_mount).
         # moveit_planner_node now seeds IK from the current joint state before APS so the
         # goal joint config is known-valid, and APS plans collision-aware in joint space.
-        self.aps_pose_positions = {'folded_fsm', 'unfolded_fsm'}
+        self.aps_pose_positions = {'folded_fsm', 'unfolded_fsm', 'unfolded_fsm_xpol'}
         self.joint_indices = None
         self.goal_marker_namespace = 'position_sender_goal_pose'
         

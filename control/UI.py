@@ -22,7 +22,9 @@ from PyQt5.QtGui import (
 from PyQt5.QtWidgets import QApplication
 from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
-from geometry_msgs.msg import Pose
+from UI_utils import localization_monitor
+from UI_utils.map_view import MapView
+from geometry_msgs.msg import Pose, PoseStamped
 from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray, String
 from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
@@ -366,6 +368,8 @@ class RobotControlUI(QMainWindow):
         self.fsm_current_state_subscriber = self.node.create_subscription(
             String, '/fsm/current_state', self._on_fsm_current_state, fsm_state_qos)
         self.fsm_restart_publisher = self.node.create_publisher(String, '/fsm/restart', 10)
+        # Map tab goals, same topic as RViz's "2D Goal Pose" (bt_navigator follows it).
+        self.nav_goal_publisher = self.node.create_publisher(PoseStamped, '/goal_pose', 10)
 
         # FSM telemetry (same /fsm/* JSON topics as the RViz FsmPanel). Status
         # and graph are latched like the current state; transitions are not.
@@ -378,6 +382,11 @@ class RobotControlUI(QMainWindow):
         self.fsm_transition_subscriber = self.node.create_subscription(
             String, '/fsm/transition', self._on_fsm_transition,
             QoSProfile(depth=20, reliability=ReliabilityPolicy.RELIABLE))
+
+        # RTAB-Map localization health (replaces watching RViz). Runs on its
+        # own executor thread; the indicators are repainted by a 2 Hz timer.
+        self.localization_monitor = localization_monitor.LocalizationMonitor()
+        self.localization_indicators = []
 
         # FSM log buffer (html, plain_text, add_newline) for filter rebuilds
         self.fsm_log_entries = []
@@ -530,7 +539,7 @@ class RobotControlUI(QMainWindow):
         # Full Robot tab additionally exposes the FSM named poses so they can be
         # commanded manually without running the FSM.
         self.full_control_position_names = self.position_names + [
-            'unfolded_fsm', 'folded_fsm', 'unfolded_front_fsm'
+            'unfolded_fsm', 'unfolded_fsm_xpol', 'folded_fsm'
         ]
         self.position_dropdown = QComboBox()
         self.position_dropdown.addItems(self.position_names)
@@ -789,6 +798,8 @@ class RobotControlUI(QMainWindow):
         self.btn_view_map.clicked.connect(self.toggle_view_map)
         self.btn_view_map.setToolTip("rtabmap-databaseViewer rtabmap.db")
         mapping_loc_layout.addWidget(self.btn_view_map)
+
+        self._build_localization_indicator(mapping_loc_layout)
  
         mapping_loc_layout.addStretch()
         base_boxes_layout.addWidget(mapping_loc_box)
@@ -1197,6 +1208,8 @@ class RobotControlUI(QMainWindow):
         self.btn_full_control_exploration.setToolTip("ros2 run navi_wall explore --ros-args --params-file config/explore_params.yaml")
         full_control_mapping_layout.addWidget(self.btn_full_control_exploration)
 
+        self._build_localization_indicator(full_control_mapping_layout)
+
         full_control_position_separator = QFrame()
         full_control_position_separator.setFrameShape(QFrame.HLine)
         full_control_position_separator.setFrameShadow(QFrame.Sunken)
@@ -1458,6 +1471,7 @@ class RobotControlUI(QMainWindow):
         tabs.addTab(full_control_tab, "Full Control")
         tabs.addTab(self._create_gpr_api_test_tab(), "Sensors")
         tabs.addTab(self._create_fsm_tab(), "FSM")
+        tabs.addTab(self._create_map_tab(), "Map")
 
         # Connect tab change signal to check joint states when Joint Control tab is activated
         tabs.currentChanged.connect(lambda index: self._on_tab_changed(index, tabs))
@@ -1466,6 +1480,14 @@ class RobotControlUI(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self._spin_ros)
         self.timer.start(100)  # 10 Hz
+
+        self.localization_timer = QTimer()
+        self.localization_timer.timeout.connect(self._refresh_localization_indicators)
+        self.localization_timer.start(500)  # 2 Hz
+
+        self.map_timer = QTimer()
+        self.map_timer.timeout.connect(self._refresh_map_tab)
+        self.map_timer.start(200)  # 5 Hz, no-op while the Map tab is hidden
         
         # Initial UI update for consistent visuals
         self._update_emergency_stop_button_ui()
@@ -3606,27 +3628,32 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         extension = request['download_extension']
         return os.path.join(download_dir, f'{safe_stem}_{timestamp}.{extension}')
 
-    def _describe_gpr_download(self, output_path):
-        """One line about a downloaded response: size, path and, for the raw
-        export zip, the files inside (the .sgy + .csv sidecar the processing
-        needs) -- never the bytes themselves."""
-        try:
-            size = os.path.getsize(output_path)
-        except OSError:
-            return f"saved response to {output_path}"
-        text = f"saved {size:,} bytes to {output_path}"
-        if output_path.lower().endswith('.zip'):
-            try:
-                import zipfile
-                with zipfile.ZipFile(output_path) as zf:
-                    members = [m for m in zf.infolist() if not m.is_dir()]
-                listing = ', '.join(
-                    f"{os.path.basename(m.filename)} ({m.file_size:,} B)" for m in members
-                )
-                text += f" — {len(members)} file(s): {listing}"
-            except zipfile.BadZipFile:
-                text += " — not a zip archive (check the app's response)"
-        return text
+    def _populate_gpr_request_combo(self, combo, requests):
+        """Populate a GPR request combobox with tooltip metadata."""
+        for request in requests:
+            combo.addItem(request['label'], request)
+            item_index = combo.count() - 1
+            combo.setItemData(item_index, request.get('tooltip', request['description']), Qt.ToolTipRole)
+
+        combo.currentIndexChanged.connect(lambda _, c=combo: self._update_gpr_combo_tooltip(c))
+        self._update_gpr_combo_tooltip(combo)
+
+    def _update_gpr_combo_tooltip(self, combo):
+        """Keep the combobox tooltip aligned with the selected request."""
+        request = combo.currentData()
+        combo.setToolTip(request.get('tooltip', request['description']) if request else "")
+
+    def _get_gpr_download_dir(self):
+        """Return the directory used for downloaded GPR API artifacts."""
+        return os.path.expanduser('~/Downloads/GP_API_Test')
+
+    def _build_gpr_download_path(self, request):
+        """Build a timestamped download path for file-based GPR API responses."""
+        download_dir = self._get_gpr_download_dir()
+        safe_stem = request['path'].strip('/').replace('/', '_') or 'gpr_download'
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        extension = request['download_extension']
+        return os.path.join(download_dir, f'{safe_stem}_{timestamp}.{extension}')
 
     def _extract_gpr_http_status(self, output_text):
         """Extract the curl write-out HTTP status code from buffered output."""
@@ -3731,11 +3758,6 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         process.setProperty('had_output', True)
         previous_output = process.property('gpr_output_buffer') or ''
         process.setProperty('gpr_output_buffer', previous_output + output)
-        # File downloads (exports): the body goes to --output, so stdout only
-        # carries the HTTP status write-out (or a curl error). Reported in one
-        # line by _on_gpr_request_finished instead of echoed raw here.
-        if process.property('gpr_output_path'):
-            return
         self._log_append(
             self.gpr_status_text,
             (
@@ -3768,8 +3790,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             elif output_path:
                 self._log_append(
                     self.gpr_status_text,
-                    f"<span style='color: #57ab5a;'>✓ HTTP {http_status}: "
-                    f"{html.escape(self._describe_gpr_download(output_path))}</span>",
+                    f"<span style='color: #57ab5a;'>✓ Saved response to {html.escape(output_path)}</span>",
                 )
             elif not bool(process.property('had_output')):
                 self._log_append(
@@ -4659,8 +4680,14 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             if pid:
                 try:
                     os.kill(pid, signal.SIGINT)
-                    # Longer wait for mapping to save rtabmap.db
-                    wait_ms = 5000 if 'mapping' in process_key else 3000
+                    # The controller manager deactivates the column first,
+                    # and its retract blocks ~5 s; only then does the base
+                    # disable the drives via PDO (~0.3 s more). Escalating
+                    # earlier kills it mid-shutdown, and the drives latch
+                    # error 50 until the next start. Mapping also needs the
+                    # time to save rtabmap.db. waitForFinished() returns as
+                    # soon as the launch exits.
+                    wait_ms = 10000
                     if 'mapping' in process_key:
                         self._log_append(status_text, "💾 Saving mapping database... (waiting for shutdown)")
                     process.waitForFinished(wait_ms)
@@ -4928,6 +4955,64 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             parent_layout.addLayout(row)
             indicators[key] = (icon, value)
         return indicators
+
+    # icon, colour, label per localization_monitor state
+    _LOCALIZATION_STYLES = {
+        localization_monitor.OFFLINE:       ("○", "#8b949e", "OFFLINE"),
+        localization_monitor.MAPPING:       ("●", "#539bf5", "MAPPING"),
+        localization_monitor.NO_ODOM:       ("●", "#f47067", "NO ODOMETRY"),
+        localization_monitor.ODOM_LOST:     ("⛔", "#f47067", "ODOMETRY LOST"),
+        localization_monitor.NOT_LOCALIZED: ("●", "#f47067", "NOT LOCALIZED"),
+        localization_monitor.UNCERTAIN:     ("●", "#d29922", "UNCERTAIN"),
+        localization_monitor.LOCALIZED:     ("●", "#2ea043", "LOCALIZED"),
+    }
+
+    def _build_localization_indicator(self, parent_layout):
+        """Add a Localization indicator row (same look as the status indicators).
+
+        In a QFormLayout the name goes in the form's label column, unstyled
+        like the other rows there.
+        """
+        in_form = isinstance(parent_layout, QFormLayout)
+        row = QHBoxLayout()
+        icon = QLabel("○")
+        icon.setStyleSheet("color: #8b949e; font-size: 16pt; font-weight: bold;")
+        icon.setFixedWidth(24)
+        icon.setAlignment(Qt.AlignCenter)
+        name = QLabel("Localization:")
+        if not in_form:
+            name.setStyleSheet("font-weight: bold;")
+        value = QLabel("—")
+        value.setStyleSheet("color: #8b949e;")
+        value.setWordWrap(True)
+        tooltip = (
+            "RTAB-Map localization health, from /rtabmap/localization_pose and /rtabmap/odom.\n"
+            f"Green: σ ≤ {localization_monitor.SIGMA_OK} m and a map correction within "
+            f"the last {localization_monitor.DRIFT_DISTANCE} m driven.\n"
+            "Amber: dead-reckoning on odometry for too long, or σ too large.\n"
+            "Red: never matched the map yet, or odometry lost/missing.\n"
+            "Blue: RTAB-Map is mapping, not localizing."
+        )
+        for widget in (icon, name, value):
+            widget.setToolTip(tooltip)
+        row.addWidget(icon)
+        if in_form:
+            row.addWidget(value, 1)
+            parent_layout.addRow(name, row)
+        else:
+            row.addWidget(name)
+            row.addWidget(value, 1)
+            parent_layout.addLayout(row)
+        self.localization_indicators.append((icon, value))
+
+    def _refresh_localization_indicators(self):
+        state, detail = self.localization_monitor.snapshot()
+        symbol, color, label = self._LOCALIZATION_STYLES[state]
+        for icon, value in self.localization_indicators:
+            icon.setText(symbol)
+            icon.setStyleSheet(f"color: {color}; font-size: 16pt; font-weight: bold;")
+            value.setText(f"{label} — {detail}")
+            value.setStyleSheet(f"color: {color};")
 
     def _update_status_indicator(self, command, response, status_text):
         """Update icon/value labels based on the dashboard response."""
@@ -5946,6 +6031,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
     def closeEvent(self, event):
         self.timer.stop()
+        self.localization_timer.stop()
+        self.map_timer.stop()
+        self.localization_monitor.stop()
 
         # Detach every QProcess from this window so Qt does NOT send SIGTERM
         # to the underlying OS processes when the window is destroyed.
@@ -6218,7 +6306,13 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         controls_row.addWidget(QLabel("Sim Mode:"))
         self.fsm_sim_combo = QComboBox()
-        self.fsm_sim_combo.addItems(["true", "false"])
+        # Real robot first, so a freshly opened UI does not start the FSM in
+        # simulation: with "true" listed first, four field attempts on
+        # 2026-09-18 brought up Gazebo instead of the robot and were read as
+        # random node crashes (point_cloud_aggregator, headless rviz). This is
+        # the only sim selector in the UI that defaulted to true; the arm
+        # panel's and fsm_node's own --sim both default to false.
+        self.fsm_sim_combo.addItems(["false", "true"])
         controls_row.addWidget(self.fsm_sim_combo)
 
         controls_row.addSpacing(16)
@@ -6239,6 +6333,44 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         ])
         controls_row.addWidget(self.fsm_state_combo)
 
+        # Whole-body control for the ScanWall sweep. "true" replaces the Nav2
+        # position goal + wall_parallel_controller during a segment sweep with a
+        # single base+arm control law (task_planner_fsm/wbc). Passed through as
+        # the ctx flag the state reads; the FSM itself gates it to simulation.
+        controls_row.addSpacing(16)
+        controls_row.addWidget(QLabel("WBC:"))
+        self.fsm_wbc_combo = QComboBox()
+        self.fsm_wbc_combo.addItems(["false", "true"])
+        self.fsm_wbc_combo.setToolTip(
+            "Whole-body (base + arm) sweep in ScanWall instead of the Nav2 sweep.\n"
+            "Simulation only: on the real robot force_mode cannot run alongside\n"
+            "the streaming velocity controller it needs."
+        )
+        controls_row.addWidget(self.fsm_wbc_combo)
+        # Recorded session for the offline SensorDataProcessing run. Only
+        # meaningful for that state; the FSM's own fallback ("latest") is the
+        # default, and a named session goes to fsm_node as the same parameter
+        # override the README documents (-p hyperspectral_session_dir / -p
+        # sensor_session_id), so the UI cannot drift from the terminal path.
+        controls_row.addSpacing(16)
+        self.fsm_session_label = QLabel("Session:")
+        controls_row.addWidget(self.fsm_session_label)
+        self.fsm_session_combo = QComboBox()
+        self.fsm_session_combo.setMinimumWidth(220)
+        self.fsm_session_combo.setToolTip(
+            "Recorded session under task_planner_fsm/data/raw to process\n"
+            "(SensorDataProcessing only). 'latest' lets fsm_node pick: the newest\n"
+            "hyperspectral session, else the GPR session with the newest manifest.")
+        controls_row.addWidget(self.fsm_session_combo)
+        self.btn_fsm_session_refresh = QPushButton("\u21bb")
+        self.btn_fsm_session_refresh.setFixedWidth(28)
+        self.btn_fsm_session_refresh.setToolTip("Rescan the recorded sessions")
+        self.btn_fsm_session_refresh.clicked.connect(self._refresh_fsm_sessions)
+        controls_row.addWidget(self.btn_fsm_session_refresh)
+        self.fsm_state_combo.currentTextChanged.connect(self._on_fsm_state_changed)
+        self._refresh_fsm_sessions()
+        self._on_fsm_state_changed(self.fsm_state_combo.currentText())
+
         controls_row.addSpacing(24)
         self.btn_fsm_start = QPushButton("Start FSM")
         self.btn_fsm_start.clicked.connect(self._toggle_fsm)
@@ -6247,6 +6379,79 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         controls_row.addStretch()
         fsm_tab_layout.addLayout(controls_row)
 
+        # ── Options row (GPR bridge) ──
+        options_row = QHBoxLayout()
+
+        # GPR in the sweep. Ticked leaves fsm_node's own default (probe on for
+        # the real robot, off in sim); unticked forces gpr_enabled:=false, e.g.
+        # to sweep with the camera alone. Forcing true is deliberately not
+        # offered: in sim ScanWall would try to reach the GP8800 and fail.
+        self.fsm_gpr_check = QCheckBox("GPR in sweep")
+        self.fsm_gpr_check.setChecked(True)
+        self.fsm_gpr_check.setToolTip(
+            "Drive the GPR probe during the wall sweeps.\n"
+            "Unticked: fsm_node -p gpr_enabled:=false (the trigger bridge is not\n"
+            "started either). The probe is never driven in sim.")
+        self.fsm_gpr_check.toggled.connect(self._on_fsm_gpr_toggled)
+        options_row.addWidget(self.fsm_gpr_check)
+        options_row.addSpacing(16)
+
+        # GPR trigger bridge (ESP32 fake encoder on Oliwall_2G). Off by default:
+        # it is only useful with the real probe on the robot, and a node with
+        # nothing to talk to is wasted Jetson time. Ticked, the box starts the
+        # bridge from task_planner.launch.py (gpr_trigger_bridge:=true, so it
+        # dies with the rest of the launch on Stop) and hands fsm_node
+        # gpr_trigger_bridge_required so a sweep refuses to start on a dead link.
+        # Unticked, the probe runs on its own wheel: gpr_trigger_publish:=false.
+        self.fsm_gpr_bridge_check = QCheckBox("GPR trigger bridge")
+        self.fsm_gpr_bridge_check.setToolTip(
+            "Start gpr_trigger_bridge (/gpr/trigger -> UDP -> ESP32) with the FSM\n"
+            "and require the board to answer before every wall sweep.\n"
+            "Unticked: the GPR runs on its own wheel and no triggers are sent\n"
+            "(plate travel and unseated stretches are still recorded).\n"
+            "Real robot only; leave off in sim and when the GPR is not mounted.")
+        self.fsm_gpr_bridge_check.toggled.connect(self._on_fsm_gpr_bridge_toggled)
+        options_row.addWidget(self.fsm_gpr_bridge_check)
+        # Pre-filled with task_planner.launch.py's gpr_receiver_ip default.
+        self.fsm_gpr_ip_input = QLineEdit("192.168.1.166")
+        self.fsm_gpr_ip_input.setPlaceholderText("ESP32 IP")
+        self.fsm_gpr_ip_input.setMaximumWidth(130)
+        self.fsm_gpr_ip_input.setToolTip("ESP32 address on Oliwall_2G (DHCP reservation).")
+        options_row.addWidget(self.fsm_gpr_ip_input)
+        self._on_fsm_gpr_toggled(self.fsm_gpr_check.isChecked())
+
+        # Hyperspectral camera: ScanWall samples it during every wall sweep and
+        # SensorDataProcessing classifies what it recorded. Off by default, like
+        # the FSM's own hyperspectral_enabled. The box does not start the camera:
+        # hyperspectral_node needs the operator for its calibration, so it is
+        # started and calibrated from the Sensors tab (or a terminal) first.
+        options_row.addSpacing(16)
+        self.fsm_hyperspectral_check = QCheckBox("Hyperspectral camera")
+        self.fsm_hyperspectral_check.setToolTip(
+            "Sample the hyperspectral camera during every wall sweep\n"
+            "(fsm_node -p hyperspectral_enabled:=true).\n"
+            "Start and calibrate hyperspectral_node in the Sensors tab first:\n"
+            "without a calibration the FSM skips the camera and the GPR carries on.")
+        options_row.addWidget(self.fsm_hyperspectral_check)
+        # Plate travel between two captures (hyperspectral_sample_spacing_m).
+        # The FSM's own default is 0.10 m; the UI asks for 0.5 m.
+        self.fsm_hyperspectral_spacing_input = QDoubleSpinBox()
+        self.fsm_hyperspectral_spacing_input.setRange(0.05, 5.0)
+        self.fsm_hyperspectral_spacing_input.setSingleStep(0.05)
+        self.fsm_hyperspectral_spacing_input.setDecimals(2)
+        self.fsm_hyperspectral_spacing_input.setSuffix(" m")
+        self.fsm_hyperspectral_spacing_input.setValue(0.5)
+        self.fsm_hyperspectral_spacing_input.setToolTip(
+            "Sensor-plate travel between two hyperspectral captures\n"
+            "(fsm_node -p hyperspectral_sample_spacing_m).")
+        options_row.addWidget(self.fsm_hyperspectral_spacing_input)
+        self.fsm_hyperspectral_check.toggled.connect(
+            self.fsm_hyperspectral_spacing_input.setEnabled)
+        self.fsm_hyperspectral_spacing_input.setEnabled(
+            self.fsm_hyperspectral_check.isChecked())
+
+        options_row.addStretch()
+        fsm_tab_layout.addLayout(options_row)
         # ── Restart row: new run from Error/Finished, robot stack kept up ──
         # (The FSM state it depends on is shown in the status panel below.)
         restart_row = QHBoxLayout()
@@ -6267,57 +6472,6 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         restart_row.addWidget(self.btn_fsm_restart)
         restart_row.addStretch()
         fsm_tab_layout.addLayout(restart_row)
-
-        # ── Options row (GPR bridge, recorded session) ──
-        options_row = QHBoxLayout()
-
-        # GPR trigger bridge (ESP32 fake encoder on Oliwall_2G). Off by default:
-        # it is only useful with the real probe on the robot, and a node with
-        # nothing to talk to is wasted Jetson time. Ticked, the box starts the
-        # bridge from task_planner.launch.py (gpr_trigger_bridge:=true, so it
-        # dies with the rest of the launch on Stop) and hands fsm_node
-        # gpr_trigger_bridge_required so a sweep refuses to start on a dead link.
-        self.fsm_gpr_bridge_check = QCheckBox("GPR trigger bridge")
-        self.fsm_gpr_bridge_check.setToolTip(
-            "Start gpr_trigger_bridge (/gpr/trigger -> UDP -> ESP32) with the FSM\n"
-            "and require the board to answer before every wall sweep.\n"
-            "Real robot only; leave off in sim and when the GPR is not mounted.")
-        self.fsm_gpr_bridge_check.toggled.connect(self._on_fsm_gpr_bridge_toggled)
-        options_row.addWidget(self.fsm_gpr_bridge_check)
-        self.fsm_gpr_ip_input = QLineEdit()
-        self.fsm_gpr_ip_input.setPlaceholderText("ESP32 IP")
-        self.fsm_gpr_ip_input.setMaximumWidth(130)
-        self.fsm_gpr_ip_input.setToolTip(
-            "ESP32 address on Oliwall_2G (DHCP reservation, see ESP32/README.md).")
-        options_row.addWidget(self.fsm_gpr_ip_input)
-        self._on_fsm_gpr_bridge_toggled(self.fsm_gpr_bridge_check.isChecked())
-
-        # Recorded session for the offline SensorDataProcessing run. Only
-        # meaningful for that state; the FSM's own fallback ("latest") is the
-        # default, and a named session goes to fsm_node as the same parameter
-        # override the README documents (-p hyperspectral_session_dir / -p
-        # sensor_session_id), so the UI cannot drift from the terminal path.
-        options_row.addSpacing(16)
-        self.fsm_session_label = QLabel("Session:")
-        options_row.addWidget(self.fsm_session_label)
-        self.fsm_session_combo = QComboBox()
-        self.fsm_session_combo.setMinimumWidth(220)
-        self.fsm_session_combo.setToolTip(
-            "Recorded session under task_planner_fsm/data/raw to process\n"
-            "(SensorDataProcessing only). 'latest' lets fsm_node pick: the newest\n"
-            "hyperspectral session, else the GPR session with the newest manifest.")
-        options_row.addWidget(self.fsm_session_combo)
-        self.btn_fsm_session_refresh = QPushButton("\u21bb")
-        self.btn_fsm_session_refresh.setFixedWidth(28)
-        self.btn_fsm_session_refresh.setToolTip("Rescan the recorded sessions")
-        self.btn_fsm_session_refresh.clicked.connect(self._refresh_fsm_sessions)
-        options_row.addWidget(self.btn_fsm_session_refresh)
-        self.fsm_state_combo.currentTextChanged.connect(self._on_fsm_state_changed)
-        self._refresh_fsm_sessions()
-        self._on_fsm_state_changed(self.fsm_state_combo.currentText())
-
-        options_row.addStretch()
-        fsm_tab_layout.addLayout(options_row)
 
         # ── Status header ──
         fsm_status_header = QHBoxLayout()
@@ -6410,6 +6564,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         form.addRow("Summary:", self.fsm_summary_label)
         form.addRow("Elapsed:", self.fsm_elapsed_label)
         form.addRow("Progress:", self.fsm_progress_label)
+        self._build_localization_indicator(form)
         layout.addWidget(status_group)
 
         graph_group = QGroupBox("FSM Graph")
@@ -6432,6 +6587,105 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         graph_layout.addWidget(self.fsm_graph_view, 1)
         layout.addWidget(graph_group, 1)
         return pane
+
+    def _create_map_tab(self):
+        """2D map with the robot, Nav2 path/goal and detected walls (RViz stand-in)."""
+        map_tab = QWidget()
+        layout = QVBoxLayout(map_tab)
+
+        toolbar = QHBoxLayout()
+        self.map_follow_check = QCheckBox("Follow robot")
+        self.map_follow_check.setChecked(True)
+        toolbar.addWidget(self.map_follow_check)
+        self.map_costmap_check = QCheckBox("Local costmap")
+        self.map_costmap_check.setChecked(True)
+        self.map_costmap_check.setToolTip(
+            "Nav2's /local_costmap/costmap (rolling window around the robot, ~2 Hz).\n"
+            "Subscribed only while shown and the Map tab is visible.")
+        toolbar.addWidget(self.map_costmap_check)
+        toolbar.addSpacing(16)
+        self.map_goal_button = QPushButton("2D Goal Pose")
+        self.map_goal_button.setCheckable(True)
+        self.map_goal_button.setToolTip(
+            "Click on the map for the goal position, drag for its heading (Esc to abort).\n"
+            "Publishes /goal_pose like RViz; it preempts any Nav2 goal in progress.")
+        toolbar.addWidget(self.map_goal_button)
+        self.map_goal_label = QLabel("")
+        toolbar.addWidget(self.map_goal_label)
+        toolbar.addStretch()
+
+        # Hint and summary in their own row, shrinkable: as minimum widths they
+        # widened the whole window when the tab was shown (and the summary
+        # changes on every refresh).
+        info_row = QHBoxLayout()
+        hint = QLabel("Mouse wheel to zoom, drag to pan, Shift+drag to rotate")
+        hint.setMinimumWidth(1)
+        info_row.addWidget(hint)
+        info_row.addStretch()
+        self.map_summary_label = QLabel("—")
+        self.map_summary_label.setStyleSheet("color: #8b949e;")
+        self.map_summary_label.setMinimumWidth(1)
+        info_row.addWidget(self.map_summary_label)
+
+        state_colors = {state: color for state, (_, color, _) in self._LOCALIZATION_STYLES.items()}
+        self.map_view = MapView(self.localization_monitor, state_colors)
+        self.map_view.setMinimumSize(400, 300)
+        self.map_follow_check.toggled.connect(
+            lambda checked: setattr(self.map_view, 'follow_robot', checked))
+        self.map_costmap_check.toggled.connect(self.map_view.set_costmap_visible)
+        self.map_goal_button.toggled.connect(self.map_view.set_goal_mode)
+        self.map_view.goal_selected.connect(self._publish_map_goal)
+        for text, action in (
+            ("-", lambda: self.map_view.zoom(1.0 / 1.15)),
+            ("Fit map", self._fit_map_view),
+            ("+", lambda: self.map_view.zoom(1.15)),
+        ):
+            button = QPushButton(text)
+            button.setMaximumWidth(80)
+            button.clicked.connect(action)
+            toolbar.addWidget(button)
+        layout.addLayout(toolbar)
+        layout.addLayout(info_row)
+
+        legend = QLabel(
+            "Robot arrow + σ circle in the Localization colour · "
+            "<span style='color:#1f6feb;'>━ Nav2 path, ▷ goal</span> · walls: "
+            "<span style='color:#2ea043;'>━ refined</span> "
+            "<span style='color:#d29922;'>━ unrefined</span> "
+            "<span style='color:#d63ad6;'>━ two-sided</span> · costmap: "
+            "<span style='color:#1f78ff;'>■</span>→<span style='color:#ff3300;'>■</span> cost "
+            "<span style='color:#00bcd4;'>■ inscribed</span> "
+            "<span style='color:#6f42c1;'>■ lethal</span>")
+        legend.setTextFormat(Qt.RichText)
+        legend.setWordWrap(True)
+        layout.addWidget(legend)
+        self._build_localization_indicator(layout)
+        layout.addWidget(self.map_view, 1)
+        return map_tab
+
+    def _fit_map_view(self):
+        # Fitting shows the whole map, so stop re-centring on the robot.
+        self.map_follow_check.setChecked(False)
+        self.map_view.fit()
+
+    def _publish_map_goal(self, x, y, yaw):
+        msg = PoseStamped()
+        msg.header.frame_id = 'map'
+        msg.header.stamp = self.node.get_clock().now().to_msg()
+        msg.pose.position.x = x
+        msg.pose.position.y = y
+        msg.pose.orientation.z = math.sin(yaw / 2.0)
+        msg.pose.orientation.w = math.cos(yaw / 2.0)
+        self.nav_goal_publisher.publish(msg)
+        self.map_goal_button.setChecked(False)  # one goal per click, as in RViz
+        self.map_goal_label.setText(
+            f"sent ({x:.2f}, {y:.2f}) m, {math.degrees(yaw):.0f}°")
+
+    def _refresh_map_tab(self):
+        if not self.map_view.isVisible():
+            return
+        state, _ = self.localization_monitor.snapshot()
+        self.map_summary_label.setText(self.map_view.refresh(state))
 
     # States fsm_node accepts on /fsm/restart (its RESTART_TARGET_STATES).
     FSM_RESTART_TARGETS = [
@@ -6568,9 +6822,6 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         for w in (self.fsm_session_label, self.fsm_session_combo, self.btn_fsm_session_refresh):
             w.setEnabled(offline)
 
-    def _on_fsm_gpr_bridge_toggled(self, checked):
-        self.fsm_gpr_ip_input.setEnabled(bool(checked))
-
     def _refresh_fsm_sessions(self):
         """Fill the session combo from task_planner_fsm's data/raw folders.
 
@@ -6602,17 +6853,32 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         combo.blockSignals(False)
 
     def _fsm_session_override(self, state):
-        """``['-p', 'key:=value']`` for the chosen session, or []."""
+        """``['--ros-args', '-p', 'key:=value']`` for the chosen session, or []."""
         if state != "SensorDataProcessing":
             return []
         data = self.fsm_session_combo.currentData()
         if not data:
             return []
         key, value = data
-        return ['-p', f'{key}:={value}']
+        return ['--ros-args', '-p', f'{key}:={value}']
+
+    def _on_fsm_gpr_toggled(self, checked):
+        # No GPR, no bridge: grey the bridge box out rather than untick it, so
+        # the operator's choice comes back with the GPR.
+        self.fsm_gpr_bridge_check.setEnabled(bool(checked))
+        self._on_fsm_gpr_bridge_toggled(self.fsm_gpr_bridge_check.isChecked())
+
+    def _on_fsm_gpr_bridge_toggled(self, checked):
+        self.fsm_gpr_ip_input.setEnabled(bool(checked) and self.fsm_gpr_check.isChecked())
+
+    def _fsm_gpr_override(self):
+        """``['-p', ...]`` keeping the GPR out of the sweep when unticked."""
+        if self.fsm_gpr_check.isChecked():
+            return []
+        return ['-p', 'gpr_enabled:=false']
 
     def _fsm_gpr_bridge_enabled(self):
-        return self.fsm_gpr_bridge_check.isChecked()
+        return self.fsm_gpr_check.isChecked() and self.fsm_gpr_bridge_check.isChecked()
 
     def _fsm_gpr_bridge_launch_args(self):
         """Launch arguments that start the bridge from task_planner.launch.py."""
@@ -6621,16 +6887,21 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         ip = self.fsm_gpr_ip_input.text().strip()
         return ['gpr_trigger_bridge:=true', f'gpr_receiver_ip:={ip}']
 
-    def _fsm_gpr_bridge_override(self):
-        """``['-p', ...]`` making fsm_node refuse a sweep on a dead link."""
-        if not self._fsm_gpr_bridge_enabled():
+    def _fsm_hyperspectral_override(self):
+        """``['-p', ...]`` making ScanWall sample the camera during the sweeps."""
+        if not self.fsm_hyperspectral_check.isChecked():
             return []
-        return ['-p', 'gpr_trigger_bridge_required:=true']
+        spacing = self.fsm_hyperspectral_spacing_input.value()
+        return ['-p', 'hyperspectral_enabled:=true',
+                '-p', f'hyperspectral_sample_spacing_m:={spacing:g}']
 
-    def _fsm_ros_args(self, *overrides):
-        """Join ``['-p', ...]`` lists under a single ``--ros-args``, or []."""
-        flat = [a for group in overrides for a in group]
-        return ['--ros-args'] + flat if flat else []
+    def _fsm_gpr_bridge_override(self):
+        """``['-p', ...]``: with the bridge, make fsm_node refuse a sweep on a
+        dead link; without it the probe runs on its own wheel, so no triggers
+        (plate travel and unseated stretches are still recorded)."""
+        if not self._fsm_gpr_bridge_enabled():
+            return ['-p', 'gpr_trigger_publish:=false']
+        return ['-p', 'gpr_trigger_bridge_required:=true']
 
     def _toggle_fsm(self):
         """Start or stop the FSM launch + node pair."""
@@ -6643,6 +6914,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         sim = self.fsm_sim_combo.currentText()
         planner = self.fsm_planner_combo.currentText()
         state = self.fsm_state_combo.currentText()
+        wbc = self.fsm_wbc_combo.currentText()
 
         # The bridge exits at once without a receiver_ip; better to say so
         # here than to have the sweep fail later on "no bridge status".
@@ -6653,6 +6925,16 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 "GPR trigger bridge is ticked but the ESP32 IP is empty; fill it in or untick the box.",
             )
             return
+
+        # Not a refusal: the camera may be running from a terminal.
+        if self.fsm_hyperspectral_check.isChecked() and 'hyperspectral_camera' not in self.process_map:
+            self._fsm_append_log(
+                "<span style='color: #e0b44c;'>Hyperspectral camera is ticked but "
+                "hyperspectral_node is not running from the Sensors tab; start and "
+                "calibrate it there before the first sweep.</span>",
+                "Hyperspectral camera is ticked but hyperspectral_node is not running from the "
+                "Sensors tab; start and calibrate it there before the first sweep.",
+            )
 
         self.btn_fsm_start.setText("Stop FSM")
         self.btn_fsm_start.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
@@ -6682,10 +6964,16 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             '--sim', sim,
             '--planner-backend', planner,
             '--initial-state', state,
-        ] + self._fsm_ros_args(
-            self._fsm_session_override(state),
-            self._fsm_gpr_bridge_override(),
-        )
+
+            # sweep_use_wbc is not an fsm_node CLI flag: the node bridges every
+            # ROS parameter into its ctx, which is how the per-state knobs are
+            # configured. Hence --ros-args rather than another '--' option, and
+            # it must stay last so nothing follows it into ROS's arg parser.
+            '--ros-args', '-p', f'sweep_use_wbc:={wbc}',
+            *self._fsm_gpr_override(),
+            *self._fsm_gpr_bridge_override(),
+            *self._fsm_hyperspectral_override(),
+        ] + self._fsm_session_override(state)
         QTimer.singleShot(3000, lambda: self._start_fsm_node(node_args))
 
     def _start_fsm_node(self, node_args):
