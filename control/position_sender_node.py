@@ -180,6 +180,15 @@ class PositionSenderNode(Node):
                 'joints': (),
                 'pose': (0.52306, -0.50613, 0.51959, 0.64783, 0.24320, 0.28587, 0.66290)
             },
+            # unfolded_front_fsm with the plate rolled -90 deg about its own Z,
+            # for the base-placement scan's cross-polarized GPR pass: the same
+            # roll, sign and reasoning as unfolded_fsm_xpol (GPR above the plate
+            # centre), only from the wall-facing pose. Pose-only like its parent:
+            # position unchanged, quaternion = unfolded_front_fsm's * Rz(-pi/2).
+            'unfolded_front_fsm_xpol': {
+                'joints': (),
+                'pose': (0.52306, -0.50613, 0.51959, 0.2861, 0.6301, -0.2666, 0.6709)
+            },
             # 'folded_fsm': {
             #     'joints': (),
             #     'pose': (-0.36937, 0.38604, 0.00443, 0.6934, 0.6887, 0.1682, -0.1285)  # Raised Z from 0.401 to 0.550
