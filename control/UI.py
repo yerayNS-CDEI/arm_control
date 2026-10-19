@@ -3655,6 +3655,28 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         extension = request['download_extension']
         return os.path.join(download_dir, f'{safe_stem}_{timestamp}.{extension}')
 
+    def _describe_gpr_download(self, output_path):
+        """One line about a downloaded response: size, path and, for the raw
+        export zip, the files inside (the .sgy + .csv sidecar the processing
+        needs) -- never the bytes themselves."""
+        try:
+            size = os.path.getsize(output_path)
+        except OSError:
+            return f"saved response to {output_path}"
+        text = f"saved {size:,} bytes to {output_path}"
+        if output_path.lower().endswith('.zip'):
+            try:
+                import zipfile
+                with zipfile.ZipFile(output_path) as zf:
+                    members = [m for m in zf.infolist() if not m.is_dir()]
+                listing = ', '.join(
+                    f"{os.path.basename(m.filename)} ({m.file_size:,} B)" for m in members
+                )
+                text += f" — {len(members)} file(s): {listing}"
+            except zipfile.BadZipFile:
+                text += " — not a zip archive (check the app's response)"
+        return text
+
     def _extract_gpr_http_status(self, output_text):
         """Extract the curl write-out HTTP status code from buffered output."""
         match = re.search(r'HTTP_STATUS:(\d{3})', output_text or '')
@@ -3758,6 +3780,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         process.setProperty('had_output', True)
         previous_output = process.property('gpr_output_buffer') or ''
         process.setProperty('gpr_output_buffer', previous_output + output)
+        if process.property('gpr_output_path'):
+            return
         self._log_append(
             self.gpr_status_text,
             (
@@ -3790,7 +3814,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             elif output_path:
                 self._log_append(
                     self.gpr_status_text,
-                    f"<span style='color: #57ab5a;'>✓ Saved response to {html.escape(output_path)}</span>",
+                    f"<span style='color: #57ab5a;'>✓ HTTP {http_status}: "
+                    f"{html.escape(self._describe_gpr_download(output_path))}</span>",
                 )
             elif not bool(process.property('had_output')):
                 self._log_append(
