@@ -288,7 +288,7 @@ def generate_launch_description():
     )
     enable_octomap_arg = DeclareLaunchArgument(
         'enable_octomap',
-        default_value='false',
+        default_value='true',
         description='Enable LiDAR pointcloud OctoMap integration for the selected planner backend.',
     )
     octomap_point_cloud_topic_arg = DeclareLaunchArgument(
