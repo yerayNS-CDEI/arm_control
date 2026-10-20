@@ -396,9 +396,13 @@ class RobotControlUI(QMainWindow):
 
         # Jetson/PC2 split. The launcher's service clients are created on first
         # use; _pc2_keys maps a manual launch (process_map key) to the key its
-        # perception half runs under on PC2.
+        # perception half runs under on PC2. _pc2_only holds the launches that
+        # run wholly on PC2 (Nav2, Exploration), which have no process_map
+        # entry: process key -> (PC2 key, button, name).
         self._pc2_clients = {}
         self._pc2_keys = {}
+        self._pc2_only = {}
+        self._pc2_status_pending = set()
         self.pc2_output_subscriber = self.node.create_subscription(
             String, f'{PC2_LAUNCHER}/output', self._on_pc2_output,
             QoSProfile(depth=200, reliability=ReliabilityPolicy.RELIABLE))
@@ -819,7 +823,8 @@ class RobotControlUI(QMainWindow):
             "there; this computer runs the control half. In sim the camera images\n"
             "stay off (cameras:=false) so they do not flood the network.\n"
             "The robot launch button then runs stack:=control: the lidars and\n"
-            "cameras are wired to PC2, so their drivers and the cloud merger run there.")
+            "cameras are wired to PC2, so their drivers and the cloud merger run there.\n"
+            "Nav2 and Exploration run wholly on PC2.")
         # On the robot the lidars and cameras are wired to PC2, not this computer.
         self.base_pc2_check.setChecked(True)
         mapping_loc_layout.addWidget(self.base_pc2_check)
@@ -1235,7 +1240,8 @@ class RobotControlUI(QMainWindow):
             "there; this computer runs the control half. In sim the camera images\n"
             "stay off (cameras:=false) so they do not flood the network.\n"
             "The robot launch button then runs stack:=control: the lidars and\n"
-            "cameras are wired to PC2, so their drivers and the cloud merger run there.")
+            "cameras are wired to PC2, so their drivers and the cloud merger run there.\n"
+            "Nav2 and Exploration run wholly on PC2.")
         self.full_control_pc2_check.setChecked(True)
         full_control_mapping_layout.addWidget(self.full_control_pc2_check)
 
@@ -1521,6 +1527,11 @@ class RobotControlUI(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self._spin_ros)
         self.timer.start(100)  # 10 Hz
+
+        # Notices a launch running wholly on PC2 that exited by itself.
+        self.pc2_only_timer = QTimer()
+        self.pc2_only_timer.timeout.connect(self._poll_pc2_only)
+        self.pc2_only_timer.start(2000)
 
         self.localization_timer = QTimer()
         self.localization_timer.timeout.connect(self._refresh_localization_indicators)
@@ -1861,7 +1872,8 @@ class RobotControlUI(QMainWindow):
     def _update_tab_states_for_base(self):
         """Update tab states based on base control processes"""
         # Any base (non-full) process running?
-        base_running = any(self._is_base_tab_state_process(key) for key in self.process_map)
+        base_running = any(self._is_base_tab_state_process(key)
+                           for key in [*self.process_map, *self._pc2_only])
 
         if base_running:
             # Disable Arm and Full Control tabs (Base stays enabled, Joint stays enabled)
@@ -1875,7 +1887,7 @@ class RobotControlUI(QMainWindow):
     def _update_tab_states_for_full_control(self):
         """Update tab states based on full control processes"""
         full_running = any(
-            key in self.process_map
+            key in self.process_map or key in self._pc2_only
             for key in [
                 'full_mobile_manipulator',
                 'full_mapping',
@@ -4189,10 +4201,13 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         controller_type = controller_type_combo.currentText()
         process_key = f'{mode}_nav2' if mode != 'base' else 'nav2'
         display_name = 'Nav2'
-        
-        self._toggle_base_process(process_key, button, display_name,
-                                'ros2', ['launch', 'navi_wall', 'navigation_launch.py',
-                                        f'use_sim_time:={sim_mode}', f'controller_type:={controller_type}'])
+        args = ['launch', 'navi_wall', 'navigation_launch.py',
+                f'use_sim_time:={sim_mode}', f'controller_type:={controller_type}']
+
+        if self._pc2_only_requested(process_key):
+            self._toggle_pc2_only_process(process_key, button, display_name, ['ros2', *args])
+        else:
+            self._toggle_base_process(process_key, button, display_name, 'ros2', args)
         if mode == 'full':
             self._update_tab_states_for_full_control()
         else:
@@ -4202,6 +4217,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         """Toggle exploration with configurable mode parameter"""
         if button is None:
             button = self.btn_launch_exploration
+        if sim_combo is None:
+            sim_combo = self.sim_mode_combo
         
         # Get package path for explore_params.yaml
         try:
@@ -4212,10 +4229,18 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         
         process_key = f'{mode}_exploration' if mode != 'base' else 'exploration'
         display_name = 'Exploration'
-        
-        self._toggle_base_process(process_key, button, display_name,
-                                'ros2', ['run', 'navi_wall', 'explore',
-                                        '--ros-args', '--params-file', params_file])
+
+        if self._pc2_only_requested(process_key):
+            # PC2's launcher only runs ros2 launch: the FSM's exploration
+            # launch, explore plus find_frontiers, ending when explore does.
+            self._toggle_pc2_only_process(
+                process_key, button, display_name,
+                ['ros2', 'launch', 'navi_wall', 'exploration.launch.py',
+                 f'use_sim_time:={sim_combo.currentText()}'])
+        else:
+            self._toggle_base_process(process_key, button, display_name,
+                                    'ros2', ['run', 'navi_wall', 'explore',
+                                            '--ros-args', '--params-file', params_file])
         if mode == 'full':
             self._update_tab_states_for_full_control()
         else:
@@ -4874,7 +4899,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
     # through task_planner_fsm's process_launcher, with stack:=perception
     # (lidars, cameras, rtabmap, Nav2). Stopping saves rtabmap on PC2, stops
     # PC2's half, then this computer's half: the order the FSM uses, so Nav2
-    # stops commanding the base before the base goes down.
+    # stops commanding the base before the base goes down. Nav2 and
+    # Exploration have no control half and run wholly on PC2.
 
     def _on_pc2_output(self, msg):
         """A console line from a launch that process_launcher runs on PC2."""
@@ -4882,7 +4908,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         if not sep or not line.strip():
             return
         html_line = "<span style='color:#986ee2;'>[PC2]</span> " + self._ansi_to_html(line)
-        for process_key, remote_key in self._pc2_keys.items():
+        remote_keys = {**self._pc2_keys,
+                       **{k: v[0] for k, v in self._pc2_only.items()}}
+        for process_key, remote_key in remote_keys.items():
             if remote_key == key:
                 widget = (self.full_control_status_text if process_key.startswith('full')
                           else self.base_status_text)
@@ -4891,15 +4919,19 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         # Anything else was started by the FSM.
         self._fsm_append_log(html_line, f"[PC2] {line}")
 
+    def _pc2_client(self, name, srv_type):
+        client = self._pc2_clients.get(name)
+        if client is None:
+            client = self.node.create_client(srv_type, f'{PC2_LAUNCHER}/{name}')
+            self._pc2_clients[name] = client
+        return client
+
     def _pc2_call(self, name, srv_type, request, timeout):
         """Call a process_launcher service on PC2 without freezing the UI.
 
         Returns the response, or None when the launcher did not answer.
         """
-        client = self._pc2_clients.get(name)
-        if client is None:
-            client = self.node.create_client(srv_type, f'{PC2_LAUNCHER}/{name}')
-            self._pc2_clients[name] = client
+        client = self._pc2_client(name, srv_type)
         if not client.wait_for_service(timeout_sec=3.0):
             return None
         future = client.call_async(request)
@@ -4916,6 +4948,82 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
     def _pc2_split_requested(self, process_key):
         box = self.full_control_pc2_check if process_key.startswith('full') else self.base_pc2_check
         return box.isChecked()
+
+    def _pc2_only_requested(self, process_key):
+        """Whether Nav2/Exploration's next toggle goes to PC2: stopping goes
+        wherever the launch runs, starting follows the tab's box."""
+        if process_key in self.process_map:
+            return False
+        return process_key in self._pc2_only or self._pc2_split_requested(process_key)
+
+    def _toggle_pc2_only_process(self, process_key, button, name, cmd):
+        """Start or stop a launch that runs wholly on PC2 (Nav2, Exploration)."""
+        status_text = self.full_control_status_text if process_key.startswith('full') else self.base_status_text
+        entry = self._pc2_only.pop(process_key, None)
+        if entry is not None:
+            self._pc2_stop(entry[0], status_text, save_rtabmap=False, button=button)
+            button.setText(self._get_base_process_start_text(process_key, name))
+            button.setStyleSheet("")
+            self._log_append(status_text, f"⏹ Stopped {name}")
+            return
+
+        from navi_wall.srv import StartLaunch
+        remote_key = f'ui_{process_key}'
+        self._log_append(status_text, f"<b style='color:#986ee2;'>▶ [PC2] {html.escape(' '.join(cmd))}</b>")
+        button.setEnabled(False)
+        try:
+            res = self._pc2_call('start', StartLaunch,
+                                 StartLaunch.Request(key=remote_key, cmd=cmd), 15.0)
+        finally:
+            button.setEnabled(True)
+        if res is None or not res.success:
+            reason = res.message if res is not None else (
+                f"no answer from {PC2_LAUNCHER}; is process_launcher running on PC2?")
+            self._log_append(status_text, f"<span style='color:#f47067;'>✗ PC2 did not start: "
+                                          f"{html.escape(reason)}</span>")
+            return
+        self._pc2_only[process_key] = (remote_key, button, name)
+        button.setText(self._get_base_process_stop_text(process_key, name))
+        button.setStyleSheet("background-color:#4CAF50; color:white; font-weight:bold;")
+
+    def _poll_pc2_only(self):
+        """Ask PC2 whether its Nav2/Exploration launches still run: exploration
+        ends by itself once no frontiers are left."""
+        if not self._pc2_only:
+            return
+        from navi_wall.srv import LaunchStatus
+        client = self._pc2_client('status', LaunchStatus)
+        if not client.service_is_ready():
+            return
+        for process_key, (remote_key, _, _) in list(self._pc2_only.items()):
+            if remote_key in self._pc2_status_pending:
+                continue
+            self._pc2_status_pending.add(remote_key)
+            future = client.call_async(LaunchStatus.Request(key=remote_key))
+            future.add_done_callback(
+                lambda f, pk=process_key, rk=remote_key: self._on_pc2_only_status(pk, rk, f))
+
+    def _on_pc2_only_status(self, process_key, remote_key, future):
+        self._pc2_status_pending.discard(remote_key)
+        entry = self._pc2_only.get(process_key)
+        if entry is None or entry[0] != remote_key:
+            return  # stopped from the UI meanwhile
+        try:
+            res = future.result()
+        except Exception:
+            return
+        if res is None or (res.known and res.running):
+            return
+        _, button, name = self._pc2_only.pop(process_key)
+        button.setText(self._get_base_process_start_text(process_key, name))
+        button.setStyleSheet("")
+        status_text = self.full_control_status_text if process_key.startswith('full') else self.base_status_text
+        code = f" (exit code {res.return_code})" if res.known else ""
+        self._log_append(status_text, f"<span style='color:#986ee2;'>[PC2]</span> {name} exited{code}")
+        if process_key.startswith('full'):
+            self._update_tab_states_for_full_control()
+        else:
+            self._update_tab_states_for_base()
 
     def _toggle_stack_process(self, process_key, button, name, args, sim_mode):
         """_toggle_base_process for Mapping/Localization, split across PC2 when asked."""
@@ -6276,6 +6384,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
  
     def closeEvent(self, event):
         self.timer.stop()
+        self.pc2_only_timer.stop()
         self.localization_timer.stop()
         self.map_timer.stop()
         self.localization_monitor.stop()
