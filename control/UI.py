@@ -5175,6 +5175,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
     # icon, colour, label per localization_monitor state
     _LOCALIZATION_STYLES = {
         localization_monitor.OFFLINE:       ("○", "#8b949e", "OFFLINE"),
+        localization_monitor.CHECKING_MODE: ("○", "#8b949e", "CHECKING MODE"),
         localization_monitor.MAPPING:       ("●", "#539bf5", "MAPPING"),
         localization_monitor.NO_ODOM:       ("●", "#f47067", "NO ODOMETRY"),
         localization_monitor.ODOM_LOST:     ("⛔", "#f47067", "ODOMETRY LOST"),
