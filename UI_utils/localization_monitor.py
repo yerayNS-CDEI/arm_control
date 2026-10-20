@@ -48,9 +48,11 @@ MAX_ODOM_STEP = 1.0         # (m) larger odometry jumps are resets, not motion
 ODOM_BUFFER_SIZE = 100      # odometry poses kept to match localization_pose stamps
 GRAPH_POLL_PERIOD = 1.0     # (s) rtabmap node presence check
 MODE_POLL_PERIOD = 5.0      # (s) mapping/localization mode can change at runtime
+MODE_REPLY_TIMEOUT = 3.0    # (s) a mode request without a reply is dropped and asked again
 
 # States returned by snapshot(), worst first after 'offline'.
 OFFLINE = 'offline'
+CHECKING_MODE = 'checking_mode'
 MAPPING = 'mapping'
 NO_ODOM = 'no_odom'
 ODOM_LOST = 'odom_lost'
@@ -83,6 +85,7 @@ class LocalizationMonitor:
 
     def __init__(self, node_name='robot_control_ui_localization'):
         self._lock = threading.Lock()
+        self._mode_future = None
         self._reset_rtabmap_state()
         self._rtabmap_present = False
         self._last_odom_time = None
@@ -92,7 +95,6 @@ class LocalizationMonitor:
         self._odom_pose = None      # latest (x, y, yaw) in the odom frame
         self._odom_buffer = deque(maxlen=ODOM_BUFFER_SIZE)  # (stamp_ns, pose)
         self._last_mode_poll = 0.0
-        self._mode_future = None
 
         self.node = rclpy.create_node(node_name)
         self.node.create_subscription(
@@ -188,12 +190,21 @@ class LocalizationMonitor:
             name == RTABMAP_NODE and ns == RTABMAP_NAMESPACE
             for name, ns in self.node.get_node_names_and_namespaces())
         with self._lock:
-            if not present and self._rtabmap_present:
+            gone = not present and self._rtabmap_present
+            if gone:
                 self._reset_rtabmap_state()
             self._rtabmap_present = present
-        if not present or self._mode_future is not None:
+        if gone:
+            # Its reply will never come; ask the next instance right away.
+            self._drop_mode_request()
+            self._last_mode_poll = 0.0
+        if not present:
             return
         now = time.monotonic()
+        if self._mode_future is not None:
+            if now - self._last_mode_poll < MODE_REPLY_TIMEOUT:
+                return
+            self._drop_mode_request()  # lost on the way, or rtabmap restarted between polls
         if now - self._last_mode_poll < MODE_POLL_PERIOD or not self._param_client.service_is_ready():
             return
         self._last_mode_poll = now
@@ -201,7 +212,19 @@ class LocalizationMonitor:
             GetParameters.Request(names=['Mem/IncrementalMemory']))
         self._mode_future.add_done_callback(self._on_mode)
 
+    def _drop_mode_request(self):
+        """Abandon the pending mode request. Never call with the lock held:
+        cancel() runs _on_mode inline, which returns at once only because the
+        future is no longer self._mode_future."""
+        future, self._mode_future = self._mode_future, None
+        if future is None:
+            return
+        self._param_client.remove_pending_request(future)
+        future.cancel()
+
     def _on_mode(self, future):
+        if future is not self._mode_future:
+            return  # abandoned request: a late reply must not overwrite the mode
         self._mode_future = None
         try:
             value = future.result().values[0]
@@ -236,6 +259,10 @@ class LocalizationMonitor:
         with self._lock:
             if not self._rtabmap_present:
                 return OFFLINE, 'RTAB-Map not running'
+            if self._mode is None:
+                # localization_pose is published in mapping mode too, so the
+                # checks below would read LOCALIZED before the mode is known.
+                return CHECKING_MODE, 'asking RTAB-Map whether it is mapping or localizing'
             if self._mode == 'mapping':
                 return MAPPING, 'building the map (SLAM)'
             if self._last_odom_time is None or now - self._last_odom_time > ODOM_TIMEOUT:
