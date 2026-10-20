@@ -11,6 +11,8 @@ other topics are subscribed only while the view is visible: rtabmap only
 assembles /map while it has a subscriber, and in mapping mode it republishes
 it on every update. Subscriptions are created and destroyed on the monitor's
 executor thread (through a guard condition) so they never race its spin.
+The grid is dropped when rtabmap stops: its latched /map would otherwise stay
+drawn with nothing left to replace it.
 
 In goal mode a press-drag-release on the map picks a pose like RViz's
 "2D Goal Pose" tool (press = position, drag = heading) and emits
@@ -41,6 +43,8 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from geometry_msgs.msg import PolygonStamped
 from nav_msgs.msg import OccupancyGrid, Path
+
+from .localization_monitor import OFFLINE
 
 try:
     # navi_wall depends on arm_control, so this cannot be a package dependency;
@@ -125,6 +129,8 @@ class MapOverlays:
         self.costmap = None         # latest local costmap OccupancyGrid
         self.costmap_version = 0
         self.footprint = None       # (frame_id, [(x, y)], monotonic receive time)
+        self._map_enabled = True
+        self._map_subscription = None
         self._costmap_enabled = True
         self._costmap_subscription = None
         self._guard = node.create_guard_condition(self._sync_subscriptions)
@@ -133,6 +139,19 @@ class MapOverlays:
         """Subscribe (True) or unsubscribe (False); safe from the UI thread."""
         self._active = active
         self._trigger_sync()
+
+    def set_map_enabled(self, enabled):
+        """Subscribe to /map only while it is shown; safe from the UI thread."""
+        self._map_enabled = enabled
+        if enabled:
+            self.clear_map()    # the latched map comes again with the new subscription
+        self._trigger_sync()
+
+    def clear_map(self):
+        """Forget the grid (rtabmap left, or the map is shown again); safe from any thread."""
+        with self._lock:
+            self.grid = None
+            self.grid_version += 1
 
     def set_costmap_enabled(self, enabled):
         """Subscribe to the local costmap only while it is shown; safe from the UI thread."""
@@ -152,7 +171,6 @@ class MapOverlays:
     def _sync_subscriptions(self):
         if self._active and not self._subscriptions:
             self._subscriptions = [
-                self._node.create_subscription(OccupancyGrid, MAP_TOPIC, self._on_map, _LATCHED),
                 self._node.create_subscription(Path, PLAN_TOPIC, self._on_plan, QoSProfile(depth=1)),
                 self._node.create_subscription(
                     GoalStatusArray, NAV_STATUS_TOPIC, self._on_nav_status, _LATCHED),
@@ -166,6 +184,13 @@ class MapOverlays:
             for subscription in self._subscriptions:
                 self._node.destroy_subscription(subscription)
             self._subscriptions = []
+        want_map = self._active and self._map_enabled
+        if want_map and self._map_subscription is None:
+            self._map_subscription = self._node.create_subscription(
+                OccupancyGrid, MAP_TOPIC, self._on_map, _LATCHED)
+        elif not want_map and self._map_subscription is not None:
+            self._node.destroy_subscription(self._map_subscription)
+            self._map_subscription = None
         want_costmap = self._active and self._costmap_enabled
         if want_costmap and self._costmap_subscription is None:
             self._costmap_subscription = self._node.create_subscription(
@@ -251,10 +276,13 @@ class MapView(QGraphicsView):
         self._walls_version = 0
         self._fitted = False
         self._fit_grid = None       # (cells, resolution, origin x, origin y) for fit()
+        self._last_state = None     # localization state at the previous refresh()
 
+        self.show_map = True
         self._map_item = self._scene.addPixmap(QPixmap())
         self._map_item.setTransformationMode(Qt.FastTransformation)  # crisp cells
         self._map_item.setZValue(0)
+        self.show_walls = True
         self._wall_items = []
 
         self.show_costmap = True
@@ -491,6 +519,25 @@ class MapView(QGraphicsView):
         ys = np.concatenate([y0, y0, y0 + size, y0 + size])
         return np.column_stack([xs, -ys])      # map frame -> scene (y down)
 
+    # ── occupancy grid and walls ──
+
+    def set_map_visible(self, visible):
+        self.show_map = visible
+        self.overlays.set_map_enabled(visible)
+        self._map_item.setVisible(visible)
+
+    def set_walls_visible(self, visible):
+        self.show_walls = visible
+        for item in self._wall_items:
+            item.setVisible(visible)
+
+    def _clear_map(self):
+        """Drop the drawn grid: its rtabmap is gone and no update will replace it."""
+        self.overlays.clear_map()
+        self._map_item.setPixmap(QPixmap())
+        self._fit_grid = None
+        self._fitted = False    # fit the next session's map when it arrives
+
     # ── local costmap ──
 
     def set_costmap_visible(self, visible):
@@ -510,6 +557,11 @@ class MapView(QGraphicsView):
 
     def refresh(self, state):
         """Redraw from the latest data; returns a one-line summary for a status label."""
+        # Only on the change to offline: rtabmap can publish its latched /map a
+        # moment before the monitor sees it running, and that map must stay.
+        if state == OFFLINE and self._last_state not in (None, OFFLINE):
+            self._clear_map()
+        self._last_state = state
         data = self.overlays.snapshot()
         self._update_grid(data['grid'], data['grid_version'])
         self._update_walls(data['walls'], data['walls_version'])
@@ -527,7 +579,9 @@ class MapView(QGraphicsView):
 
         grid = data['grid']
         parts = []
-        if grid is None:
+        if not self.show_map:
+            parts.append('map hidden')
+        elif grid is None:
             parts.append(f'waiting for {MAP_TOPIC}')
         else:
             info = grid.info
@@ -635,6 +689,8 @@ class MapView(QGraphicsView):
             label.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
             label.setPos(_scene((sx + ex) / 2.0, (sy + ey) / 2.0))
             label.setZValue(1)
+            for item in (line, label):
+                item.setVisible(self.show_walls)
             self._wall_items += [line, label]
 
     def _update_robot(self, state):

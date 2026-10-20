@@ -6971,6 +6971,16 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.map_follow_check = QCheckBox("Follow robot")
         self.map_follow_check.setChecked(True)
         options.addWidget(self.map_follow_check)
+        self.map_grid_check = QCheckBox("2D map")
+        self.map_grid_check.setChecked(True)
+        self.map_grid_check.setToolTip(
+            "RTAB-Map's /map occupancy grid. Subscribed only while shown and the\n"
+            "Viz tab is visible; cleared when RTAB-Map stops.")
+        options.addWidget(self.map_grid_check)
+        self.map_walls_check = QCheckBox("Wall markers")
+        self.map_walls_check.setChecked(True)
+        self.map_walls_check.setToolTip("Walls from /wall_detection_node/walls, labelled W1, W2, ...")
+        options.addWidget(self.map_walls_check)
         self.map_costmap_check = QCheckBox("Local costmap")
         self.map_costmap_check.setChecked(True)
         self.map_costmap_check.setToolTip(
@@ -7014,6 +7024,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.map_view.setMinimumSize(400, 300)
         self.map_follow_check.toggled.connect(
             lambda checked: setattr(self.map_view, 'follow_robot', checked))
+        self.map_grid_check.toggled.connect(self.map_view.set_map_visible)
+        self.map_walls_check.toggled.connect(self.map_view.set_walls_visible)
         self.map_costmap_check.toggled.connect(self.map_view.set_costmap_visible)
         self.map_footprint_check.toggled.connect(self.map_view.set_footprint_visible)
         self.map_goal_button.toggled.connect(self.map_view.set_goal_mode)
