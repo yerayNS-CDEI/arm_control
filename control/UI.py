@@ -797,7 +797,7 @@ class RobotControlUI(QMainWindow):
             "ros2 launch navi_wall platform.launch.py sim:=<mode> mode:=base "
             "controller_type:=<type> odom_tf_from_controller:=true "
             "publish_controller_odom_tf:=true launch_rviz:=true "
-            "headless:=<true/false>"
+            "headless:=<true/false> [stack:=control]"
         )
         mapping_loc_layout.addWidget(self.btn_launch_base_robot)
  
@@ -817,7 +817,11 @@ class RobotControlUI(QMainWindow):
             "Start Mapping/Localization with the perception half (lidars, cameras,\n"
             "rtabmap, Nav2) on PC2, through task_planner_fsm's process_launcher\n"
             "there; this computer runs the control half. In sim the camera images\n"
-            "stay off (cameras:=false) so they do not flood the network.")
+            "stay off (cameras:=false) so they do not flood the network.\n"
+            "The robot launch button then runs stack:=control: the lidars and\n"
+            "cameras are wired to PC2, so their drivers and the cloud merger run there.")
+        # On the robot the lidars and cameras are wired to PC2, not this computer.
+        self.base_pc2_check.setChecked(True)
         mapping_loc_layout.addWidget(self.base_pc2_check)
  
         # View map button
@@ -1229,7 +1233,10 @@ class RobotControlUI(QMainWindow):
             "Start Mapping/Localization with the perception half (lidars, cameras,\n"
             "rtabmap, Nav2) on PC2, through task_planner_fsm's process_launcher\n"
             "there; this computer runs the control half. In sim the camera images\n"
-            "stay off (cameras:=false) so they do not flood the network.")
+            "stay off (cameras:=false) so they do not flood the network.\n"
+            "The robot launch button then runs stack:=control: the lidars and\n"
+            "cameras are wired to PC2, so their drivers and the cloud merger run there.")
+        self.full_control_pc2_check.setChecked(True)
         full_control_mapping_layout.addWidget(self.full_control_pc2_check)
 
         self.btn_full_control_nav2 = QPushButton("Launch Nav2")
@@ -1681,7 +1688,7 @@ class RobotControlUI(QMainWindow):
                 "ros2 launch navi_wall oliwall_mobile_manipulator.launch.py "
                 "mode:=full sim:=<mode> hybrid_sim:=<true/false> robot_ip:=<auto> "
                 f"controller_type:=<type> planner_backend:=<moveit|legacy> headless:={headless} "
-                "[moveit_planning_pipeline:=<...> moveit_pose_planner_id:=<...>]"
+                "[stack:=control] [moveit_planning_pipeline:=<...> moveit_pose_planner_id:=<...>]"
             )
 
         self.btn_full_control_launch.setToolTip(tooltip)
@@ -3909,6 +3916,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             'launch_rviz:=true',
             f'headless:={headless}',
         ]
+        if self.base_pc2_check.isChecked():
+            launch_args.append('stack:=control')
         if 'mobile_platform' not in self.process_map:
             self.btn_launch_base_robot.setProperty('uses_gazebo', sim_mode == 'true')
 
@@ -3945,6 +3954,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
                 f'sim:={sim_mode}',
                 f'hybrid_sim:={hybrid_sim}',
             ])
+            if self.full_control_pc2_check.isChecked():
+                launch_args.append('stack:=control')
         launch_args.extend(self._get_moveit_launch_args(context='full'))
         if 'full_mobile_manipulator' not in self.process_map:
             self.btn_full_control_launch.setProperty('uses_gazebo', sim_mode == 'true')
@@ -6795,6 +6806,9 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             "For the two-computer sim test only; leave off on the robot.")
         self.fsm_no_cameras_check.setEnabled(False)
         self.fsm_pc2_check.toggled.connect(self.fsm_no_cameras_check.setEnabled)
+        # On the robot the lidars and cameras are wired to PC2, not this
+        # computer. Ticked after the connect so the camera box follows it.
+        self.fsm_pc2_check.setChecked(True)
         split_row.addWidget(self.fsm_no_cameras_check)
         split_row.addStretch()
         fsm_tab_layout.addLayout(split_row)
