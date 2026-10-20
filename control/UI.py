@@ -4627,10 +4627,20 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             else:
                 self._log_append(self.full_control_status_text, "✓ Command completed")
 
+    def _show_stopping(self, button):
+        """Relabel a green "Stop X" button "Stopping X" and paint it now: the
+        stop blocks the UI thread until the process is gone, and the code
+        after it puts back the "Start X" label."""
+        text = button.text()
+        if text.startswith('Stop '):
+            button.setText('Stopping ' + text[len('Stop '):])
+            button.repaint()
+
     def _toggle_process(self, process_key, button, name, program, args):
         """Toggle a process on/off and update button state"""
         if process_key in self.process_map:
             # Stop the process
+            self._show_stopping(button)
             process = self.process_map[process_key]
             # Disconnect finished signal to prevent race condition
             try:
@@ -4760,6 +4770,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
 
         if process_key in self.process_map:
             # ===== STOP PROCESS =====
+            self._show_stopping(button)
             process = self.process_map[process_key]
 
             # Align the chassis with the turret before shutting down the base robot, so
@@ -4987,6 +4998,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         status_text = self.full_control_status_text if process_key.startswith('full') else self.base_status_text
         entry = self._pc2_only.pop(process_key, None)
         if entry is not None:
+            self._show_stopping(button)
             self._pc2_stop(entry[0], status_text, save_rtabmap=False, button=button)
             button.setText(self._get_base_process_start_text(process_key, name))
             button.setStyleSheet("")
@@ -5055,6 +5067,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         """_toggle_base_process for Mapping/Localization, split across PC2 when asked."""
         status_text = self.full_control_status_text if process_key.startswith('full') else self.base_status_text
         if process_key in self.process_map:
+            self._show_stopping(button)
             remote_key = self._pc2_keys.pop(process_key, None)
             if remote_key:
                 self._pc2_stop(remote_key, status_text, save_rtabmap='mapping' in process_key,
@@ -5598,6 +5611,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         """Toggle a process on/off for Full Control tab"""
         if process_key in self.process_map:
             # Stop the process
+            self._show_stopping(button)
             process = self.process_map[process_key]
             try:
                 process.finished.disconnect()
@@ -7444,6 +7458,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
     def _toggle_fsm(self):
         """Start or stop the FSM launch + node pair."""
         if self.fsm_launch_process is not None or self.fsm_node_process is not None:
+            self._show_stopping(self.btn_fsm_start)
             self._stop_fsm()
         else:
             self._start_fsm()
