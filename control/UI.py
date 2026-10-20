@@ -6430,6 +6430,21 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.fsm_gpr_ip_input.setMaximumWidth(130)
         self.fsm_gpr_ip_input.setToolTip("ESP32 address on Oliwall_2G (DHCP reservation).")
         options_row.addWidget(self.fsm_gpr_ip_input)
+
+        # Cross-polarized pass: ScanWall sweeps every partition a second time
+        # with the plate rolled -90 deg (the GPR's second polarization). On by
+        # default, like the FSM's own scan_wall_cross_pol; the value is always
+        # passed so the box, not a default somewhere else, decides. Only for the
+        # GPR: unticking "GPR in sweep" greys it out and sweeps once.
+        options_row.addSpacing(16)
+        self.fsm_cross_pol_check = QCheckBox("Cross-polarized sweep")
+        self.fsm_cross_pol_check.setChecked(True)
+        self.fsm_cross_pol_check.setToolTip(
+            "Sweep every partition twice at each height: upright, then straight\n"
+            "back with the plate rolled -90 deg (unfolded_front_fsm_xpol).\n"
+            "Unticked: one upright sweep per partition and height\n"
+            "(fsm_node -p scan_wall_cross_pol:=false).")
+        options_row.addWidget(self.fsm_cross_pol_check)
         self._on_fsm_gpr_toggled(self.fsm_gpr_check.isChecked())
 
         # Hyperspectral camera: ScanWall samples it during every wall sweep and
@@ -6878,6 +6893,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         # No GPR, no bridge: grey the bridge box out rather than untick it, so
         # the operator's choice comes back with the GPR.
         self.fsm_gpr_bridge_check.setEnabled(bool(checked))
+        self.fsm_cross_pol_check.setEnabled(bool(checked))
         self._on_fsm_gpr_bridge_toggled(self.fsm_gpr_bridge_check.isChecked())
 
     def _on_fsm_gpr_bridge_toggled(self, checked):
@@ -6888,6 +6904,12 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         if self.fsm_gpr_check.isChecked():
             return []
         return ['-p', 'gpr_enabled:=false']
+
+    def _fsm_cross_pol_override(self):
+        """``['-p', 'scan_wall_cross_pol:=...']``: the rolled second sweep, only
+        with the GPR in the sweep and the box ticked."""
+        enabled = self.fsm_gpr_check.isChecked() and self.fsm_cross_pol_check.isChecked()
+        return ['-p', f"scan_wall_cross_pol:={'true' if enabled else 'false'}"]
 
     def _fsm_gpr_bridge_enabled(self):
         return self.fsm_gpr_check.isChecked() and self.fsm_gpr_bridge_check.isChecked()
@@ -6983,6 +7005,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             '--ros-args',
             *self._fsm_gpr_override(),
             *self._fsm_gpr_bridge_override(),
+            *self._fsm_cross_pol_override(),
             *self._fsm_hyperspectral_override(),
         ] + self._fsm_session_override(state)
         QTimer.singleShot(3000, lambda: self._start_fsm_node(node_args))
