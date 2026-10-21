@@ -4945,14 +4945,14 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         if not sep or not line.strip():
             return
         html_line = "<span style='color:#986ee2;'>[PC2]</span> " + self._ansi_to_html(line)
-        remote_keys = {**self._pc2_keys,
-                       **{k: v[0] for k, v in self._pc2_only.items()}}
-        for process_key, remote_key in remote_keys.items():
-            if remote_key == key:
-                widget = (self.full_control_status_text if process_key.startswith('full')
-                          else self.base_status_text)
-                self._log_append(widget, html_line)
-                return
+        # Route by the ui_<process_key> naming, not by _pc2_keys/_pc2_only:
+        # output arrives before the key is registered (the start call spins)
+        # and after it is dropped (stopping spins too).
+        if key.startswith('ui_'):
+            widget = (self.full_control_status_text if key[3:].startswith('full')
+                      else self.base_status_text)
+            self._log_append(widget, html_line)
+            return
         # Anything else was started by the FSM.
         self._fsm_append_log(html_line, f"[PC2] {line}")
 
