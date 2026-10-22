@@ -24,7 +24,7 @@ from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
 from UI_utils import localization_monitor
 from UI_utils.map_view import MapView
-from geometry_msgs.msg import Pose, PoseStamped
+from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray, String
 from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
@@ -306,7 +306,6 @@ class RobotControlUI(QMainWindow):
         )
  
         self.node = rclpy.create_node('robot_control_ui')
-        self.goal_publisher = self.node.create_publisher(Pose, '/arm/goal_pose', 10)
         self.emergency_stop_publisher = self.node.create_publisher(Bool, '/emergency_stop', qos)
         self.distance_sensor_publisher = self.node.create_publisher(Float32MultiArray, '/arm/distance_sensors', 10)
         self.emergency_stop_subscriber = self.node.create_subscription(Bool, '/emergency_stop', self._on_emergency_stop_state, qos)
@@ -5934,24 +5933,6 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             
 
 
-    def send_goal(self):
-        if not rclpy.ok():
-            self._log_append(self.status_text, "<span style='color: #c69026;'>⚠ ROS context invalid - cannot publish</span>")
-            return
-        try:
-            pose = Pose()
-            pose.position.x = self.x_input.value()
-            pose.position.y = self.y_input.value()
-            pose.position.z = self.z_input.value()
-            pose.orientation.x = self.qx_input.value()
-            pose.orientation.y = self.qy_input.value()
-            pose.orientation.z = self.qz_input.value()
-            pose.orientation.w = self.qw_input.value()
-            self.goal_publisher.publish(pose)
-            self._log_append(self.status_text, f"Sent goal: pos({pose.position.x:.2f}, {pose.position.y:.2f}, {pose.position.z:.2f}) orn({pose.orientation.x:.2f}, {pose.orientation.y:.2f}, {pose.orientation.z:.2f}, {pose.orientation.w:.2f})")
-        except Exception as e:
-            self._log_append(self.status_text, f"<span style='color: #f47067;'>❌ Failed to send goal: {e}</span>")
- 
     def send_position_command(self):
         """Send selected position using dynamic send_position service endpoint (Arm Control tab)."""
         position_name = self.position_dropdown.currentText()
