@@ -10,6 +10,7 @@ A complete guide to the PyQt5-based graphical user interface for controlling the
 - [Tab 2: Arm Control](#tab-2-arm-control)
 - [Tab 3: Joint Control](#tab-3-joint-control)
 - [Tab 4: Full Control](#tab-4-full-control)
+- [Demo Tab: Omni Base Demo](#demo-tab-omni-base-demo)
 - [Common Features](#common-features)
 - [Configuration Guide](#configuration-guide)
 - [Workflow Examples](#workflow-examples)
@@ -85,6 +86,7 @@ The UI is organized into **4 main tabs**, each designed for specific operational
 | **Arm Control** | Manipulator control only | Operating arm without mobile base |
 | **Joint Control** | Direct joint-level control | Fine-tuning joint positions, teaching |
 | **Full Control** | Unified mobile manipulation | Primary use case - arm + base together |
+| **Demo** | Omnidirectional base choreography | Expos and demos, robot stack already running |
 
 ### Tab Mutual Exclusivity
 
@@ -706,6 +708,31 @@ Kill frozen or unwanted ROS2 processes.
 Same functionality as other tabs, with enhanced search capabilities.
 
 **[SCREENSHOT PLACEHOLDER: Full Control status text with search controls]**
+
+---
+
+## Demo Tab: Omni Base Demo
+
+Runs `ros2 run task_planner_fsm omni_demo`: a fixed choreography around the pose
+the robot stands at, to show the omnidirectional base. Start the robot stack first
+(Full Robot or the FSM) and stand the robot in the middle of the free area.
+
+- **Behaviours** (at least one, run in this order, back to the start pose between
+  them): Cross + diagonals, Square (clockwise, stop at each corner), Figure-8,
+  Orbit (turret facing the centre). The turret heading stays fixed except in the orbit.
+- **Parameters**: speed, distances, laps and pauses. The defaults fit a 2 x 2 m
+  area; the line below the boxes shows the clear area the current settings need.
+- **Safety**: folded-arm check, pre-start costmap clearance check, hold still if
+  an obstacle approaches, park before and after.
+- **Start Demo / ABORT Demo**: aborting stops the robot where it is (it does not
+  return or park). Using the joystick also aborts it.
+- **Check Only**: runs the checks and draws the path in RViz without moving.
+- **Fold Arm**: sends `folded_fsm` (Full Robot stack).
+- **Open Demo RViz**: top-down view on the start pose with the planned path, the
+  driven trail, the required clear area and any blocking obstacles.
+
+Start is refused while an FSM started from this UI is running (anything but
+Finished/Error), because both would drive the base.
 
 ---
 
