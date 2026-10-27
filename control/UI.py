@@ -6781,6 +6781,20 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             "the streaming velocity controller it needs."
         )
         controls_row.addWidget(self.fsm_wbc_combo)
+        # Whether the whole-body sweep presses the plate onto the wall or holds
+        # a standoff. Always passed as -p wbc_press so the run does what the box
+        # shows; it follows the sim combo to fsm_node's own default (press on the
+        # robot, not in Gazebo, which has no F/T sensor to end a press).
+        self.fsm_wbc_press_check = QCheckBox("Press")
+        self.fsm_wbc_press_check.setToolTip(
+            "Press the sensor plate onto the wall during the WBC sweep\n"
+            "(fsm_node -p wbc_press:=true). Unticked holds a standoff instead.\n"
+            "Follows Sim Mode (ticked on the robot, unticked in sim); leave it\n"
+            "unticked in sim, where no contact force ever arrives.")
+        self.fsm_wbc_press_check.setChecked(self.fsm_sim_combo.currentText() == "false")
+        self.fsm_sim_combo.currentTextChanged.connect(
+            lambda sim: self.fsm_wbc_press_check.setChecked(sim == "false"))
+        controls_row.addWidget(self.fsm_wbc_press_check)
         # Recorded session for the offline SensorDataProcessing run. Only
         # meaningful for that state; the FSM's own fallback ("latest") is the
         # default, and a named session goes to fsm_node as the same parameter
@@ -7415,6 +7429,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         planner = self.fsm_planner_combo.currentText()
         state = self.fsm_state_combo.currentText()
         wbc = self.fsm_wbc_combo.currentText()
+        wbc_press = 'true' if self.fsm_wbc_press_check.isChecked() else 'false'
 
         # The bridge exits at once without a receiver_ip; better to say so
         # here than to have the sweep fail later on "no bridge status".
@@ -7472,6 +7487,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             # configured. Hence --ros-args rather than another '--' option, and
             # it must stay last so nothing follows it into ROS's arg parser.
             '--ros-args', '-p', f'sweep_use_wbc:={wbc}',
+            '-p', f'wbc_press:={wbc_press}',
             *self._fsm_split_override(),
             *self._fsm_gpr_override(),
             *self._fsm_gpr_bridge_override(),
