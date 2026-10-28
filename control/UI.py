@@ -14,7 +14,7 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from PyQt5.QtWidgets import *
-from PyQt5.QtCore import QEvent, QTimer, QProcess, Qt, QPointF, QRectF
+from PyQt5.QtCore import QEvent, QTimer, QProcess, QProcessEnvironment, Qt, QPointF, QRectF
 from PyQt5.QtGui import (
     QFontMetrics, QIcon, QPixmap, QPalette, QColor, QIntValidator,
     QBrush, QFont, QPainter, QPainterPath, QPen, QPolygonF,
@@ -24,8 +24,8 @@ from ament_index_python.packages import get_package_share_directory
 from UI_utils.qtermwidget_wrapper import QTermWidget
 from UI_utils import localization_monitor
 from UI_utils.map_view import MapView
-from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray, String
+from geometry_msgs.msg import PoseStamped, Twist
+from std_msgs.msg import Bool, Empty, Float32MultiArray, Float64MultiArray, String
 from sensor_msgs.msg import JointState
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -562,7 +562,7 @@ class RobotControlUI(QMainWindow):
         # Full Robot tab additionally exposes the FSM named poses so they can be
         # commanded manually without running the FSM.
         self.full_control_position_names = self.position_names + [
-            'unfolded_fsm', 'folded_fsm'
+            'unfolded_fsm', 'unfolded_fsm_xpol', 'folded_fsm'
         ]
         self.position_dropdown = QComboBox()
         self.position_dropdown.addItems(self.position_names)
@@ -1518,6 +1518,7 @@ class RobotControlUI(QMainWindow):
         tabs.addTab(self._create_gpr_api_test_tab(), "Sensors")
         tabs.addTab(self._create_fsm_tab(), "FSM")
         tabs.addTab(self._create_map_tab(), "Viz")
+        tabs.addTab(self._create_demo_tab(), "Demo")
 
         # Connect tab change signal to check joint states when Joint Control tab is activated
         tabs.currentChanged.connect(lambda index: self._on_tab_changed(index, tabs))
@@ -3707,6 +3708,28 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         extension = request['download_extension']
         return os.path.join(download_dir, f'{safe_stem}_{timestamp}.{extension}')
 
+    def _describe_gpr_download(self, output_path):
+        """One line about a downloaded response: size, path and, for the raw
+        export zip, the files inside (the .sgy + .csv sidecar the processing
+        needs) -- never the bytes themselves."""
+        try:
+            size = os.path.getsize(output_path)
+        except OSError:
+            return f"saved response to {output_path}"
+        text = f"saved {size:,} bytes to {output_path}"
+        if output_path.lower().endswith('.zip'):
+            try:
+                import zipfile
+                with zipfile.ZipFile(output_path) as zf:
+                    members = [m for m in zf.infolist() if not m.is_dir()]
+                listing = ', '.join(
+                    f"{os.path.basename(m.filename)} ({m.file_size:,} B)" for m in members
+                )
+                text += f" — {len(members)} file(s): {listing}"
+            except zipfile.BadZipFile:
+                text += " — not a zip archive (check the app's response)"
+        return text
+
     def _extract_gpr_http_status(self, output_text):
         """Extract the curl write-out HTTP status code from buffered output."""
         match = re.search(r'HTTP_STATUS:(\d{3})', output_text or '')
@@ -3810,6 +3833,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         process.setProperty('had_output', True)
         previous_output = process.property('gpr_output_buffer') or ''
         process.setProperty('gpr_output_buffer', previous_output + output)
+        if process.property('gpr_output_path'):
+            return
         self._log_append(
             self.gpr_status_text,
             (
@@ -3842,7 +3867,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             elif output_path:
                 self._log_append(
                     self.gpr_status_text,
-                    f"<span style='color: #57ab5a;'>✓ Saved response to {html.escape(output_path)}</span>",
+                    f"<span style='color: #57ab5a;'>✓ HTTP {http_status}: "
+                    f"{html.escape(self._describe_gpr_download(output_path))}</span>",
                 )
             elif not bool(process.property('had_output')):
                 self._log_append(
@@ -6378,6 +6404,10 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             self.btn_full_control_emergency_stop.setChecked(checked)
  
     def closeEvent(self, event):
+        # A demo must not keep driving with its panel gone.
+        if getattr(self, 'demo_process', None) is not None:
+            self._abort_demo()
+            self._signal_demo_tree(self.demo_process, signal.SIGINT)
         self.timer.stop()
         self.pc2_only_timer.stop()
         self.localization_timer.stop()
@@ -6866,6 +6896,22 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.fsm_gpr_ip_input.setMaximumWidth(130)
         self.fsm_gpr_ip_input.setToolTip("ESP32 address on Oliwall_2G (DHCP reservation).")
         options_row.addWidget(self.fsm_gpr_ip_input)
+
+        # Cross-polarized pass: ScanWall sweeps every partition a second time
+        # with the plate rolled -90 deg (the GPR's second polarization). On by
+        # default, like the FSM's own scan_wall_cross_pol; the value is always
+        # passed so the box, not a default somewhere else, decides. Only for the
+        # GPR: unticking "GPR in sweep" greys it out and sweeps once.
+        options_row.addSpacing(16)
+        self.fsm_cross_pol_check = QCheckBox("Cross-polarized sweep")
+        self.fsm_cross_pol_check.setChecked(True)
+        self.fsm_cross_pol_check.setToolTip(
+            "Sweep every wall segment twice: upright, then back with the plate\n"
+            "rolled -90 deg (unfolded_fsm_xpol) -- right after each segment, or\n"
+            "the whole line back, by scan_wall_cross_pol_order.\n"
+            "Unticked: one upright sweep per segment\n"
+            "(fsm_node -p scan_wall_cross_pol:=false).")
+        options_row.addWidget(self.fsm_cross_pol_check)
         self._on_fsm_gpr_toggled(self.fsm_gpr_check.isChecked())
 
         # Hyperspectral camera: ScanWall samples it during every wall sweep and
@@ -7191,6 +7237,406 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         state, _ = self.localization_monitor.snapshot()
         self.map_summary_label.setText(self.map_view.refresh(state))
 
+    # ── Demo tab: omnidirectional base choreography (task_planner_fsm omni_demo) ──
+
+    # (key, label, tooltip, checked by default), in the order the node runs them.
+    DEMO_BEHAVIOURS = [
+        ("cross", "Cross + diagonals",
+         "Forward and back, left and right, then the forward-left diagonal out and back.\n"
+         "Turret heading fixed.", True),
+        ("square", "Square (clockwise)",
+         "Square centred on the start, clockwise, with a stop at every corner.\n"
+         "Turret heading fixed.", True),
+        ("figure8", "Figure-8",
+         "Figure-of-eight through the start, lobes to the left and right.\n"
+         "Turret heading fixed.", False),
+        ("orbit", "Orbit (facing the centre)",
+         "Back off the orbit radius, circle the start clockwise with the turret\n"
+         "always facing it, drive back in.", False),
+    ]
+    # (param, label, min, max, step, decimals, default, suffix); decimals 0 = integer.
+    DEMO_PARAMS = [
+        ("speed", "Speed", 0.03, 0.20, 0.01, 2, 0.15, " m/s"),
+        ("move_distance", "Cross distance", 0.10, 1.50, 0.05, 2, 0.35, " m"),
+        ("square_side", "Square side", 0.20, 2.00, 0.05, 2, 0.70, " m"),
+        ("square_laps", "Square laps", 1, 5, 1, 0, 2, ""),
+        ("figure8_length", "Figure-8 length (L-R)", 0.20, 2.00, 0.05, 2, 0.70, " m"),
+        ("figure8_width", "Figure-8 width (F-B)", 0.10, 1.50, 0.05, 2, 0.50, " m"),
+        ("figure8_laps", "Figure-8 laps", 1, 5, 1, 0, 1, ""),
+        ("orbit_radius", "Orbit radius", 0.15, 1.00, 0.05, 2, 0.35, " m"),
+        ("orbit_laps", "Orbit laps", 1, 3, 1, 0, 1, ""),
+        ("corner_pause_s", "Pause at corners", 0.0, 5.0, 0.1, 1, 0.5, " s"),
+        ("behaviour_pause_s", "Pause between behaviours", 0.0, 10.0, 0.5, 1, 2.0, " s"),
+        ("safety_margin", "Safety margin", 0.0, 0.50, 0.01, 2, 0.05, " m"),
+    ]
+    # (param, label, tooltip, default)
+    DEMO_SAFETY = [
+        ("check_arm_folded", "Require folded arm",
+         "Refuse to start unless the arm joints are at folded_fsm (or folded).\n"
+         "Untick only for a base-only stack without arm joint states.", True),
+        ("check_clearance", "Pre-start clearance check",
+         "Refuse to start if the local costmap shows an obstacle within\n"
+         "robot radius (0.6 m) + safety margin of anywhere the path goes.\n"
+         "Needs Nav2's /local_costmap/costmap.", True),
+        ("runtime_guard", "Hold still if an obstacle approaches",
+         "While moving, an obstacle within robot radius + 0.15 m of the robot\n"
+         "pauses the demo until it has been clear for 1.5 s.", True),
+        ("park_at_start", "Park before starting",
+         "Turn the chassis in line with the turret first, so every run starts\n"
+         "from the same chassis angle.", True),
+        ("park_at_end", "Park at the end",
+         "After returning to the start pose, turn the chassis back in line\n"
+         "with the turret (the parking procedure).", True),
+    ]
+
+    def _create_demo_tab(self):
+        """Omnidirectional base demo for expos: a fixed choreography around the
+        start pose (task_planner_fsm omni_demo), with checks, RViz view and abort."""
+        self.demo_process = None
+        self.demo_preflight = False
+        self.demo_abort_publisher = self.node.create_publisher(Empty, '/omni_demo/abort', 10)
+        self.demo_cmd_vel_publisher = self.node.create_publisher(Twist, '/cmd_vel', 10)
+        self.demo_status_subscriber = self.node.create_subscription(
+            String, '/omni_demo/status', self._on_demo_status,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
+
+        demo_tab = QWidget()
+        layout = QVBoxLayout(demo_tab)
+
+        # ── Controls row ──
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Sim Mode:"))
+        self.demo_sim_combo = QComboBox()
+        self.demo_sim_combo.addItems(["false", "true"])  # real robot first, as the FSM tab
+        self.demo_sim_combo.setToolTip("true runs the demo node with use_sim_time:=true (Gazebo).")
+        controls.addWidget(self.demo_sim_combo)
+        controls.addSpacing(16)
+        self.btn_demo_start = QPushButton("Start Demo")
+        self.btn_demo_start.setMinimumWidth(140)
+        self.btn_demo_start.setToolTip(
+            "ros2 run task_planner_fsm omni_demo with the options below.\n"
+            "The robot stack (Full Robot or the FSM) must already be running and the\n"
+            "robot standing in the middle of the free area. While running, this\n"
+            "button aborts: the robot stops where it is (no return, no parking).\n"
+            "The joystick also aborts the demo as soon as it is used.")
+        self.btn_demo_start.clicked.connect(self._toggle_demo)
+        controls.addWidget(self.btn_demo_start)
+        self.btn_demo_check = QPushButton("Check Only")
+        self.btn_demo_check.setToolTip(
+            "Run the arm and clearance checks and draw the planned path in RViz\n"
+            "without moving the robot (omni_demo -p preflight_only:=true).")
+        self.btn_demo_check.clicked.connect(lambda: self._start_demo(preflight_only=True))
+        controls.addWidget(self.btn_demo_check)
+        controls.addSpacing(16)
+        self.btn_demo_fold = QPushButton("Fold Arm")
+        self.btn_demo_fold.setToolTip("Send the arm to folded_fsm (/send_position, Full Robot stack).")
+        self.btn_demo_fold.clicked.connect(lambda: self._send_position_service_call(
+            position_name='folded_fsm', status_text=self.demo_status_text,
+            output_handler=self._handle_demo_output, ui_context='full'))
+        controls.addWidget(self.btn_demo_fold)
+        self.btn_demo_rviz = QPushButton("Open Demo RViz")
+        self.btn_demo_rviz.setToolTip(
+            "rviz2 with task_planner_fsm/rviz/omni_demo.rviz: top-down view centred on the\n"
+            "start pose, planned path (blue), driven trail (orange), required clear area,\n"
+            "local costmap and the obstacles that failed the check (red).")
+        self.btn_demo_rviz.clicked.connect(self._open_demo_rviz)
+        controls.addWidget(self.btn_demo_rviz)
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        # ── Options: behaviours | parameters | safety ──
+        options = QHBoxLayout()
+
+        behaviours_box = QGroupBox("Behaviours (run in this order)")
+        behaviours_layout = QVBoxLayout(behaviours_box)
+        self.demo_behaviour_checks = {}
+        for key, label, tip, checked in self.DEMO_BEHAVIOURS:
+            box = QCheckBox(label)
+            box.setToolTip(tip)
+            box.setChecked(checked)
+            box.toggled.connect(self._update_demo_estimate)
+            behaviours_layout.addWidget(box)
+            self.demo_behaviour_checks[key] = box
+        hint = QLabel("The robot returns to the start pose\nbetween behaviours.")
+        hint.setStyleSheet("color: #8b949e;")
+        behaviours_layout.addWidget(hint)
+        behaviours_layout.addStretch()
+        options.addWidget(behaviours_box)
+
+        params_box = QGroupBox("Parameters")
+        params_grid = QGridLayout(params_box)
+        self.demo_param_inputs = {}
+        half = (len(self.DEMO_PARAMS) + 1) // 2
+        for i, (name, label, lo, hi, step, decimals, default, suffix) in enumerate(self.DEMO_PARAMS):
+            if decimals == 0:
+                spin = QSpinBox()
+                spin.setRange(int(lo), int(hi))
+                spin.setSingleStep(int(step))
+                spin.setValue(int(default))
+            else:
+                spin = QDoubleSpinBox()
+                spin.setRange(lo, hi)
+                spin.setSingleStep(step)
+                spin.setDecimals(decimals)
+                spin.setValue(default)
+            spin.setSuffix(suffix)
+            spin.valueChanged.connect(self._update_demo_estimate)
+            row, col = i % half, 2 * (i // half)
+            params_grid.addWidget(QLabel(label + ":"), row, col)
+            params_grid.addWidget(spin, row, col + 1)
+            self.demo_param_inputs[name] = spin
+        btn_defaults = QPushButton("Defaults")
+        btn_defaults.setToolTip("Reset the parameters to the 2 x 2 m defaults.")
+        btn_defaults.clicked.connect(self._reset_demo_params)
+        params_grid.addWidget(btn_defaults, half, 3)
+        options.addWidget(params_box, 1)
+
+        safety_box = QGroupBox("Safety")
+        safety_layout = QVBoxLayout(safety_box)
+        self.demo_safety_checks = {}
+        for name, label, tip, checked in self.DEMO_SAFETY:
+            box = QCheckBox(label)
+            box.setToolTip(tip)
+            box.setChecked(checked)
+            safety_layout.addWidget(box)
+            self.demo_safety_checks[name] = box
+        safety_layout.addStretch()
+        options.addWidget(safety_box)
+        layout.addLayout(options)
+
+        # ── Estimate + live status ──
+        self.demo_estimate_label = QLabel("")
+        self.demo_estimate_label.setWordWrap(True)
+        layout.addWidget(self.demo_estimate_label)
+        status_row = QHBoxLayout()
+        status_row.addWidget(QLabel("Status:"))
+        self.demo_status_label = QLabel("—")
+        self.demo_status_label.setStyleSheet("font-weight: bold;")
+        self.demo_status_label.setWordWrap(True)
+        status_row.addWidget(self.demo_status_label, 1)
+        layout.addLayout(status_row)
+
+        # ── Output log ──
+        log_header = QHBoxLayout()
+        log_header.addWidget(QLabel("Demo Output"))
+        log_header.addStretch()
+        log_header.addWidget(QLabel("Filter:"))
+        self.demo_filter_input = QLineEdit()
+        self.demo_filter_input.setPlaceholderText("Filter output lines...")
+        self.demo_filter_input.setMaximumWidth(200)
+        log_header.addWidget(self.demo_filter_input)
+        btn_clear = QPushButton("Clear")
+        btn_clear.setMaximumWidth(80)
+        log_header.addWidget(btn_clear)
+        layout.addLayout(log_header)
+        self.demo_status_text = QTextEdit()
+        self.demo_status_text.setReadOnly(True)
+        self.demo_status_text.setAcceptRichText(True)
+        self.demo_status_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.demo_status_text.setStyleSheet(
+            "background-color: #22272e; color: #adbac7; border: 1px solid #444c56; "
+            "font-family: 'Courier New', monospace; white-space: pre-wrap;"
+        )
+        layout.addWidget(self.demo_status_text, 1)
+        self.tab_filter_inputs[id(self.demo_status_text)] = self.demo_filter_input
+        self.demo_filter_input.textChanged.connect(lambda: self._log_apply_filter(self.demo_status_text))
+        btn_clear.clicked.connect(self._clear_demo_log)
+
+        self._update_demo_estimate()
+        return demo_tab
+
+    def _demo_selected_behaviours(self):
+        return [key for key, *_ in self.DEMO_BEHAVIOURS if self.demo_behaviour_checks[key].isChecked()]
+
+    def _reset_demo_params(self):
+        for name, _label, _lo, _hi, _step, decimals, default, _suffix in self.DEMO_PARAMS:
+            spin = self.demo_param_inputs[name]
+            spin.setValue(int(default) if decimals == 0 else default)
+
+    def _refresh_demo_buttons(self):
+        """Start/Abort and Check Only from the run state and the selection."""
+        running = self.demo_process is not None
+        selected = bool(self._demo_selected_behaviours())
+        if running and not self.demo_preflight:
+            self.btn_demo_start.setText("ABORT Demo")
+            self.btn_demo_start.setStyleSheet(
+                "background-color: #c0392b; color: white; font-weight: bold;")
+            self.btn_demo_start.setEnabled(True)
+        else:
+            self.btn_demo_start.setText("Start Demo")
+            self.btn_demo_start.setStyleSheet("")
+            self.btn_demo_start.setEnabled(not running and selected)
+        self.btn_demo_check.setEnabled(not running and selected)
+        for widget in (list(self.demo_behaviour_checks.values()) + list(self.demo_param_inputs.values())
+                       + list(self.demo_safety_checks.values()) + [self.demo_sim_combo]):
+            widget.setEnabled(not running)
+
+    def _update_demo_estimate(self, *_args):
+        behaviours = self._demo_selected_behaviours()
+        self._refresh_demo_buttons()
+        if not behaviours:
+            self.demo_estimate_label.setText(
+                "<span style='color:#f47067;'>Select at least one behaviour.</span>")
+            return
+        try:
+            from task_planner_fsm import omni_demo
+            values = {name: spin.value() for name, spin in self.demo_param_inputs.items()}
+            cfg = omni_demo.DemoConfig(behaviours=tuple(behaviours), **values)
+            depth, width = omni_demo.required_area(cfg)
+            minutes = omni_demo.plan_duration(omni_demo.build_plan(cfg)) / 60.0
+        except Exception as e:  # task_planner_fsm not built/sourced: no estimate
+            self.demo_estimate_label.setText(f"(No area estimate: {html.escape(str(e))})")
+            return
+        self.demo_estimate_label.setText(
+            f"Needs a clear area of <b>{depth:.2f} m (forward) × {width:.2f} m (sideways)</b> "
+            f"centred on the robot (path + 0.6 m robot radius + margin). "
+            f"About {minutes:.1f} min of driving, plus the chassis turning at corners and parking.")
+
+    def _start_demo(self, preflight_only=False):
+        if self.demo_process is not None:
+            return
+        behaviours = self._demo_selected_behaviours()
+        if not behaviours:
+            self._log_append(self.demo_status_text,
+                             "<span style='color:#f47067;'>⚠ Select at least one behaviour.</span>")
+            return
+        if (not preflight_only and self.fsm_node_process is not None
+                and self._fsm_current_state not in self.FSM_TERMINAL_STATES):
+            self._log_append(self.demo_status_text, (
+                "<span style='color:#f47067;'>⚠ The FSM is running "
+                f"({html.escape(str(self._fsm_current_state))}) and may drive the base: wait for "
+                "Finished/Error (or stop it) before starting the demo.</span>"))
+            return
+        args = ['run', 'task_planner_fsm', 'omni_demo', '--ros-args',
+                '-p', f"use_sim_time:={self.demo_sim_combo.currentText()}",
+                '-p', f"behaviours:=[{','.join(behaviours)}]"]
+        for name, _label, _lo, _hi, _step, decimals, _default, _suffix in self.DEMO_PARAMS:
+            value = self.demo_param_inputs[name].value()
+            args += ['-p', f"{name}:={int(value)}" if decimals == 0 else f"{name}:={float(value):.3f}"]
+        for name, box in self.demo_safety_checks.items():
+            args += ['-p', f"{name}:={'true' if box.isChecked() else 'false'}"]
+        if preflight_only:
+            args += ['-p', 'preflight_only:=true']
+
+        self._log_append(self.demo_status_text,
+                         f"<b style='color: #57ab5a;'>▶ ros2 {html.escape(' '.join(args))}</b>")
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.MergedChannels)
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert('PYTHONUNBUFFERED', '1')
+        env.insert('RCUTILS_LOGGING_BUFFERED_STREAM', '0')
+        process.setProcessEnvironment(env)
+        process.readyReadStandardOutput.connect(lambda p=process: self._handle_demo_output(p))
+        process.finished.connect(lambda code, _status, p=process: self._on_demo_finished(p, code))
+        process.start('ros2', args)
+        self.demo_process = process
+        self.demo_preflight = preflight_only
+        self.demo_status_label.setText("Starting…")
+        self.demo_status_label.setStyleSheet("font-weight: bold;")
+        self._refresh_demo_buttons()
+
+    def _toggle_demo(self):
+        if self.demo_process is None:
+            self._start_demo()
+        else:
+            self._abort_demo()
+
+    def _abort_demo(self):
+        """Stop the robot now, then make sure the demo node goes away."""
+        process = self.demo_process
+        # The node stops the base and exits on /omni_demo/abort; the zero twists
+        # also stop it should the node be wedged (twist_mux navigation channel).
+        self.demo_abort_publisher.publish(Empty())
+        for _ in range(3):
+            self.demo_cmd_vel_publisher.publish(Twist())
+        self._log_append(self.demo_status_text,
+                         "<b style='color:#f47067;'>■ Abort sent: robot stopped where it is.</b>")
+        if process is None:
+            return
+        # ros2 run does not forward signals to the node, so signal the whole tree.
+        QTimer.singleShot(1500, lambda p=process: self._signal_demo_tree(p, signal.SIGINT))
+        QTimer.singleShot(5000, lambda p=process: self._signal_demo_tree(p, signal.SIGKILL))
+
+    def _signal_demo_tree(self, process, sig):
+        if process is not self.demo_process or process.state() != QProcess.Running:
+            return
+        pid = process.processId()
+        pids = []
+        stack = [pid] if pid else []
+        while stack:
+            parent = stack.pop()
+            try:
+                out = subprocess.run(['pgrep', '-P', str(parent)], capture_output=True,
+                                     text=True, timeout=1).stdout
+            except Exception:
+                out = ''
+            children = [int(x) for x in out.split()]
+            pids.extend(children)
+            stack.extend(children)
+        for target in pids + ([pid] if pid else []):
+            try:
+                os.kill(target, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    def _handle_demo_output(self, process):
+        output = process.readAllStandardOutput().data().decode(errors='replace')
+        for line in output.split('\n'):
+            if line.strip():
+                self._log_append(self.demo_status_text, self._ansi_to_html(line))
+
+    def _on_demo_finished(self, process, exit_code):
+        if process is not self.demo_process:
+            return
+        self.demo_process = None
+        text, colour = {0: ("finished", "#57ab5a"), 2: ("aborted", "#e3b341")}.get(
+            exit_code, ("failed or refused", "#f47067"))
+        self._log_append(self.demo_status_text,
+                         f"<span style='color: {colour};'>omni_demo {text} (exit code {exit_code})</span>")
+        process.deleteLater()
+        self._refresh_demo_buttons()
+
+    def _on_demo_status(self, msg):
+        try:
+            payload = json.loads(msg.data)
+        except ValueError:
+            return
+        if not isinstance(payload, dict):
+            return
+        phase = str(payload.get('phase') or '')
+        parts = []
+        if payload.get('behaviour'):
+            parts.append(str(payload['behaviour']))
+        if payload.get('steps'):
+            parts.append(f"step {payload.get('step', 0)}/{payload['steps']}")
+        parts.append(str(payload.get('message') or ''))
+        colour = {'done': '#57ab5a', 'failed': '#f47067', 'aborted': '#e3b341'}.get(phase, '')
+        self.demo_status_label.setText(" · ".join(p for p in parts if p))
+        self.demo_status_label.setStyleSheet(
+            f"font-weight: bold; color: {colour};" if colour else "font-weight: bold;")
+
+    def _open_demo_rviz(self):
+        try:
+            config = os.path.join(get_package_share_directory('task_planner_fsm'), 'rviz', 'omni_demo.rviz')
+        except Exception:
+            config = ''
+        if not config or not os.path.exists(config):
+            self._log_append(self.demo_status_text,
+                             "<span style='color:#f47067;'>⚠ omni_demo.rviz not installed: "
+                             "colcon build --packages-select task_planner_fsm</span>")
+            return
+        args = ['-d', config, '--ros-args', '-p', f"use_sim_time:={self.demo_sim_combo.currentText()}"]
+        if QProcess.startDetached('rviz2', args):
+            self._log_append(self.demo_status_text, f"▶ rviz2 -d {html.escape(config)}")
+        else:
+            self._log_append(self.demo_status_text, "<span style='color:#f47067;'>⚠ Could not start rviz2</span>")
+
+    def _clear_demo_log(self):
+        widget = self.demo_status_text
+        self.tab_log_entries[id(widget)] = []
+        widget.clear()
+
     # States fsm_node accepts on /fsm/restart (its RESTART_TARGET_STATES).
     FSM_RESTART_TARGETS = [
         "ObjectID", "WallLinesComputation", "GeometryReconstruction",
@@ -7370,6 +7816,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         # No GPR, no bridge: grey the bridge box out rather than untick it, so
         # the operator's choice comes back with the GPR.
         self.fsm_gpr_bridge_check.setEnabled(bool(checked))
+        self.fsm_cross_pol_check.setEnabled(bool(checked))
         self._on_fsm_gpr_bridge_toggled(self.fsm_gpr_bridge_check.isChecked())
 
     def _on_fsm_gpr_bridge_toggled(self, checked):
@@ -7380,6 +7827,12 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         if self.fsm_gpr_check.isChecked():
             return []
         return ['-p', 'gpr_enabled:=false']
+
+    def _fsm_cross_pol_override(self):
+        """``['-p', 'scan_wall_cross_pol:=...']``: the rolled second sweep, only
+        with the GPR in the sweep and the box ticked."""
+        enabled = self.fsm_gpr_check.isChecked() and self.fsm_cross_pol_check.isChecked()
+        return ['-p', f"scan_wall_cross_pol:={'true' if enabled else 'false'}"]
 
     def _fsm_gpr_bridge_enabled(self):
         return self.fsm_gpr_check.isChecked() and self.fsm_gpr_bridge_check.isChecked()
@@ -7491,6 +7944,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             *self._fsm_split_override(),
             *self._fsm_gpr_override(),
             *self._fsm_gpr_bridge_override(),
+            *self._fsm_cross_pol_override(),
             *self._fsm_hyperspectral_override(),
         ] + self._fsm_session_override(state)
         QTimer.singleShot(3000, lambda: self._start_fsm_node(node_args))
