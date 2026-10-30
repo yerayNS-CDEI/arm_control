@@ -6947,6 +6947,34 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         options_row.addStretch()
         fsm_tab_layout.addLayout(options_row)
 
+        # ── Walls row ──
+        # Ticked: the run scans every wall navi-wall detected, each at the
+        # heights typed here, without asking for walls in the input box below
+        # (fsm_node -p scan_all_walls); a wall the robot cannot reach is skipped.
+        # Unticked: the FSM asks for the walls and heights as before.
+        walls_row = QHBoxLayout()
+        self.fsm_all_walls_check = QCheckBox("Scan all walls (no prompts)")
+        self.fsm_all_walls_check.setChecked(True)
+        self.fsm_all_walls_check.setToolTip(
+            "Scan every detected wall, nearest first, with no wall prompts\n"
+            "(fsm_node -p scan_all_walls:=true). A wall the robot cannot reach\n"
+            "is skipped instead of stopping the run.\n"
+            "Untick to pick the walls and heights in the input box.")
+        walls_row.addWidget(self.fsm_all_walls_check)
+        walls_row.addSpacing(16)
+        self.fsm_lines_z_label = QLabel("Line heights (m):")
+        walls_row.addWidget(self.fsm_lines_z_label)
+        self.fsm_lines_z_input = QLineEdit("1.5")
+        self.fsm_lines_z_input.setMaximumWidth(140)
+        self.fsm_lines_z_input.setToolTip(
+            "Map-frame height of each scan line on every wall, e.g. 1.5 or 1.5 2.2\n"
+            "(fsm_node -p scan_all_walls_lines_z).")
+        walls_row.addWidget(self.fsm_lines_z_input)
+        self.fsm_all_walls_check.toggled.connect(self.fsm_lines_z_label.setEnabled)
+        self.fsm_all_walls_check.toggled.connect(self.fsm_lines_z_input.setEnabled)
+        walls_row.addStretch()
+        fsm_tab_layout.addLayout(walls_row)
+
         # ── Jetson/PC2 split row ──
         # The perception half of the FSM's stacks (lidars, cameras, rtabmap,
         # Nav2) runs on PC2 under task_planner_fsm's process_launcher; its
@@ -7828,6 +7856,21 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             return []
         return ['-p', 'gpr_enabled:=false']
 
+    def _fsm_all_walls_override(self):
+        """``['-p', ...]``: every detected wall at the typed heights, or the
+        FSM's wall prompts. None when the heights are not numbers."""
+        if not self.fsm_all_walls_check.isChecked():
+            return ['-p', 'scan_all_walls:=false']
+        try:
+            lines = [float(t) for t in self.fsm_lines_z_input.text().replace(',', ' ').split()]
+        except ValueError:
+            return None
+        if not lines:
+            return None
+        # str(float): "1.0", never "1" -- a ROS array must not mix ints and doubles.
+        return ['-p', 'scan_all_walls:=true',
+                '-p', f"scan_all_walls_lines_z:=[{','.join(str(z) for z in lines)}]"]
+
     def _fsm_cross_pol_override(self):
         """``['-p', 'scan_wall_cross_pol:=...']``: the rolled second sweep, only
         with the GPR in the sweep and the box ticked."""
@@ -7894,6 +7937,15 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             )
             return
 
+        all_walls = self._fsm_all_walls_override()
+        if all_walls is None:
+            self._fsm_append_log(
+                "<span style='color: #f47067;'>Line heights must be numbers in metres, "
+                "e.g. 1.5 or 1.5 2.2.</span>",
+                "Line heights must be numbers in metres, e.g. 1.5 or 1.5 2.2.",
+            )
+            return
+
         # Not a refusal: the camera may be running from a terminal.
         if self.fsm_hyperspectral_check.isChecked() and 'hyperspectral_camera' not in self.process_map:
             self._fsm_append_log(
@@ -7946,6 +7998,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             *self._fsm_gpr_bridge_override(),
             *self._fsm_cross_pol_override(),
             *self._fsm_hyperspectral_override(),
+            *all_walls,
         ] + self._fsm_session_override(state)
         QTimer.singleShot(3000, lambda: self._start_fsm_node(node_args))
 
