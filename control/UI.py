@@ -169,6 +169,45 @@ def _fsm_arrow_head(path):
     return QPolygonF([tip, base + normal * 7.0, base - normal * 7.0])
 
 
+class ActivityTabBar(QTabBar):
+    """Tab bar that fills a tab with the started-button green while something
+    started from it still runs, so it shows from any other tab."""
+
+    ACTIVE_COLOR = QColor('#4CAF50')
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._active = frozenset()
+
+    def set_active_tabs(self, indices):
+        indices = frozenset(indices)
+        if indices != self._active:
+            self._active = indices
+            self.update()
+
+    def paintEvent(self, event):
+        if not self._active:
+            super().paintEvent(event)
+            return
+        painter = QStylePainter(self)
+        current = self.currentIndex()
+        # The selected tab is drawn last, over its neighbours, as QTabBar does.
+        order = [i for i in range(self.count()) if i != current]
+        if current >= 0:
+            order.append(current)
+        for index in order:
+            option = QStyleOptionTab()
+            self.initStyleOption(option, index)
+            if index not in self._active:
+                painter.drawControl(QStyle.CE_TabBarTab, option)
+                continue
+            painter.drawControl(QStyle.CE_TabBarTabShape, option)
+            painter.fillRect(option.rect.adjusted(2, 2, -2, 0), self.ACTIVE_COLOR)
+            option.palette.setColor(QPalette.WindowText, Qt.white)
+            option.palette.setColor(QPalette.ButtonText, Qt.white)
+            painter.drawControl(QStyle.CE_TabBarTabLabel, option)
+
+
 class FsmGraphView(QGraphicsView):
     """Zoomable FSM graph: the current state in green (red for Error), the
     last transition's endpoints in amber and its edge highlighted."""
@@ -471,6 +510,8 @@ class RobotControlUI(QMainWindow):
 
         # Create tab widget for Arm Control and Base Control
         tabs = QTabWidget()
+        # Set before any addTab: QTabWidget only accepts a new tab bar while empty.
+        tabs.setTabBar(ActivityTabBar())
         main_layout.addWidget(tabs)
 
         self.tabs = tabs
@@ -1518,7 +1559,8 @@ class RobotControlUI(QMainWindow):
         tabs.addTab(self._create_gpr_api_test_tab(), "Sensors")
         tabs.addTab(self._create_fsm_tab(), "FSM")
         tabs.addTab(self._create_map_tab(), "Viz")
-        tabs.addTab(self._create_demo_tab(), "Demo")
+        self._demo_tab_page = self._create_demo_tab()
+        tabs.addTab(self._demo_tab_page, "Demo")
 
         # Connect tab change signal to check joint states when Joint Control tab is activated
         tabs.currentChanged.connect(lambda index: self._on_tab_changed(index, tabs))
@@ -1540,6 +1582,10 @@ class RobotControlUI(QMainWindow):
         self.map_timer = QTimer()
         self.map_timer.timeout.connect(self._refresh_map_tab)
         self.map_timer.start(200)  # 5 Hz, no-op while the Viz tab is hidden
+
+        self.tab_activity_timer = QTimer()
+        self.tab_activity_timer.timeout.connect(self._refresh_tab_activity)
+        self.tab_activity_timer.start(500)  # 2 Hz
         
         # Initial UI update for consistent visuals
         self._update_emergency_stop_button_ui()
@@ -6403,7 +6449,52 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             self.btn_full_control_emergency_stop.setStyleSheet(style)
             self.btn_full_control_emergency_stop.setChecked(checked)
  
+    def _refresh_tab_activity(self):
+        """Fill each tab that has something running with the started-button green.
+
+        Every start in this UI turns its button #4CAF50 and every stop or exit
+        clears it, PC2-only launches included, so a green button is the running
+        flag. The Demo tab has no such button and goes by its process."""
+        active = []
+        for index in range(self.tabs.count()):
+            page = self.tabs.widget(index)
+            if any('4caf50' in button.styleSheet().lower()
+                   for button in page.findChildren(QPushButton)):
+                active.append(index)
+            elif page is self._demo_tab_page and self.demo_process is not None:
+                active.append(index)
+        self.tabs.tabBar().set_active_tabs(active)
+        return active
+
+    def _confirm_close_while_running(self):
+        """Ask before closing on anything still running; True closes."""
+        active = self._refresh_tab_activity()
+        if not active:
+            return True
+        names = ', '.join(self.tabs.tabText(index) for index in active)
+        message = (f"Still running from: {names}.\n\n"
+                   "These keep running after the window closes, and a reopened UI "
+                   "cannot stop them; only a terminal can.")
+        if self.demo_process is not None:
+            message += "\n\nThe Demo is stopped on close."
+        reply = QMessageBox.question(
+            self,
+            'Close while running?',
+            message + "\n\nClose anyway?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        return reply == QMessageBox.Yes
+
     def closeEvent(self, event):
+        if not self._confirm_close_while_running():
+            event.ignore()
+            return
+        # Stop the embedded xterms while the window they draw into still exists.
+        # Child widgets get no close event of their own, so they used to outlive
+        # the UI and die later on an X BadWindow error.
+        for terminal in (self.base_terminal, self.joint_terminal):
+            terminal.close()
         # A demo must not keep driving with its panel gone.
         if getattr(self, 'demo_process', None) is not None:
             self._abort_demo()
@@ -6412,6 +6503,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.pc2_only_timer.stop()
         self.localization_timer.stop()
         self.map_timer.stop()
+        self.tab_activity_timer.stop()
         self.localization_monitor.stop()
 
         # Detach every QProcess from this window so Qt does NOT send SIGTERM
