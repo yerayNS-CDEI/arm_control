@@ -438,6 +438,8 @@ class RobotControlUI(QMainWindow):
         # and graph are latched like the current state; transitions are not.
         self._fsm_status = {}
         self._fsm_transition = None  # (from, to, reason)
+        # (last transition, summary) label pairs: FSM tab status box and Viz tab.
+        self.fsm_transition_summary_labels = []
         self.fsm_status_subscriber = self.node.create_subscription(
             String, '/fsm/status', self._on_fsm_status, fsm_state_qos)
         self.fsm_graph_subscriber = self.node.create_subscription(
@@ -7212,23 +7214,28 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         form = QFormLayout(status_group)
         self.fsm_current_state_label = QLabel("—")
         self.fsm_current_state_label.setStyleSheet("font-weight: bold;")
-        self.fsm_transition_label = QLabel("—")
         self.fsm_phase_label = QLabel("—")
-        self.fsm_summary_label = QLabel("—")
         self.fsm_elapsed_label = QLabel("—")
         self.fsm_progress_label = QLabel("—")
-        for label in (self.fsm_transition_label, self.fsm_summary_label):
-            label.setWordWrap(True)
         form.addRow("Current state:", self.fsm_current_state_label)
-        form.addRow("Last transition:", self.fsm_transition_label)
+        self._build_fsm_transition_summary_rows(form)
         form.addRow("Phase:", self.fsm_phase_label)
-        form.addRow("Summary:", self.fsm_summary_label)
         form.addRow("Elapsed:", self.fsm_elapsed_label)
         form.addRow("Progress:", self.fsm_progress_label)
         self._build_localization_indicator(form)
         layout.addWidget(status_group)
         layout.addStretch()
         return pane
+
+    def _build_fsm_transition_summary_rows(self, form):
+        """Add "Last transition" and "Summary" rows, kept up to date by
+        _update_fsm_telemetry_ui, to a QFormLayout."""
+        transition, summary = QLabel("—"), QLabel("—")
+        for label in (transition, summary):
+            label.setWordWrap(True)
+        form.addRow("Last transition:", transition)
+        form.addRow("Summary:", summary)
+        self.fsm_transition_summary_labels.append((transition, summary))
 
     def _create_fsm_graph_group(self):
         """State graph from /fsm/graph, shown in the Viz tab next to the map."""
@@ -7361,20 +7368,10 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         layout.addLayout(toolbar)
         layout.addLayout(info_row)
 
-        legend = QLabel(
-            "Robot arrow + σ circle in the Localization colour, "
-            "<span style='color:#22272e;'>▭ Nav2 footprint</span> · "
-            "<span style='color:#1f6feb;'>━ Nav2 path, ▷ goal</span>, "
-            "<span style='color:#1aff4d;'>▭</span>→<span style='color:#1a33ff;'>▭</span> plan footprints · walls: "
-            "<span style='color:#2ea043;'>━ refined</span> "
-            "<span style='color:#d29922;'>━ unrefined</span> "
-            "<span style='color:#d63ad6;'>━ two-sided</span> · costmap: "
-            "<span style='color:#1f78ff;'>■</span>→<span style='color:#ff3300;'>■</span> cost "
-            "<span style='color:#00bcd4;'>■ inscribed</span> "
-            "<span style='color:#6f42c1;'>■ lethal</span>")
-        legend.setTextFormat(Qt.RichText)
-        legend.setWordWrap(True)
-        layout.addWidget(legend)
+        fsm_form = QFormLayout()
+        self._build_fsm_transition_summary_rows(fsm_form)
+        layout.addLayout(fsm_form)
+        self._update_fsm_telemetry_ui()
         self._build_localization_indicator(layout)
         # Splitter so the column can be dragged wider to read the graph.
         map_split = QSplitter(Qt.Horizontal)
@@ -7890,12 +7887,13 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             text = f"{src} \u2192 {dst}" + (f" [{reason}]" if reason else "")
         else:
             text = dash
-        self.fsm_transition_label.setText(text)
+        colour = {'error': '#f47067', 'warn': '#e3b341'}.get(status.get('level'), '')
+        for transition_label, summary_label in self.fsm_transition_summary_labels:
+            transition_label.setText(text)
+            summary_label.setText(str(status.get('summary') or dash))
+            summary_label.setStyleSheet(f"color: {colour};" if colour else "")
 
         self.fsm_phase_label.setText(str(status.get('phase') or dash))
-        self.fsm_summary_label.setText(str(status.get('summary') or dash))
-        colour = {'error': '#f47067', 'warn': '#e3b341'}.get(status.get('level'), '')
-        self.fsm_summary_label.setStyleSheet(f"color: {colour};" if colour else "")
 
         elapsed = status.get('elapsed_s')
         if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
