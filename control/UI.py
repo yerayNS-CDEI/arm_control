@@ -225,6 +225,19 @@ class FsmGraphView(QGraphicsView):
         self._current = ''
         self._last_from = ''
         self._last_to = ''
+        # The graph usually arrives while its (Viz) tab is hidden, when the
+        # view does not have its real size yet: fit once it is shown.
+        self._fit_pending = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._fit_pending:
+            self.fit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._fit_pending and self.isVisible():
+            self.fit()
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -238,6 +251,7 @@ class FsmGraphView(QGraphicsView):
         self.scale(factor, factor)
 
     def fit(self):
+        self._fit_pending = not self.isVisible()
         self.resetTransform()
         self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
 
@@ -1557,8 +1571,11 @@ class RobotControlUI(QMainWindow):
         # Add Full Control tab after Joint Control
         tabs.addTab(full_control_tab, "Full Control")
         tabs.addTab(self._create_gpr_api_test_tab(), "Sensors")
+        # The FSM graph lives in the Viz tab, but the FSM tab updates it while
+        # being built, so it is created first.
+        fsm_graph_group = self._create_fsm_graph_group()
         tabs.addTab(self._create_fsm_tab(), "FSM")
-        tabs.addTab(self._create_map_tab(), "Viz")
+        tabs.addTab(self._create_map_tab(fsm_graph_group), "Viz")
         self._demo_tab_page = self._create_demo_tab()
         tabs.addTab(self._demo_tab_page, "Demo")
 
@@ -7140,7 +7157,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         btn_clear_fsm_status.setMaximumWidth(80)
         fsm_status_header.addWidget(btn_clear_fsm_status)
 
-        # ── Split: output log (left) | status + graph (right) ──
+        # ── Split: output log (left) | status (right; the graph is in the Viz tab) ──
         fsm_split = QSplitter(Qt.Horizontal)
         fsm_log_pane = QWidget()
         fsm_log_layout = QVBoxLayout(fsm_log_pane)
@@ -7163,7 +7180,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         fsm_split.addWidget(fsm_log_pane)
         fsm_split.addWidget(self._create_fsm_telemetry_pane())
         fsm_split.setStretchFactor(0, 3)
-        fsm_split.setStretchFactor(1, 2)
+        fsm_split.setStretchFactor(1, 1)
         fsm_split.setChildrenCollapsible(False)
         fsm_tab_layout.addWidget(fsm_split, 1)
         self._update_fsm_restart_ui()
@@ -7186,7 +7203,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         return fsm_tab
 
     def _create_fsm_telemetry_pane(self):
-        """Status fields and state graph from the /fsm/* telemetry topics."""
+        """Status fields from the /fsm/* telemetry topics."""
         pane = QWidget()
         layout = QVBoxLayout(pane)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -7210,14 +7227,20 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         form.addRow("Progress:", self.fsm_progress_label)
         self._build_localization_indicator(form)
         layout.addWidget(status_group)
+        layout.addStretch()
+        return pane
 
+    def _create_fsm_graph_group(self):
+        """State graph from /fsm/graph, shown in the Viz tab next to the map."""
         graph_group = QGroupBox("FSM Graph")
         graph_layout = QVBoxLayout(graph_group)
         zoom_row = QHBoxLayout()
-        zoom_row.addWidget(QLabel("Mouse wheel to zoom"))
+        zoom_hint = QLabel("Wheel to zoom")
+        zoom_hint.setMinimumWidth(1)
+        zoom_row.addWidget(zoom_hint)
         zoom_row.addStretch()
         self.fsm_graph_view = FsmGraphView()
-        self.fsm_graph_view.setMinimumSize(280, 280)
+        self.fsm_graph_view.setMinimumSize(200, 200)
         for text, action in (
             ("-", lambda: self.fsm_graph_view.zoom(1.0 / 1.15)),
             ("Reset", self.fsm_graph_view.fit),
@@ -7229,16 +7252,33 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             zoom_row.addWidget(button)
         graph_layout.addLayout(zoom_row)
         graph_layout.addWidget(self.fsm_graph_view, 1)
-        layout.addWidget(graph_group, 1)
-        return pane
+        return graph_group
 
-    def _create_map_tab(self):
+    def _create_map_tab(self, fsm_graph_group):
         """Viz tab: 2D map with the robot, its footprint, Nav2 path/goal and detected walls (RViz stand-in)."""
         map_tab = QWidget()
         layout = QVBoxLayout(map_tab)
 
-        # View options in a column left of the map.
-        options = QVBoxLayout()
+        # View options, then the FSM graph, in a column left of the map. The
+        # options start collapsed behind a toggle so the graph gets the height.
+        options_pane = QWidget()
+        column = QVBoxLayout(options_pane)
+        column.setContentsMargins(0, 0, 0, 0)
+        options_toggle = QToolButton()
+        options_toggle.setText("Display")
+        options_toggle.setCheckable(True)
+        options_toggle.setAutoRaise(True)
+        options_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        options_toggle.setArrowType(Qt.RightArrow)
+        column.addWidget(options_toggle)
+        options_box = QWidget()
+        options_box.setVisible(False)
+        column.addWidget(options_box)
+        options_toggle.toggled.connect(options_box.setVisible)
+        options_toggle.toggled.connect(
+            lambda checked: options_toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow))
+        options = QVBoxLayout(options_box)
+        options.setContentsMargins(12, 0, 0, 0)
         self.map_follow_check = QCheckBox("Follow robot")
         self.map_follow_check.setChecked(True)
         options.addWidget(self.map_follow_check)
@@ -7264,7 +7304,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             "Nav2's /local_costmap/published_footprint (arm-aware when the\n"
             "dynamic footprint publisher runs).")
         options.addWidget(self.map_footprint_check)
-        options.addStretch()
+        column.addWidget(fsm_graph_group, 1)
 
         toolbar = QHBoxLayout()
         self.map_goal_button = QPushButton("2D Goal Pose")
@@ -7327,10 +7367,15 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         legend.setWordWrap(True)
         layout.addWidget(legend)
         self._build_localization_indicator(layout)
-        map_row = QHBoxLayout()
-        map_row.addLayout(options)
-        map_row.addWidget(self.map_view, 1)
-        layout.addLayout(map_row, 1)
+        # Splitter so the column can be dragged wider to read the graph.
+        map_split = QSplitter(Qt.Horizontal)
+        map_split.addWidget(options_pane)
+        map_split.addWidget(self.map_view)
+        map_split.setStretchFactor(0, 0)
+        map_split.setStretchFactor(1, 1)
+        map_split.setSizes([300, 1000])
+        map_split.setChildrenCollapsible(False)
+        layout.addWidget(map_split, 1)
         return map_tab
 
     def _fit_map_view(self):
