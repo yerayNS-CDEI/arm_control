@@ -7318,6 +7318,12 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             "(navi_wall plan_footprint_visualizer, runs with the dynamic footprint).\n"
             "Subscribed only while shown and the Viz tab is visible.")
         options.addWidget(self.map_plan_footprints_check)
+        self.map_frames_check = QCheckBox("TF frames")
+        self.map_frames_check.setChecked(True)
+        self.map_frames_check.setToolTip(
+            "map and odom axes (x red, y green), odom at /tf's map->odom.\n"
+            "Subscribes to /tf only while shown and the Viz tab is visible.")
+        options.addWidget(self.map_frames_check)
         column.addWidget(fsm_graph_group, 1)
 
         toolbar = QHBoxLayout()
@@ -7354,6 +7360,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.map_costmap_check.toggled.connect(self.map_view.set_costmap_visible)
         self.map_footprint_check.toggled.connect(self.map_view.set_footprint_visible)
         self.map_plan_footprints_check.toggled.connect(self.map_view.set_plan_footprints_visible)
+        self.map_frames_check.toggled.connect(self.map_view.set_frames_visible)
         self.map_goal_button.toggled.connect(self.map_view.set_goal_mode)
         self.map_view.goal_selected.connect(self._publish_map_goal)
         for text, action in (

@@ -24,6 +24,13 @@ odom frame; it is placed with LocalizationMonitor's map->odom, like the robot.
 So is the footprint: the local costmap publishes it (with the arm-aware
 dynamic footprint when that runs) already at the robot's odom pose, at its
 update rate, so it can trail the arrow by a fraction of a second.
+
+The map and odom TF frames are drawn as RViz-style axes (x red, y green):
+map at the scene origin, odom at the map->odom that /tf carries. /tf also
+carries every joint transform, all deserialized in Python, so it is only
+subscribed while the frames are shown. The robot, costmap and footprint
+stay placed with LocalizationMonitor's map->odom, which /tf's can lead or
+trail by up to one localization update.
 """
 
 import math
@@ -37,12 +44,16 @@ from PyQt5.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
     QTransform,
 )
-from PyQt5.QtWidgets import QGraphicsItem, QGraphicsPathItem, QGraphicsScene, QGraphicsView
+from PyQt5.QtWidgets import (
+    QGraphicsItem, QGraphicsLineItem, QGraphicsPathItem, QGraphicsScene,
+    QGraphicsSimpleTextItem, QGraphicsView,
+)
 from rclpy.exceptions import InvalidHandle
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from geometry_msgs.msg import PolygonStamped
 from nav_msgs.msg import OccupancyGrid, Path
+from tf2_msgs.msg import TFMessage
 from visualization_msgs.msg import Marker, MarkerArray
 
 from .localization_monitor import OFFLINE
@@ -62,9 +73,12 @@ LOCAL_COSTMAP_TOPIC = '/local_costmap/costmap'
 FOOTPRINT_TOPIC = '/local_costmap/published_footprint'
 FOOTPRINT_TIMEOUT = 2.0     # (s) hide the footprint when Nav2 stops publishing it
 PLAN_FOOTPRINTS_TOPIC = '/plan_footprints'   # navi_wall plan_footprint_visualizer
+TF_TOPIC = '/tf'
+TF_TIMEOUT = 2.0            # (s) hide odom when /tf stops carrying map->odom
 
 MAP_REDRAW_PERIOD = 2.0     # (s) at most one grid -> image conversion per period
 ROBOT_LENGTH = 0.7          # (m) drawn robot arrow
+FRAME_AXIS_LENGTH = 1.0     # (m) drawn TF frame axes
 SCENE_MARGIN = 20.0         # (m) pannable space around the map
 GOAL_MIN_DRAG = 0.05        # (m) shorter drags keep the heading at 0 (+x), as in RViz
 ROTATE_DEAD_ZONE = 10       # (px) around the view centre, where the drag angle is unstable
@@ -118,7 +132,7 @@ UNKNOWN_COLOR = QColor('#8a9099')
 
 
 class MapOverlays:
-    """Latest /map, /plan, Nav2 goal status, footprints and walls, filled on the monitor thread."""
+    """Latest /map, /plan, Nav2 goal status, footprints, walls and map->odom, filled on the monitor thread."""
 
     def __init__(self, node):
         self._node = node
@@ -137,13 +151,16 @@ class MapOverlays:
         self.footprint = None       # (frame_id, [(x, y)], monotonic receive time)
         self.plan_footprints = {}   # (ns, id) -> (frame_id, [(x, y)], (r, g, b, a))
         self.plan_footprints_version = 0
+        self.map_to_odom = None     # ((x, y, yaw), monotonic receive time) from /tf
         self._map_enabled = True
         self._map_subscription = None
         self._costmap_enabled = True
         self._costmap_subscription = None
         self._plan_footprints_enabled = False
         self._plan_footprints_subscription = None
-        self._guard = node.create_guard_condition(self._sync_subscriptions)
+        self._tf_enabled = True
+        self._tf_subscription = None
+        self._guard =node.create_guard_condition(self._sync_subscriptions)
 
     def set_active(self, active):
         """Subscribe (True) or unsubscribe (False); safe from the UI thread."""
@@ -179,6 +196,11 @@ class MapOverlays:
             with self._lock:    # never draw outlines of an old plan
                 self.plan_footprints = {}
                 self.plan_footprints_version += 1
+        self._trigger_sync()
+
+    def set_tf_enabled(self, enabled):
+        """Subscribe to /tf only while the frames are shown; safe from the UI thread."""
+        self._tf_enabled = enabled
         self._trigger_sync()
 
     def _trigger_sync(self):
@@ -224,6 +246,13 @@ class MapOverlays:
         elif not want_plan_footprints and self._plan_footprints_subscription is not None:
             self._node.destroy_subscription(self._plan_footprints_subscription)
             self._plan_footprints_subscription = None
+        want_tf = self._active and self._tf_enabled
+        if want_tf and self._tf_subscription is None:
+            self._tf_subscription = self._node.create_subscription(
+                TFMessage, TF_TOPIC, self._on_tf, QoSProfile(depth=100))
+        elif not want_tf and self._tf_subscription is not None:
+            self._node.destroy_subscription(self._tf_subscription)
+            self._tf_subscription = None
 
     def _on_map(self, msg):
         with self._lock:
@@ -270,6 +299,14 @@ class MapOverlays:
             self.plan_footprints = markers
             self.plan_footprints_version += 1
 
+    def _on_tf(self, msg):
+        for t in msg.transforms:
+            if t.header.frame_id.lstrip('/') == 'map' and t.child_frame_id.lstrip('/') == 'odom':
+                tr = t.transform
+                pose = (tr.translation.x, tr.translation.y, _yaw(tr.rotation))
+                with self._lock:
+                    self.map_to_odom = (pose, time.monotonic())
+
     def _on_nav_status(self, msg):
         with self._lock:
             self.nav_active = any(s.status in _ACTIVE_GOAL for s in msg.status_list)
@@ -292,6 +329,7 @@ class MapOverlays:
                 'footprint': self.footprint,
                 'plan_footprints': list(self.plan_footprints.values()) if self.nav_active else [],
                 'plan_footprints_version': (self.plan_footprints_version, self.nav_active),
+                'map_to_odom': self.map_to_odom,
             }
 
 
@@ -360,6 +398,11 @@ class MapView(QGraphicsView):
         self._plan_footprints_item.setZValue(1.5)
         self._plan_footprints_item.hide()
 
+        self.show_frames = True
+        self._map_frame_item = self._frame_axes('map')
+        self._odom_frame_item = self._frame_axes('odom')
+        self._odom_frame_item.hide()
+
         self._sigma_item = self._scene.addEllipse(QRectF(), self._pen('#8b949e', 1))
         self._sigma_item.setZValue(3)
         self._robot_item = self._scene.addPolygon(
@@ -393,6 +436,22 @@ class MapView(QGraphicsView):
         l = ROBOT_LENGTH
         return QPolygonF([QPointF(l * 0.6, 0.0), QPointF(-l * 0.4, l * 0.35),
                           QPointF(-l * 0.2, 0.0), QPointF(-l * 0.4, -l * 0.35)])
+
+    def _frame_axes(self, name):
+        """Empty parent of a TF frame's x (red) and y (green) axes and its name,
+        placed and rotated as one, at the frame's origin."""
+        frame = self._scene.addPath(QPainterPath(), QPen(Qt.NoPen))
+        frame.setZValue(2.8)
+        l = FRAME_AXIS_LENGTH
+        for end, color in ((QPointF(l, 0.0), '#e5534b'), (QPointF(0.0, -l), '#2ea043')):
+            axis = QGraphicsLineItem(0.0, 0.0, end.x(), end.y(), frame)
+            axis.setPen(self._pen(color, 3))
+        label = QGraphicsSimpleTextItem(name, frame)
+        label.setFont(QFont('Sans Serif', 9, QFont.Bold))
+        label.setBrush(QBrush(QColor('#22272e')))
+        label.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        label.setPos(0.1, 0.1)
+        return frame
 
     @staticmethod
     def _polyline(points):
@@ -615,6 +674,15 @@ class MapView(QGraphicsView):
         if not visible:
             self._plan_footprints_item.hide()
 
+    # ── TF frames ──
+
+    def set_frames_visible(self, visible):
+        self.show_frames = visible
+        self.overlays.set_tf_enabled(visible)
+        if not visible:
+            self._map_frame_item.hide()
+            self._odom_frame_item.hide()
+
     # ── drawing ──
 
     def refresh(self, state):
@@ -638,6 +706,7 @@ class MapView(QGraphicsView):
             self._goal_item.hide()
         self._update_footprint(data['footprint'])
         self._update_plan_footprints(data['plan_footprints'], data['plan_footprints_version'])
+        self._update_frames(data['map_to_odom'])
         self._update_robot(state)
 
         grid = data['grid']
@@ -658,6 +727,8 @@ class MapView(QGraphicsView):
                 info = costmap.info
                 parts.append(f'costmap {info.width * info.resolution:.0f}×'
                              f'{info.height * info.resolution:.0f} m')
+        if self.show_frames and not self._odom_on_tf(data['map_to_odom']):
+            parts.append(f'no map→odom on {TF_TOPIC}')
         if WallArray is None:
             parts.append('walls: navi_wall not built')
         else:
@@ -777,6 +848,21 @@ class MapView(QGraphicsView):
             for item in (line, label):
                 item.setVisible(self.show_walls)
             self._wall_items += [line, label]
+
+    def _odom_on_tf(self, map_to_odom):
+        return map_to_odom is not None and time.monotonic() - map_to_odom[1] <= TF_TIMEOUT
+
+    def _update_frames(self, map_to_odom):
+        if not self.show_frames:
+            return
+        self._map_frame_item.show()
+        if not self._odom_on_tf(map_to_odom):
+            self._odom_frame_item.hide()
+            return
+        (tx, ty, th), _ = map_to_odom
+        self._odom_frame_item.setPos(_scene(tx, ty))
+        self._odom_frame_item.setRotation(-math.degrees(th))
+        self._odom_frame_item.show()
 
     def _update_robot(self, state):
         located = self._monitor.robot_pose()
