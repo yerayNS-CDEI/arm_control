@@ -7304,6 +7304,13 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             "Nav2's /local_costmap/published_footprint (arm-aware when the\n"
             "dynamic footprint publisher runs).")
         options.addWidget(self.map_footprint_check)
+        self.map_plan_footprints_check = QCheckBox("Plan footprints")
+        self.map_plan_footprints_check.setChecked(False)
+        self.map_plan_footprints_check.setToolTip(
+            "/plan_footprints: the footprint along Nav2's plan at its planned headings\n"
+            "(navi_wall plan_footprint_visualizer, runs with the dynamic footprint).\n"
+            "Subscribed only while shown and the Viz tab is visible.")
+        options.addWidget(self.map_plan_footprints_check)
         column.addWidget(fsm_graph_group, 1)
 
         toolbar = QHBoxLayout()
@@ -7339,6 +7346,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.map_walls_check.toggled.connect(self.map_view.set_walls_visible)
         self.map_costmap_check.toggled.connect(self.map_view.set_costmap_visible)
         self.map_footprint_check.toggled.connect(self.map_view.set_footprint_visible)
+        self.map_plan_footprints_check.toggled.connect(self.map_view.set_plan_footprints_visible)
         self.map_goal_button.toggled.connect(self.map_view.set_goal_mode)
         self.map_view.goal_selected.connect(self._publish_map_goal)
         for text, action in (
@@ -7356,7 +7364,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         legend = QLabel(
             "Robot arrow + σ circle in the Localization colour, "
             "<span style='color:#22272e;'>▭ Nav2 footprint</span> · "
-            "<span style='color:#1f6feb;'>━ Nav2 path, ▷ goal</span> · walls: "
+            "<span style='color:#1f6feb;'>━ Nav2 path, ▷ goal</span>, "
+            "<span style='color:#1aff4d;'>▭</span>→<span style='color:#1a33ff;'>▭</span> plan footprints · walls: "
             "<span style='color:#2ea043;'>━ refined</span> "
             "<span style='color:#d29922;'>━ unrefined</span> "
             "<span style='color:#d63ad6;'>━ two-sided</span> · costmap: "

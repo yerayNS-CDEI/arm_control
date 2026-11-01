@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 2D map view for the control UI: RTAB-Map's occupancy grid with the robot,
-its Nav2 footprint, Nav2's path/goal, its local costmap and the detected
-walls drawn on top (an
+its Nav2 footprint, Nav2's path/goal (optionally with the footprint along
+it), its local costmap and the detected walls drawn on top (an
 RViz stand-in that costs a QGraphicsScene instead of an OpenGL point-cloud
 renderer).
 
@@ -37,12 +37,13 @@ from PyQt5.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
     QTransform,
 )
-from PyQt5.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsView
+from PyQt5.QtWidgets import QGraphicsItem, QGraphicsPathItem, QGraphicsScene, QGraphicsView
 from rclpy.exceptions import InvalidHandle
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from geometry_msgs.msg import PolygonStamped
 from nav_msgs.msg import OccupancyGrid, Path
+from visualization_msgs.msg import Marker, MarkerArray
 
 from .localization_monitor import OFFLINE
 
@@ -60,6 +61,7 @@ WALLS_TOPIC = '/wall_detection_node/walls'
 LOCAL_COSTMAP_TOPIC = '/local_costmap/costmap'
 FOOTPRINT_TOPIC = '/local_costmap/published_footprint'
 FOOTPRINT_TIMEOUT = 2.0     # (s) hide the footprint when Nav2 stops publishing it
+PLAN_FOOTPRINTS_TOPIC = '/plan_footprints'   # navi_wall plan_footprint_visualizer
 
 MAP_REDRAW_PERIOD = 2.0     # (s) at most one grid -> image conversion per period
 ROBOT_LENGTH = 0.7          # (m) drawn robot arrow
@@ -79,6 +81,10 @@ _ACTIVE_GOAL = (GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING,
 def _scene(x, y):
     """Map frame (y up) -> scene (y down)."""
     return QPointF(x, -y)
+
+
+def _yaw(q):
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
 
 def _grid_lut():
@@ -112,7 +118,7 @@ UNKNOWN_COLOR = QColor('#8a9099')
 
 
 class MapOverlays:
-    """Latest /map, /plan, Nav2 goal status, footprint and walls, filled on the monitor thread."""
+    """Latest /map, /plan, Nav2 goal status, footprints and walls, filled on the monitor thread."""
 
     def __init__(self, node):
         self._node = node
@@ -129,10 +135,14 @@ class MapOverlays:
         self.costmap = None         # latest local costmap OccupancyGrid
         self.costmap_version = 0
         self.footprint = None       # (frame_id, [(x, y)], monotonic receive time)
+        self.plan_footprints = {}   # (ns, id) -> (frame_id, [(x, y)], (r, g, b, a))
+        self.plan_footprints_version = 0
         self._map_enabled = True
         self._map_subscription = None
         self._costmap_enabled = True
         self._costmap_subscription = None
+        self._plan_footprints_enabled = False
+        self._plan_footprints_subscription = None
         self._guard = node.create_guard_condition(self._sync_subscriptions)
 
     def set_active(self, active):
@@ -160,6 +170,15 @@ class MapOverlays:
             with self._lock:    # never draw a costmap left over from before
                 self.costmap = None
                 self.costmap_version += 1
+        self._trigger_sync()
+
+    def set_plan_footprints_enabled(self, enabled):
+        """Subscribe to /plan_footprints only while it is shown; safe from the UI thread."""
+        self._plan_footprints_enabled = enabled
+        if enabled:
+            with self._lock:    # never draw outlines of an old plan
+                self.plan_footprints = {}
+                self.plan_footprints_version += 1
         self._trigger_sync()
 
     def _trigger_sync(self):
@@ -198,6 +217,13 @@ class MapOverlays:
         elif not want_costmap and self._costmap_subscription is not None:
             self._node.destroy_subscription(self._costmap_subscription)
             self._costmap_subscription = None
+        want_plan_footprints = self._active and self._plan_footprints_enabled
+        if want_plan_footprints and self._plan_footprints_subscription is None:
+            self._plan_footprints_subscription = self._node.create_subscription(
+                MarkerArray, PLAN_FOOTPRINTS_TOPIC, self._on_plan_footprints, QoSProfile(depth=1))
+        elif not want_plan_footprints and self._plan_footprints_subscription is not None:
+            self._node.destroy_subscription(self._plan_footprints_subscription)
+            self._plan_footprints_subscription = None
 
     def _on_map(self, msg):
         with self._lock:
@@ -219,12 +245,30 @@ class MapOverlays:
         goal = None
         if msg.poses:
             pose = msg.poses[-1].pose
-            q = pose.orientation
-            yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-            goal = (pose.position.x, pose.position.y, yaw)
+            goal = (pose.position.x, pose.position.y, _yaw(pose.orientation))
         with self._lock:
             self.path = path
             self.goal = goal
+
+    def _on_plan_footprints(self, msg):
+        # The visualizer sends DELETEALL and then one LINE_STRIP outline per pose.
+        with self._lock:
+            markers = dict(self.plan_footprints)
+        for m in msg.markers:
+            if m.action == Marker.DELETEALL:
+                markers.clear()
+            elif m.action == Marker.ADD and m.type == Marker.LINE_STRIP:
+                p = m.pose.position
+                yaw = _yaw(m.pose.orientation)
+                c, s = math.cos(yaw), math.sin(yaw)
+                points = [(p.x + c * q.x - s * q.y, p.y + s * q.x + c * q.y) for q in m.points]
+                markers[(m.ns, m.id)] = (m.header.frame_id.lstrip('/'), points,
+                                         (m.color.r, m.color.g, m.color.b, m.color.a))
+            else:
+                markers.pop((m.ns, m.id), None)
+        with self._lock:
+            self.plan_footprints = markers
+            self.plan_footprints_version += 1
 
     def _on_nav_status(self, msg):
         with self._lock:
@@ -246,6 +290,8 @@ class MapOverlays:
                 'walls': self.walls, 'walls_version': self.walls_version,
                 'costmap': self.costmap, 'costmap_version': self.costmap_version,
                 'footprint': self.footprint,
+                'plan_footprints': list(self.plan_footprints.values()) if self.nav_active else [],
+                'plan_footprints_version': (self.plan_footprints_version, self.nav_active),
             }
 
 
@@ -305,6 +351,14 @@ class MapView(QGraphicsView):
             QPolygonF(), self._pen('#22272e', 2), QBrush(QColor(34, 39, 46, 40)))
         self._footprint_item.setZValue(2.5)
         self._footprint_item.hide()
+
+        # Empty parent of the plan footprint outlines, placed and shown as one.
+        self.show_plan_footprints = False
+        self._plan_footprints_version = None
+        self._plan_footprints_frame = 'map'
+        self._plan_footprints_item = self._scene.addPath(QPainterPath(), QPen(Qt.NoPen))
+        self._plan_footprints_item.setZValue(1.5)
+        self._plan_footprints_item.hide()
 
         self._sigma_item = self._scene.addEllipse(QRectF(), self._pen('#8b949e', 1))
         self._sigma_item.setZValue(3)
@@ -553,6 +607,14 @@ class MapView(QGraphicsView):
         if not visible:
             self._footprint_item.hide()
 
+    # ── footprint along the plan ──
+
+    def set_plan_footprints_visible(self, visible):
+        self.show_plan_footprints = visible
+        self.overlays.set_plan_footprints_enabled(visible)
+        if not visible:
+            self._plan_footprints_item.hide()
+
     # ── drawing ──
 
     def refresh(self, state):
@@ -575,6 +637,7 @@ class MapView(QGraphicsView):
         else:
             self._goal_item.hide()
         self._update_footprint(data['footprint'])
+        self._update_plan_footprints(data['plan_footprints'], data['plan_footprints_version'])
         self._update_robot(state)
 
         grid = data['grid']
@@ -601,6 +664,8 @@ class MapView(QGraphicsView):
             parts.append(f'{len(data["walls"])} walls')
         if data['goal'] is not None:
             parts.append(f'navigating, path {len(data["path"])} poses')
+            if self.show_plan_footprints:
+                parts.append(f'{len(data["plan_footprints"])} plan footprints')
         return ' · '.join(parts)
 
     def _update_grid(self, grid, version):
@@ -670,6 +735,26 @@ class MapView(QGraphicsView):
         self._footprint_item.setPolygon(QPolygonF(
             [_scene(tx + c * x - s * y, ty + s * x + c * y) for x, y in points]))
         self._footprint_item.show()
+
+    def _update_plan_footprints(self, markers, version):
+        if version != self._plan_footprints_version:
+            self._plan_footprints_version = version
+            for item in self._plan_footprints_item.childItems():
+                self._scene.removeItem(item)
+            for frame, points, (r, g, b, a) in markers:
+                item = QGraphicsPathItem(self._polyline(points), self._plan_footprints_item)
+                item.setPen(self._pen(QColor.fromRgbF(r, g, b, a), 1))
+            # All from one /plan, so all in its frame.
+            self._plan_footprints_frame = markers[0][0] if markers else 'map'
+        if not self.show_plan_footprints or not markers:
+            self._plan_footprints_item.hide()
+            return
+        # Re-placed every refresh, like the costmap, in case the plan is not in map.
+        frame = self._plan_footprints_frame
+        tx, ty, th = (0.0, 0.0, 0.0) if frame == 'map' else self._monitor.map_to_odom()
+        self._plan_footprints_item.setPos(_scene(tx, ty))
+        self._plan_footprints_item.setRotation(-math.degrees(th))
+        self._plan_footprints_item.show()
 
     def _update_walls(self, walls, version):
         if version == self._walls_version:
