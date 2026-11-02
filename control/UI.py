@@ -4004,12 +4004,12 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         if 'mobile_platform' not in self.process_map:
             self.btn_launch_base_robot.setProperty('uses_gazebo', sim_mode == 'true')
 
-        self._toggle_base_process(
+        self._toggle_bringup_process(
             'mobile_platform',
             self.btn_launch_base_robot,
             'Base Robot',
-            'ros2',
             launch_args,
+            sim_mode,
         )
         self._update_tab_states_for_base()
 
@@ -4043,12 +4043,12 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         if 'full_mobile_manipulator' not in self.process_map:
             self.btn_full_control_launch.setProperty('uses_gazebo', sim_mode == 'true')
 
-        self._toggle_base_process(
+        self._toggle_bringup_process(
             'full_mobile_manipulator',
             self.btn_full_control_launch,
             'Full Robot',
-            'ros2',
             launch_args,
+            sim_mode,
         )
         self._update_tab_states_for_full_control()
 
@@ -5151,6 +5151,40 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self._pc2_keys[process_key] = remote_key
         self._toggle_base_process(process_key, button, name, 'ros2',
                                   [*args, *extra, 'stack:=control'])
+
+    def _toggle_bringup_process(self, process_key, button, name, args, sim_mode):
+        """_toggle_base_process for Base Robot / Full Robot. Run with
+        stack:=control on the real robot, they leave the joystick to PC2, where
+        its USB dongle is (reachable from outside the robot's cover): PC2 runs
+        joy_reader.launch.py through process_launcher, under _pc2_keys like a
+        split stack's perception half, so it stops with this launch or when
+        this launch dies. A PC2 that does not answer only costs the joystick."""
+        status_text = self.full_control_status_text if process_key.startswith('full') else self.base_status_text
+        if process_key in self.process_map:
+            remote_key = self._pc2_keys.pop(process_key, None)
+            if remote_key:
+                self._pc2_stop(remote_key, status_text, save_rtabmap=False, button=button)
+            self._toggle_base_process(process_key, button, name, 'ros2', args)
+            return
+        if 'stack:=control' in args and sim_mode != 'true':
+            from navi_wall.srv import StartLaunch
+            remote_key = f'ui_{process_key}_joy'
+            remote_cmd = ['ros2', 'launch', 'navi_wall', 'joy_reader.launch.py']
+            self._log_append(status_text, f"<b style='color:#986ee2;'>▶ [PC2] {html.escape(' '.join(remote_cmd))}</b>")
+            button.setEnabled(False)
+            try:
+                res = self._pc2_call('start', StartLaunch,
+                                     StartLaunch.Request(key=remote_key, cmd=remote_cmd), 15.0)
+            finally:
+                button.setEnabled(True)
+            if res is not None and res.success:
+                self._pc2_keys[process_key] = remote_key
+            else:
+                reason = res.message if res is not None else (
+                    f"no answer from {PC2_LAUNCHER}; is process_launcher running on PC2?")
+                self._log_append(status_text, f"<span style='color:#e3b341;'>⚠ No joystick: PC2 did "
+                                              f"not start its reader: {html.escape(reason)}</span>")
+        self._toggle_base_process(process_key, button, name, 'ros2', args)
 
     def _pc2_stop(self, remote_key, status_text, save_rtabmap, button=None):
         """Stop PC2's half of a manual launch, saving rtabmap there first."""
