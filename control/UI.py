@@ -225,6 +225,19 @@ class FsmGraphView(QGraphicsView):
         self._current = ''
         self._last_from = ''
         self._last_to = ''
+        # The graph usually arrives while its (Viz) tab is hidden, when the
+        # view does not have its real size yet: fit once it is shown.
+        self._fit_pending = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._fit_pending:
+            self.fit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._fit_pending and self.isVisible():
+            self.fit()
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -238,6 +251,7 @@ class FsmGraphView(QGraphicsView):
         self.scale(factor, factor)
 
     def fit(self):
+        self._fit_pending = not self.isVisible()
         self.resetTransform()
         self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
 
@@ -424,6 +438,8 @@ class RobotControlUI(QMainWindow):
         # and graph are latched like the current state; transitions are not.
         self._fsm_status = {}
         self._fsm_transition = None  # (from, to, reason)
+        # (last transition, summary) label pairs: FSM tab status box and Viz tab.
+        self.fsm_transition_summary_labels = []
         self.fsm_status_subscriber = self.node.create_subscription(
             String, '/fsm/status', self._on_fsm_status, fsm_state_qos)
         self.fsm_graph_subscriber = self.node.create_subscription(
@@ -1557,8 +1573,11 @@ class RobotControlUI(QMainWindow):
         # Add Full Control tab after Joint Control
         tabs.addTab(full_control_tab, "Full Control")
         tabs.addTab(self._create_gpr_api_test_tab(), "Sensors")
+        # The FSM graph lives in the Viz tab, but the FSM tab updates it while
+        # being built, so it is created first.
+        fsm_graph_group = self._create_fsm_graph_group()
         tabs.addTab(self._create_fsm_tab(), "FSM")
-        tabs.addTab(self._create_map_tab(), "Viz")
+        tabs.addTab(self._create_map_tab(fsm_graph_group), "Viz")
         self._demo_tab_page = self._create_demo_tab()
         tabs.addTab(self._demo_tab_page, "Demo")
 
@@ -7174,7 +7193,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         btn_clear_fsm_status.setMaximumWidth(80)
         fsm_status_header.addWidget(btn_clear_fsm_status)
 
-        # ── Split: output log (left) | status + graph (right) ──
+        # ── Split: output log (left) | status (right; the graph is in the Viz tab) ──
         fsm_split = QSplitter(Qt.Horizontal)
         fsm_log_pane = QWidget()
         fsm_log_layout = QVBoxLayout(fsm_log_pane)
@@ -7197,7 +7216,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         fsm_split.addWidget(fsm_log_pane)
         fsm_split.addWidget(self._create_fsm_telemetry_pane())
         fsm_split.setStretchFactor(0, 3)
-        fsm_split.setStretchFactor(1, 2)
+        fsm_split.setStretchFactor(1, 1)
         fsm_split.setChildrenCollapsible(False)
         fsm_tab_layout.addWidget(fsm_split, 1)
         self._update_fsm_restart_ui()
@@ -7220,7 +7239,7 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         return fsm_tab
 
     def _create_fsm_telemetry_pane(self):
-        """Status fields and state graph from the /fsm/* telemetry topics."""
+        """Status fields from the /fsm/* telemetry topics."""
         pane = QWidget()
         layout = QVBoxLayout(pane)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -7229,29 +7248,40 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         form = QFormLayout(status_group)
         self.fsm_current_state_label = QLabel("—")
         self.fsm_current_state_label.setStyleSheet("font-weight: bold;")
-        self.fsm_transition_label = QLabel("—")
         self.fsm_phase_label = QLabel("—")
-        self.fsm_summary_label = QLabel("—")
         self.fsm_elapsed_label = QLabel("—")
         self.fsm_progress_label = QLabel("—")
-        for label in (self.fsm_transition_label, self.fsm_summary_label):
-            label.setWordWrap(True)
         form.addRow("Current state:", self.fsm_current_state_label)
-        form.addRow("Last transition:", self.fsm_transition_label)
+        self._build_fsm_transition_summary_rows(form)
         form.addRow("Phase:", self.fsm_phase_label)
-        form.addRow("Summary:", self.fsm_summary_label)
         form.addRow("Elapsed:", self.fsm_elapsed_label)
         form.addRow("Progress:", self.fsm_progress_label)
         self._build_localization_indicator(form)
         layout.addWidget(status_group)
+        layout.addStretch()
+        return pane
 
+    def _build_fsm_transition_summary_rows(self, form):
+        """Add "Last transition" and "Summary" rows, kept up to date by
+        _update_fsm_telemetry_ui, to a QFormLayout."""
+        transition, summary = QLabel("—"), QLabel("—")
+        for label in (transition, summary):
+            label.setWordWrap(True)
+        form.addRow("Last transition:", transition)
+        form.addRow("Summary:", summary)
+        self.fsm_transition_summary_labels.append((transition, summary))
+
+    def _create_fsm_graph_group(self):
+        """State graph from /fsm/graph, shown in the Viz tab next to the map."""
         graph_group = QGroupBox("FSM Graph")
         graph_layout = QVBoxLayout(graph_group)
         zoom_row = QHBoxLayout()
-        zoom_row.addWidget(QLabel("Mouse wheel to zoom"))
+        zoom_hint = QLabel("Wheel to zoom")
+        zoom_hint.setMinimumWidth(1)
+        zoom_row.addWidget(zoom_hint)
         zoom_row.addStretch()
         self.fsm_graph_view = FsmGraphView()
-        self.fsm_graph_view.setMinimumSize(280, 280)
+        self.fsm_graph_view.setMinimumSize(200, 200)
         for text, action in (
             ("-", lambda: self.fsm_graph_view.zoom(1.0 / 1.15)),
             ("Reset", self.fsm_graph_view.fit),
@@ -7263,16 +7293,33 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             zoom_row.addWidget(button)
         graph_layout.addLayout(zoom_row)
         graph_layout.addWidget(self.fsm_graph_view, 1)
-        layout.addWidget(graph_group, 1)
-        return pane
+        return graph_group
 
-    def _create_map_tab(self):
+    def _create_map_tab(self, fsm_graph_group):
         """Viz tab: 2D map with the robot, its footprint, Nav2 path/goal and detected walls (RViz stand-in)."""
         map_tab = QWidget()
         layout = QVBoxLayout(map_tab)
 
-        # View options in a column left of the map.
-        options = QVBoxLayout()
+        # View options, then the FSM graph, in a column left of the map. The
+        # options start collapsed behind a toggle so the graph gets the height.
+        options_pane = QWidget()
+        column = QVBoxLayout(options_pane)
+        column.setContentsMargins(0, 0, 0, 0)
+        options_toggle = QToolButton()
+        options_toggle.setText("Display")
+        options_toggle.setCheckable(True)
+        options_toggle.setAutoRaise(True)
+        options_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        options_toggle.setArrowType(Qt.RightArrow)
+        column.addWidget(options_toggle)
+        options_box = QWidget()
+        options_box.setVisible(False)
+        column.addWidget(options_box)
+        options_toggle.toggled.connect(options_box.setVisible)
+        options_toggle.toggled.connect(
+            lambda checked: options_toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow))
+        options = QVBoxLayout(options_box)
+        options.setContentsMargins(12, 0, 0, 0)
         self.map_follow_check = QCheckBox("Follow robot")
         self.map_follow_check.setChecked(True)
         options.addWidget(self.map_follow_check)
@@ -7298,7 +7345,20 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             "Nav2's /local_costmap/published_footprint (arm-aware when the\n"
             "dynamic footprint publisher runs).")
         options.addWidget(self.map_footprint_check)
-        options.addStretch()
+        self.map_plan_footprints_check = QCheckBox("Plan footprints")
+        self.map_plan_footprints_check.setChecked(False)
+        self.map_plan_footprints_check.setToolTip(
+            "/plan_footprints: the footprint along Nav2's plan at its planned headings\n"
+            "(navi_wall plan_footprint_visualizer, runs with the dynamic footprint).\n"
+            "Subscribed only while shown and the Viz tab is visible.")
+        options.addWidget(self.map_plan_footprints_check)
+        self.map_frames_check = QCheckBox("TF frames")
+        self.map_frames_check.setChecked(True)
+        self.map_frames_check.setToolTip(
+            "map and odom axes (x red, y green), odom at /tf's map->odom.\n"
+            "Subscribes to /tf only while shown and the Viz tab is visible.")
+        options.addWidget(self.map_frames_check)
+        column.addWidget(fsm_graph_group, 1)
 
         toolbar = QHBoxLayout()
         self.map_goal_button = QPushButton("2D Goal Pose")
@@ -7333,6 +7393,8 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         self.map_walls_check.toggled.connect(self.map_view.set_walls_visible)
         self.map_costmap_check.toggled.connect(self.map_view.set_costmap_visible)
         self.map_footprint_check.toggled.connect(self.map_view.set_footprint_visible)
+        self.map_plan_footprints_check.toggled.connect(self.map_view.set_plan_footprints_visible)
+        self.map_frames_check.toggled.connect(self.map_view.set_frames_visible)
         self.map_goal_button.toggled.connect(self.map_view.set_goal_mode)
         self.map_view.goal_selected.connect(self._publish_map_goal)
         for text, action in (
@@ -7347,24 +7409,20 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
         layout.addLayout(toolbar)
         layout.addLayout(info_row)
 
-        legend = QLabel(
-            "Robot arrow + σ circle in the Localization colour, "
-            "<span style='color:#22272e;'>▭ Nav2 footprint</span> · "
-            "<span style='color:#1f6feb;'>━ Nav2 path, ▷ goal</span> · walls: "
-            "<span style='color:#2ea043;'>━ refined</span> "
-            "<span style='color:#d29922;'>━ unrefined</span> "
-            "<span style='color:#d63ad6;'>━ two-sided</span> · costmap: "
-            "<span style='color:#1f78ff;'>■</span>→<span style='color:#ff3300;'>■</span> cost "
-            "<span style='color:#00bcd4;'>■ inscribed</span> "
-            "<span style='color:#6f42c1;'>■ lethal</span>")
-        legend.setTextFormat(Qt.RichText)
-        legend.setWordWrap(True)
-        layout.addWidget(legend)
+        fsm_form = QFormLayout()
+        self._build_fsm_transition_summary_rows(fsm_form)
+        layout.addLayout(fsm_form)
+        self._update_fsm_telemetry_ui()
         self._build_localization_indicator(layout)
-        map_row = QHBoxLayout()
-        map_row.addLayout(options)
-        map_row.addWidget(self.map_view, 1)
-        layout.addLayout(map_row, 1)
+        # Splitter so the column can be dragged wider to read the graph.
+        map_split = QSplitter(Qt.Horizontal)
+        map_split.addWidget(options_pane)
+        map_split.addWidget(self.map_view)
+        map_split.setStretchFactor(0, 0)
+        map_split.setStretchFactor(1, 1)
+        map_split.setSizes([300, 1000])
+        map_split.setChildrenCollapsible(False)
+        layout.addWidget(map_split, 1)
         return map_tab
 
     def _fit_map_view(self):
@@ -7870,12 +7928,13 @@ result is a zip file containing all b-scans, along with a CSV.""".strip(),
             text = f"{src} \u2192 {dst}" + (f" [{reason}]" if reason else "")
         else:
             text = dash
-        self.fsm_transition_label.setText(text)
+        colour = {'error': '#f47067', 'warn': '#e3b341'}.get(status.get('level'), '')
+        for transition_label, summary_label in self.fsm_transition_summary_labels:
+            transition_label.setText(text)
+            summary_label.setText(str(status.get('summary') or dash))
+            summary_label.setStyleSheet(f"color: {colour};" if colour else "")
 
         self.fsm_phase_label.setText(str(status.get('phase') or dash))
-        self.fsm_summary_label.setText(str(status.get('summary') or dash))
-        colour = {'error': '#f47067', 'warn': '#e3b341'}.get(status.get('level'), '')
-        self.fsm_summary_label.setStyleSheet(f"color: {colour};" if colour else "")
 
         elapsed = status.get('elapsed_s')
         if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
